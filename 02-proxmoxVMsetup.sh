@@ -158,7 +158,7 @@ function tty_read_yes_no_blocking() {
     fi
 
     while true; do
-        tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+        tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
 
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
@@ -296,7 +296,7 @@ function editable_input_loop() {
     local key=""
 
     while true; do
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [timer stopped - type value or ENTER for default]: ${CL}${answer}"
+        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
 
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
@@ -496,7 +496,8 @@ function timed_number_input() {
 }
 
 # --- 17. MENU SELECTION HELPER ---
-# Shows a numbered menu and returns the selected value.
+# Shows a numbered menu directly on the terminal and returns only the selected value.
+# Important: menu text goes to /dev/tty, not stdout, so command substitution captures only the final selected option.
 function timed_menu_select() {
     local title="$1"
     local default_index="$2"
@@ -505,14 +506,14 @@ function timed_menu_select() {
     local idx=""
     local selected=""
 
-    echo ""
-    echo -e "${BL}${title}:${CL}"
+    tty_println ""
+    tty_println "${BL}${title}:${CL}"
 
     for i in "${!options[@]}"; do
-        echo "$((i+1))) ${options[$i]}"
+        tty_println "$((i+1))) ${options[$i]}"
     done
 
-    idx=$(timed_number_input "Select option number" "$default_index" "1" "${#options[@]}")
+    idx=$(timed_number_input "Select ${title} option number" "$default_index" "1" "${#options[@]}")
     selected="${options[$((idx-1))]}"
 
     echo "$selected"
@@ -824,7 +825,7 @@ if [[ "$advanced_yn" =~ ^[Yy] ]]; then
 
     MACHINE_TYPE=$(timed_menu_select "Machine Type" "1" "q35" "i440fx")
     BIOS_TYPE=$(timed_menu_select "BIOS Type" "1" "ovmf" "seabios")
-    CPU_TYPE_VM=$(timed_text_input "CPU Type" "$CPU_TYPE_VM")
+    CPU_TYPE_VM=$(timed_menu_select "CPU Type" "1" "host" "x86-64-v2-AES" "x86-64-v3" "kvm64" "max")
 
     balloon_yn=$(timed_yes_no "Enable RAM Ballooning?" "n")
     [[ "$balloon_yn" =~ ^[Yy] ]] && BALLOONING_ENABLED="yes" || BALLOONING_ENABLED="no"
