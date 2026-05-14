@@ -94,7 +94,7 @@ function yes_no_label() {
 }
 
 # --- 9. BLOCKING YES/NO HELPER ---
-# SPACE pauses countdown and this waits for Y/N/ENTER.
+# SPACE pauses countdown and waits for Y/N/ENTER.
 function tty_read_yes_no_blocking() {
     local prompt="$1"
     local default="$2"
@@ -106,7 +106,8 @@ function tty_read_yes_no_blocking() {
     fi
 
     while true; do
-        tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+        tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
+
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
         else
@@ -126,7 +127,7 @@ function tty_read_yes_no_blocking() {
 }
 
 # --- 10. TIMED YES/NO PROMPT HELPER ---
-# SPACE pauses and waits. Timeout uses default. Final answer stays visible.
+# Uses wall-clock countdown. SPACE pauses and waits. Timeout accepts default.
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
@@ -134,13 +135,26 @@ function timed_yes_no() {
     local key=""
     local default_label="Y/n"
     local final_label=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
     if [[ "$default" =~ ^[Nn]$ ]]; then
         default_label="y/N"
     fi
 
-    for ((i=T; i>0; i--)); do
-        tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${remaining}s]${CL} "
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
@@ -180,27 +194,103 @@ function timed_yes_no() {
     echo "$answer"
 }
 
-# --- 11. TIMED TEXT INPUT HELPER ---
-# Reads normal text input with timeout and default.
+# --- 11. EDITABLE TEXT INPUT HELPER ---
+# Allows text input with countdown. Any typed character or SPACE pauses countdown.
+function editable_text_loop() {
+    local prompt="$1"
+    local default="$2"
+    local initial_value="${3:-}"
+    local answer="$initial_value"
+    local key=""
+
+    while true; do
+        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -rsn1 key < /dev/tty || true
+        else
+            IFS= read -rsn1 key || true
+        fi
+
+        case "$key" in
+            "")
+                [ -z "$answer" ] && answer="$default"
+                tty_print "${BFR}"
+                echo "$answer"
+                return 0
+                ;;
+            $'\177'|$'\b')
+                answer="${answer%?}"
+                ;;
+            *)
+                answer+="$key"
+                ;;
+        esac
+    done
+}
+
+# --- 12. TIMED TEXT INPUT HELPER ---
+# Uses Proxmox VM Setup style countdown and input behaviour.
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    tty_print "${YW}${prompt} [default: ${default}] (${T}s): ${CL}"
+    deadline=$(( $(date +%s) + T ))
 
-    if [ -r /dev/tty ]; then
-        IFS= read -r -t "$T" answer < /dev/tty || true
-    else
-        IFS= read -r -t "$T" answer || true
-    fi
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_text_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_text_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_text_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_text_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
 
     [ -z "$answer" ] && answer="$default"
+
+    tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+
     echo "$answer"
 }
 
-# --- 12. ROOT / SUDO COMMAND DETECTION ---
+# --- 13. ROOT / SUDO COMMAND DETECTION ---
 # Uses sudo when not root, otherwise runs commands directly.
 if [ "$EUID" -eq 0 ]; then
     SUDO_CMD=""
@@ -208,7 +298,7 @@ else
     SUDO_CMD="sudo"
 fi
 
-# --- 13. ENVIRONMENT DETECTION ---
+# --- 14. ENVIRONMENT DETECTION ---
 # Detects whether the script is running inside LXC or VM/bare Ubuntu.
 if grep -qa container=lxc /proc/1/environ 2>/dev/null; then
     IS_CONTAINER="yes"
@@ -216,53 +306,57 @@ else
     IS_VM="yes"
 fi
 
-# --- 14. START CONFIRMATION ---
+# --- 15. START CONFIRMATION ---
 # Starts Ubuntu VM/LXC setup.
 echo -e "${YW}This script will configure Ubuntu VM/LXC for Docker workloads.${CL}"
 start_yn=$(timed_yes_no "Start the Ubuntu VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 15. USERNAME INPUT ---
-# Creates or configures the target non-root admin user.
+# --- 16. USERNAME INPUT ---
+# Selects the admin user to configure.
 USERNAME=$(timed_text_input "Enter username" "$DEFAULT_USERNAME")
 
-# --- 16. FRESH SYSTEM / USER CHECK ---
-# If user already exists, warns and exits to avoid damaging an existing system.
+# --- 17. USER CHECK / CREATE LOGIC ---
+# If the user already exists, the script configures it instead of aborting.
 if id "$USERNAME" >/dev/null 2>&1; then
-    msg_error "User ${USERNAME} already exists. This does not look like a fresh system."
+    msg_ok "USER ${USERNAME} ALREADY EXISTS"
+else
+    msg_info "Creating user ${USERNAME}"
+    $SUDO_CMD useradd -m -s /bin/bash "$USERNAME"
+    $SUDO_CMD usermod -aG sudo "$USERNAME"
+    $SUDO_CMD passwd -l "$USERNAME" &>/dev/null || true
+    SUDO_USER_CREATED="yes"
+    msg_ok "USER CREATED"
 fi
 
-# --- 17. ROOT SSH KEY CHECK ---
-# Checks whether root has authorized_keys to copy to the new user.
-ROOT_KEYS="/root/.ssh/authorized_keys"
-if [ ! -s "$ROOT_KEYS" ]; then
-    msg_warn "No root SSH authorized_keys found. SSH key copy will be skipped."
+# --- 18. SSH KEY SOURCE CHECK ---
+# Uses existing user's SSH keys first, then root keys if available.
+SOURCE_KEYS=""
+
+if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then
+    SOURCE_KEYS="/home/${USERNAME}/.ssh/authorized_keys"
+elif [ -n "${SUDO_USER:-}" ] && [ -s "/home/${SUDO_USER}/.ssh/authorized_keys" ]; then
+    SOURCE_KEYS="/home/${SUDO_USER}/.ssh/authorized_keys"
+elif [ -s "/root/.ssh/authorized_keys" ]; then
+    SOURCE_KEYS="/root/.ssh/authorized_keys"
 fi
 
-# --- 18. USER CREATION ---
-# Creates the user with disabled password by default and sudo membership.
-msg_info "Creating user ${USERNAME}"
-
-$SUDO_CMD useradd -m -s /bin/bash "$USERNAME"
-$SUDO_CMD usermod -aG sudo "$USERNAME"
-$SUDO_CMD passwd -l "$USERNAME" &>/dev/null || true
-
-SUDO_USER_CREATED="yes"
-
-msg_ok "USER CREATED"
+if [ -z "$SOURCE_KEYS" ]; then
+    msg_warn "No SSH authorized_keys found. SSH password hardening will be skipped."
+fi
 
 # --- 19. SSH KEY COPY ---
-# Copies root SSH keys to the new user if keys exist.
-if [ -s "$ROOT_KEYS" ]; then
-    msg_info "Copying SSH keys to ${USERNAME}"
+# Copies detected SSH keys to the target user if needed.
+if [ -n "$SOURCE_KEYS" ]; then
+    msg_info "Configuring SSH keys for ${USERNAME}"
 
     $SUDO_CMD mkdir -p "/home/${USERNAME}/.ssh"
-    $SUDO_CMD cp "$ROOT_KEYS" "/home/${USERNAME}/.ssh/authorized_keys"
+    $SUDO_CMD cp "$SOURCE_KEYS" "/home/${USERNAME}/.ssh/authorized_keys"
     $SUDO_CMD chown -R "${USERNAME}:${USERNAME}" "/home/${USERNAME}/.ssh"
     $SUDO_CMD chmod 700 "/home/${USERNAME}/.ssh"
     $SUDO_CMD chmod 600 "/home/${USERNAME}/.ssh/authorized_keys"
 
-    msg_ok "SSH KEYS COPIED"
+    msg_ok "SSH KEYS CONFIGURED"
 fi
 
 # --- 20. SYSTEM UPDATE ---
@@ -305,7 +399,7 @@ UFW_ENABLED="yes"
 msg_ok "UFW FIREWALL ENABLED"
 
 # --- 23. SSH HARDENING ---
-# Disables password login and root login only if copied SSH keys exist for the new user.
+# Disables root SSH and password login only if SSH keys exist for the target user.
 if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then
     msg_info "Hardening SSH"
 
@@ -344,6 +438,7 @@ msg_ok "SYSTEM CLEANED"
 $SUDO_CMD bash -c "cat > '$COMPLETED_MARKER'" <<EOF
 Ubuntu VM Setup completed on: $(date)
 Username: $USERNAME
+User Created: $SUDO_USER_CREATED
 Container: $IS_CONTAINER
 VM: $IS_VM
 QEMU Agent: $QEMU_AGENT_INSTALLED
@@ -356,13 +451,14 @@ EOF
 echo ""
 echo -e "${GN}FINISHED!${CL}"
 echo -e "USERNAME: ${GN}${USERNAME}${CL}"
+echo -e "USER CREATED: ${GN}${SUDO_USER_CREATED}${CL}"
 echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_INSTALLED}${CL}"
 echo -e "UFW FIREWALL: ${GN}${UFW_ENABLED}${CL}"
 echo -e "SSH HARDENING: ${GN}${SSH_HARDENING_APPLIED}${CL}"
 echo ""
 
 if [ "$IS_VM" == "yes" ]; then
-    echo -e "${YW}Power off the VM now, then enable QEMU Guest Agent in Proxmox if not already enabled.${CL}"
+    echo -e "${YW}Power off the VM now, then enable/check QEMU Guest Agent in Proxmox if needed.${CL}"
 else
     echo -e "${YW}Reboot the container when ready.${CL}"
 fi

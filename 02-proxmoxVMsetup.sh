@@ -841,7 +841,7 @@ EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
 # Offers discrete GPU passthrough only if sysfs GPU detection found a discrete GPU.
 # Default is no for first Crea Social test because Docker/Postgres/Postiz do not require GPU initially.
 if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
-    gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "y")
+    gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "n")
     [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y"
 else
     ENABLE_GPU="n"
@@ -934,6 +934,7 @@ run_proxmox_cmd "creating VM ${VMID}" \
     --name "$VM_NAME" \
     --machine "$MACHINE_TYPE" \
     --bios "$BIOS_TYPE" \
+    --vga std \
     --ostype l26 \
     --cpu "$CPU_TYPE_VM" \
     --cores "$CPU_INPUT" \
@@ -997,7 +998,7 @@ if [ "$ENABLE_GPU" == "y" ]; then
     if [ -n "$GPU_PCI_ID" ]; then
         run_proxmox_cmd "attaching discrete GPU ${GPU_PCI_ID}" \
             qm set "$VMID" \
-            --hostpci0 "${GPU_PCI_ID},pcie=1,x-vga=1"
+            --hostpci0 "${GPU_PCI_ID},pcie=1"
 
         msg_ok "GPU PASSTHROUGH ENABLED (${GPU_PCI_ID})"
     else
@@ -1045,6 +1046,7 @@ echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
 echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
 echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
 echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
+echo -e "VGA DISPLAY: ${GN}std${CL}"
 echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
 echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
 echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
