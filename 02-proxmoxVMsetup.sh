@@ -51,6 +51,7 @@ GPU_DETECTION_STATUS="ok"
 STORAGE_ID=""
 STORAGE_TYPE=""
 EFI_FORMAT="raw"
+EFI_FORMAT_MODE="auto"
 ISO_PATH=""
 ENABLE_GPU="n"
 
@@ -60,6 +61,19 @@ CPU_INPUT=""
 RAM_GB_INPUT=""
 RAM_MB=""
 DISK_GB_INPUT=""
+
+ADVANCED_SETTINGS="n"
+MACHINE_TYPE="q35"
+BIOS_TYPE="ovmf"
+CPU_TYPE_VM="host"
+BALLOONING_ENABLED="no"
+BALLOON_VALUE="0"
+NETWORK_MODEL="virtio"
+QEMU_AGENT_ENABLED="yes"
+QEMU_AGENT_VALUE="enabled=1"
+DISK_CONTROLLER="virtio-scsi-single"
+DISCARD_ENABLED="yes"
+DISCARD_VALUE="on"
 
 # --- 3. HEADER FUNCTION ---
 # Displays the one-line Proxmox VM Setup banner.
@@ -481,7 +495,30 @@ function timed_number_input() {
     done
 }
 
-# --- 17. PHYSICAL RAM DETECTION HELPER ---
+# --- 17. MENU SELECTION HELPER ---
+# Shows a numbered menu and returns the selected value.
+function timed_menu_select() {
+    local title="$1"
+    local default_index="$2"
+    shift 2
+    local options=("$@")
+    local idx=""
+    local selected=""
+
+    echo ""
+    echo -e "${BL}${title}:${CL}"
+
+    for i in "${!options[@]}"; do
+        echo "$((i+1))) ${options[$i]}"
+    done
+
+    idx=$(timed_number_input "Select option number" "$default_index" "1" "${#options[@]}")
+    selected="${options[$((idx-1))]}"
+
+    echo "$selected"
+}
+
+# --- 18. PHYSICAL RAM DETECTION HELPER ---
 # Uses MemTotal and rounds up to physical GiB.
 # This fixes 16GB systems being detected as 15GB and defaulting to 11GB RAM.
 function detect_total_ram_gb() {
@@ -498,7 +535,7 @@ function detect_total_ram_gb() {
     echo $(( (mem_kb + gib_kb - 1) / gib_kb ))
 }
 
-# --- 18. PCI VENDOR NAME HELPER ---
+# --- 19. PCI VENDOR NAME HELPER ---
 # Converts PCI vendor IDs to readable GPU vendor names without calling lspci.
 function pci_vendor_name() {
     local vendor="$1"
@@ -512,7 +549,7 @@ function pci_vendor_name() {
     esac
 }
 
-# --- 19. SYSFS GPU DETECTION HELPER ---
+# --- 20. SYSFS GPU DETECTION HELPER ---
 # Detects GPUs through /sys/bus/pci/devices instead of lspci.
 # This avoids lspci hangs on some fresh Proxmox/laptop PCI states.
 function detect_gpus_sysfs() {
@@ -562,7 +599,7 @@ function detect_gpus_sysfs() {
     done
 }
 
-# --- 20. GPU SUMMARY HELPER ---
+# --- 21. GPU SUMMARY HELPER ---
 # Creates readable integrated/discrete GPU summary for the audit screen.
 function build_gpu_summary() {
     local out=""
@@ -584,7 +621,7 @@ function build_gpu_summary() {
     echo "${out%; }"
 }
 
-# --- 21. STORAGE LIST HELPER ---
+# --- 22. STORAGE LIST HELPER ---
 # Finds Proxmox storage suitable for VM images.
 # First tries content-aware pvesm status. If unsupported, safely falls back to all active storage.
 function get_storage_list() {
@@ -599,7 +636,7 @@ function get_storage_list() {
     echo "$list"
 }
 
-# --- 22. STORAGE TYPE HELPER ---
+# --- 23. STORAGE TYPE HELPER ---
 # Detects selected Proxmox storage type from pvesm status.
 function get_storage_type() {
     local storage="$1"
@@ -607,7 +644,7 @@ function get_storage_type() {
     pvesm status 2>/dev/null | awk -v s="$storage" 'NR>1 && $1==s {print $2; exit}'
 }
 
-# --- 23. EFI FORMAT HELPER ---
+# --- 24. EFI FORMAT HELPER ---
 # Chooses correct EFI disk format for selected storage type.
 # File-based storage supports qcow2; block/pool storage should use raw.
 function get_efi_format_for_storage_type() {
@@ -623,7 +660,29 @@ function get_efi_format_for_storage_type() {
     esac
 }
 
-# --- 24. PROXMOX VALIDATION ---
+# --- 25. YES/NO VALUE HELPER ---
+# Converts yes/no values into Proxmox qm values.
+function apply_boolean_values() {
+    if [ "$BALLOONING_ENABLED" == "yes" ]; then
+        BALLOON_VALUE="1"
+    else
+        BALLOON_VALUE="0"
+    fi
+
+    if [ "$QEMU_AGENT_ENABLED" == "yes" ]; then
+        QEMU_AGENT_VALUE="enabled=1"
+    else
+        QEMU_AGENT_VALUE="enabled=0"
+    fi
+
+    if [ "$DISCARD_ENABLED" == "yes" ]; then
+        DISCARD_VALUE="on"
+    else
+        DISCARD_VALUE="ignore"
+    fi
+}
+
+# --- 26. PROXMOX VALIDATION ---
 # Confirms the script is being run on Proxmox VE 9 or newer.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -635,7 +694,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 25. SYSTEM RESOURCE AUDIT ---
+# --- 27. SYSTEM RESOURCE AUDIT ---
 # Detects RAM, CPU cores and calculates adaptive default VM resources.
 msg_info "Auditing system resources"
 
@@ -650,7 +709,7 @@ DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
 
 msg_ok "SYSTEM RESOURCES DETECTED"
 
-# --- 26. SAFE SYSFS GPU AUDIT ---
+# --- 28. SAFE SYSFS GPU AUDIT ---
 # Detects GPU through sysfs only, avoiding lspci because lspci can hang on some fresh Proxmox/laptop systems.
 msg_info "Detecting GPU hardware"
 
@@ -664,7 +723,7 @@ else
     msg_ok "GPU DETECTION SKIPPED"
 fi
 
-# --- 27. SYSTEM AUDIT DISPLAY ---
+# --- 29. SYSTEM AUDIT DISPLAY ---
 # Shows available host resources and adaptive defaults before asking user inputs.
 echo ""
 echo -e "${DGN}SYSTEM AUDIT:${CL}"
@@ -681,12 +740,12 @@ fi
 
 echo "------------------------------------------------------"
 
-# --- 28. FINAL START CONFIRMATION ---
+# --- 30. FINAL START CONFIRMATION ---
 # Starts input collection after audit. No VM changes happen yet.
 start_yn=$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 29. USER VM CONFIGURATION INPUTS ---
+# --- 31. USER VM CONFIGURATION INPUTS ---
 # Collects VM ID, name, CPU, RAM and OS disk size using adaptive defaults.
 # This stage still does not create or modify any VM.
 VMID=$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")
@@ -697,7 +756,7 @@ DISK_GB_INPUT=$(timed_number_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB"
 
 RAM_MB=$(( RAM_GB_INPUT * 1024 ))
 
-# --- 30. ISO SELECTION ---
+# --- 32. ISO SELECTION ---
 # Lists ISO files from local storage and lets the user choose one with numeric validation.
 # Still input-only; no VM changes are made here.
 msg_info "Finding ISO images"
@@ -720,7 +779,7 @@ else
     ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
 fi
 
-# --- 31. STORAGE SELECTION ---
+# --- 33. STORAGE SELECTION ---
 # Lists Proxmox storage that supports images and lets the user choose where to place VM disks.
 # Still input-only; no VM changes are made here.
 msg_info "Finding Proxmox storage"
@@ -746,7 +805,7 @@ STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
 STORAGE_TYPE="$(get_storage_type "$STORAGE_ID")"
 EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
 
-# --- 32. GPU PASSTHROUGH OPTION ---
+# --- 34. GPU PASSTHROUGH OPTION ---
 # Offers discrete GPU passthrough only if sysfs GPU detection found a discrete GPU.
 # Still input-only; no VM changes are made here.
 if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
@@ -756,8 +815,42 @@ else
     ENABLE_GPU="n"
 fi
 
-# --- 33. FINAL APPLY CONFIRMATION ---
+# --- 35. ADVANCED SETTINGS PROMPT ---
+# Keeps Crea Social recommended defaults unless user chooses to edit advanced VM options.
+advanced_yn=$(timed_yes_no "Open Advanced VM Settings?" "n")
+
+if [[ "$advanced_yn" =~ ^[Yy] ]]; then
+    ADVANCED_SETTINGS="y"
+
+    MACHINE_TYPE=$(timed_menu_select "Machine Type" "1" "q35" "i440fx")
+    BIOS_TYPE=$(timed_menu_select "BIOS Type" "1" "ovmf" "seabios")
+    CPU_TYPE_VM=$(timed_text_input "CPU Type" "$CPU_TYPE_VM")
+
+    balloon_yn=$(timed_yes_no "Enable RAM Ballooning?" "n")
+    [[ "$balloon_yn" =~ ^[Yy] ]] && BALLOONING_ENABLED="yes" || BALLOONING_ENABLED="no"
+
+    NETWORK_MODEL=$(timed_menu_select "Network Model" "1" "virtio" "e1000" "e1000e" "vmxnet3")
+
+    agent_yn=$(timed_yes_no "Enable QEMU Guest Agent?" "y")
+    [[ "$agent_yn" =~ ^[Nn] ]] && QEMU_AGENT_ENABLED="no" || QEMU_AGENT_ENABLED="yes"
+
+    DISK_CONTROLLER=$(timed_menu_select "Disk Controller" "1" "virtio-scsi-single" "virtio-scsi-pci")
+
+    discard_yn=$(timed_yes_no "Enable Discard/TRIM?" "y")
+    [[ "$discard_yn" =~ ^[Nn] ]] && DISCARD_ENABLED="no" || DISCARD_ENABLED="yes"
+
+    EFI_FORMAT_MODE=$(timed_menu_select "EFI Format Mode" "1" "auto" "raw" "qcow2")
+
+    if [ "$EFI_FORMAT_MODE" == "raw" ] || [ "$EFI_FORMAT_MODE" == "qcow2" ]; then
+        EFI_FORMAT="$EFI_FORMAT_MODE"
+    fi
+fi
+
+apply_boolean_values
+
+# --- 36. FINAL APPLY CONFIRMATION ---
 # Last checkpoint before any Proxmox VM changes are made.
+# Shows every setting, including safe defaults and advanced options, whether advanced mode was used or not.
 echo ""
 echo -e "${BL}READY TO CREATE VM WITH THESE SETTINGS:${CL}"
 echo -e "VM ID: ${GN}${VMID}${CL}"
@@ -767,9 +860,22 @@ echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
 echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
 echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
 echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
-echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
 echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
 echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
+echo ""
+echo -e "${BL}VM PLATFORM SETTINGS:${CL}"
+echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
+echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
+echo -e "EFI FORMAT MODE: ${GN}${EFI_FORMAT_MODE}${CL}"
+echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
+echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
+echo -e "BALLOONING ENABLED: ${GN}${BALLOONING_ENABLED}${CL}"
+echo -e "BALLOON VALUE: ${GN}${BALLOON_VALUE}${CL}"
+echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
+echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
+echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
+echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
+echo -e "ADVANCED SETTINGS USED: ${GN}${ADVANCED_SETTINGS}${CL}"
 echo ""
 
 apply_yn=$(timed_yes_no "Create VM now?" "y")
@@ -779,49 +885,52 @@ apply_yn=$(timed_yes_no "Create VM now?" "y")
 #  PHASE 2: APPLY / CREATE VM ONLY AFTER ALL INPUTS
 # =========================================================
 
-# --- 34. VM ID CONFLICT CHECK ---
+# --- 37. VM ID CONFLICT CHECK ---
 # Checks conflict only after all input is collected, immediately before creation.
 if qm status "$VMID" >/dev/null 2>&1; then
     msg_error "VM ID ${VMID} already exists."
 fi
 
-# --- 35. VM CREATE ---
-# Creates Ubuntu/Linux VM with q35, OVMF, host CPU, fixed RAM, VirtIO network and QEMU guest agent enabled.
+# --- 38. VM CREATE ---
+# Creates Ubuntu/Linux VM using selected standard and advanced settings.
 msg_info "Creating VM ${VMID} (${VM_NAME})"
 
 qm create "$VMID" \
     --name "$VM_NAME" \
-    --machine q35 \
-    --bios ovmf \
+    --machine "$MACHINE_TYPE" \
+    --bios "$BIOS_TYPE" \
     --ostype l26 \
-    --cpu host \
+    --cpu "$CPU_TYPE_VM" \
     --cores "$CPU_INPUT" \
     --memory "$RAM_MB" \
-    --balloon 0 \
-    --net0 virtio,bridge=vmbr0 \
-    --agent enabled=1 \
+    --balloon "$BALLOON_VALUE" \
+    --net0 "${NETWORK_MODEL},bridge=vmbr0" \
+    --agent "$QEMU_AGENT_VALUE" \
     &>/dev/null
 
 msg_ok "VM CREATED"
 
-# --- 36. EFI DISK CONFIGURATION ---
-# Adds OVMF EFI disk with storage-compatible format.
-msg_info "Configuring EFI disk"
+# --- 39. EFI DISK CONFIGURATION ---
+# Adds OVMF EFI disk only when OVMF BIOS is selected.
+# SeaBIOS does not use an EFI disk.
+if [ "$BIOS_TYPE" == "ovmf" ]; then
+    msg_info "Configuring EFI disk"
 
-qm set "$VMID" --efidisk0 "${STORAGE_ID}:0,format=${EFI_FORMAT},efitype=4m,pre-enrolled-keys=0" &>/dev/null
+    qm set "$VMID" --efidisk0 "${STORAGE_ID}:0,format=${EFI_FORMAT},efitype=4m,pre-enrolled-keys=0" &>/dev/null
 
-msg_ok "EFI DISK CONFIGURED"
+    msg_ok "EFI DISK CONFIGURED"
+fi
 
-# --- 37. MAIN VM DISK CONFIGURATION ---
-# Adds main OS disk with virtio-scsi-single, discard and iothread for SSD/LVM-thin friendly behaviour.
+# --- 40. MAIN VM DISK CONFIGURATION ---
+# Adds main OS disk with selected disk controller, discard setting and iothread.
 msg_info "Configuring VM OS disk"
 
-qm set "$VMID" --scsihw virtio-scsi-single &>/dev/null
-qm set "$VMID" --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=on,iothread=1" &>/dev/null
+qm set "$VMID" --scsihw "$DISK_CONTROLLER" &>/dev/null
+qm set "$VMID" --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=${DISCARD_VALUE},iothread=1" &>/dev/null
 
 msg_ok "VM OS DISK CONFIGURED"
 
-# --- 38. ISO AND BOOT ORDER ---
+# --- 41. ISO AND BOOT ORDER ---
 # Attaches selected ISO if available and sets VM boot order.
 msg_info "Configuring VM boot"
 
@@ -833,7 +942,7 @@ qm set "$VMID" --boot order=scsi0\;ide2 &>/dev/null
 
 msg_ok "VM BOOT CONFIGURED"
 
-# --- 39. GPU PASSTHROUGH ATTACHMENT ---
+# --- 42. GPU PASSTHROUGH ATTACHMENT ---
 # Adds the first detected discrete GPU BDF to the VM after all other settings are applied.
 if [ "$ENABLE_GPU" == "y" ]; then
     msg_info "Attaching discrete GPU to VM"
@@ -848,22 +957,34 @@ if [ "$ENABLE_GPU" == "y" ]; then
     fi
 fi
 
-# --- 40. COMPLETION MARKER ---
+# --- 43. COMPLETION MARKER ---
 # Creates marker file so future checks can identify that this setup was already run.
 cat <<EOF > "$COMPLETED_MARKER"
 Proxmox VM Setup completed on: $(date)
 VMID: $VMID
 Name: $VM_NAME
 RAM: ${RAM_GB_INPUT}GB
-CPU: ${CPU_INPUT}
+CPU Cores: ${CPU_INPUT}
+OS Disk: ${DISK_GB_INPUT}GB
 Storage: ${STORAGE_ID}
 Storage Type: ${STORAGE_TYPE}
-EFI Format: ${EFI_FORMAT}
 ISO: ${ISO_PATH:-none}
 GPU Passthrough: ${ENABLE_GPU}
+Machine Type: ${MACHINE_TYPE}
+BIOS: ${BIOS_TYPE}
+EFI Format Mode: ${EFI_FORMAT_MODE}
+EFI Format: ${EFI_FORMAT}
+CPU Type: ${CPU_TYPE_VM}
+Ballooning Enabled: ${BALLOONING_ENABLED}
+Balloon Value: ${BALLOON_VALUE}
+Network Model: ${NETWORK_MODEL}
+QEMU Guest Agent: ${QEMU_AGENT_ENABLED}
+Disk Controller: ${DISK_CONTROLLER}
+Discard/TRIM: ${DISCARD_ENABLED}
+Advanced Settings Used: ${ADVANCED_SETTINGS}
 EOF
 
-# --- 41. FINAL SUMMARY ---
+# --- 44. FINAL SUMMARY ---
 # Shows final VM configuration.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
@@ -874,9 +995,17 @@ echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
 echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
 echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
 echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
-echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
 echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
 echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
+echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
+echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
+echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
+echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
+echo -e "BALLOONING: ${GN}${BALLOONING_ENABLED}${CL}"
+echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
+echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
+echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
+echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
 echo ""
 
 exit 0
