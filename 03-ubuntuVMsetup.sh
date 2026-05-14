@@ -36,6 +36,7 @@ SSH_HARDENING_APPLIED="no"
 QEMU_AGENT_INSTALLED="no"
 UFW_ENABLED="no"
 ROOT_EXPANDED="no"
+UBUNTU_PRO_ATTACHED="no"
 
 IS_CONTAINER="no"
 IS_VM="no"
@@ -49,6 +50,8 @@ ROOT_SOURCE=""
 ROOT_LV_PATH=""
 VG_NAME=""
 VG_FREE_BYTES="0"
+
+PRO_TOKEN=""
 
 # --- 3. HEADER FUNCTION ---
 # Displays the Ubuntu VM Setup banner.
@@ -72,6 +75,7 @@ function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
 # --- 5. LOGGING & ERROR HANDLING ---
 # Logs output and reports failing line.
+# Sensitive input such as Ubuntu Pro token is read silently from /dev/tty and is not printed.
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
 
@@ -316,7 +320,27 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 13. REBOOT COUNTDOWN HELPER ---
+# --- 13. HIDDEN INPUT HELPER ---
+# Reads sensitive input from terminal without echoing it.
+# Used for Ubuntu Pro token so it does not appear on-screen or in logs.
+function hidden_input() {
+    local prompt="$1"
+    local answer=""
+
+    tty_print "${YW}${prompt}: ${CL}"
+
+    if [ -r /dev/tty ]; then
+        IFS= read -rs answer < /dev/tty || true
+    else
+        IFS= read -rs answer || true
+    fi
+
+    tty_println ""
+
+    echo "$answer"
+}
+
+# --- 14. REBOOT COUNTDOWN HELPER ---
 # Shows a safe reboot countdown.
 # SPACE stops the reboot.
 # Uses sudo reboot when the script is not running as root.
@@ -358,7 +382,7 @@ function timed_reboot_countdown() {
     done
 }
 
-# --- 14. ROOT / SUDO DETECTION ---
+# --- 15. ROOT / SUDO DETECTION ---
 # Uses sudo when not root.
 if [ "$EUID" -eq 0 ]; then
     SUDO_CMD=""
@@ -366,7 +390,7 @@ else
     SUDO_CMD="sudo"
 fi
 
-# --- 15. SUDO VALIDATION ---
+# --- 16. SUDO VALIDATION ---
 # Validates sudo once near the start so authentication failures happen before changes.
 if [ -n "$SUDO_CMD" ]; then
     msg_info "Validating sudo access"
@@ -376,7 +400,7 @@ if [ -n "$SUDO_CMD" ]; then
     msg_ok "SUDO ACCESS CONFIRMED"
 fi
 
-# --- 16. ENVIRONMENT DETECTION ---
+# --- 17. ENVIRONMENT DETECTION ---
 # Detects whether system is VM or LXC container.
 msg_info "Detecting environment"
 
@@ -388,18 +412,18 @@ fi
 
 msg_ok "ENVIRONMENT DETECTED"
 
-# --- 17. START CONFIRMATION ---
+# --- 18. START CONFIRMATION ---
 # Starts Ubuntu VM/LXC setup.
 echo -e "${YW}This script will configure Ubuntu VM/LXC for Docker workloads.${CL}"
 
 start_yn=$(timed_yes_no "Start the Ubuntu VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 18. USERNAME INPUT ---
+# --- 19. USERNAME INPUT ---
 # Selects target non-root admin user.
 USERNAME=$(timed_text_input "Enter username" "$DEFAULT_USERNAME")
 
-# --- 19. USER EXISTENCE CHECK ---
+# --- 20. USER EXISTENCE CHECK ---
 # Detects whether the user already exists.
 msg_info "Checking existing user"
 
@@ -411,7 +435,7 @@ fi
 
 msg_ok "USER CHECK COMPLETE"
 
-# --- 20. SSH KEY SOURCE DETECTION ---
+# --- 21. SSH KEY SOURCE DETECTION ---
 # Detects best SSH key source automatically.
 # Priority:
 # 1. Target user's existing authorized_keys
@@ -430,7 +454,7 @@ fi
 
 msg_ok "SSH KEY DETECTION COMPLETE"
 
-# --- 21. USER CREATION ---
+# --- 22. USER CREATION ---
 # Creates user only if missing.
 # Existing Ubuntu installer user is reused safely.
 if [ "$EXISTING_USER" == "no" ]; then
@@ -447,7 +471,7 @@ else
     msg_ok "USER ${USERNAME} ALREADY EXISTS"
 fi
 
-# --- 22. SSH KEY CONFIGURATION ---
+# --- 23. SSH KEY CONFIGURATION ---
 # Configures SSH keys safely.
 # If source and destination are the same file, copy is skipped to avoid cp same-file failure.
 if [ -n "$SOURCE_KEYS" ]; then
@@ -470,8 +494,8 @@ else
     msg_warn "No SSH authorized_keys source found"
 fi
 
-# --- 23. SYSTEM UPDATE ---
-# Updates Ubuntu packages.
+# --- 24. SYSTEM UPDATE ---
+# Updates Ubuntu packages before optional Ubuntu Pro attachment and system configuration.
 msg_info "Updating system packages"
 
 $SUDO_CMD apt-get update &>/dev/null
@@ -480,7 +504,41 @@ $SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get -y autoremove &>/dev/null
 
 msg_ok "SYSTEM UPDATED"
 
-# --- 24. QEMU GUEST AGENT INSTALL ---
+# --- 25. UBUNTU PRO ATTACHMENT ---
+# Optionally attaches Ubuntu Pro using a token entered by the user.
+# The token is read silently and is not written to the log, marker file, or final summary.
+pro_yn=$(timed_yes_no "Attach Ubuntu Pro token?" "n")
+
+if [[ "$pro_yn" =~ ^[Yy] ]]; then
+    PRO_TOKEN="$(hidden_input "Enter Ubuntu Pro token")"
+
+    if [ -z "$PRO_TOKEN" ]; then
+        msg_warn "Ubuntu Pro token was empty. Skipping Ubuntu Pro attachment"
+    else
+        msg_info "Installing Ubuntu Pro client"
+
+        $SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-advantage-tools ubuntu-pro-client &>/dev/null || \
+        $SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-advantage-tools &>/dev/null
+
+        msg_ok "UBUNTU PRO CLIENT READY"
+
+        msg_info "Attaching Ubuntu Pro"
+
+        if printf '%s\n' "$PRO_TOKEN" | $SUDO_CMD pro attach "$PRO_TOKEN" &>/dev/null; then
+            UBUNTU_PRO_ATTACHED="yes"
+            msg_ok "UBUNTU PRO ATTACHED"
+        else
+            UBUNTU_PRO_ATTACHED="failed"
+            msg_warn "Ubuntu Pro attachment failed. Check token or run: sudo pro status"
+        fi
+
+        PRO_TOKEN=""
+    fi
+else
+    UBUNTU_PRO_ATTACHED="no"
+fi
+
+# --- 26. QEMU GUEST AGENT INSTALL ---
 # Installs qemu-guest-agent for Proxmox VM visibility and clean shutdown support.
 if [ "$IS_VM" == "yes" ]; then
     msg_info "Installing QEMU guest agent"
@@ -493,7 +551,7 @@ if [ "$IS_VM" == "yes" ]; then
     msg_ok "QEMU GUEST AGENT INSTALLED"
 fi
 
-# --- 25. ROOT FILESYSTEM LVM EXPANSION ---
+# --- 27. ROOT FILESYSTEM LVM EXPANSION ---
 # Detects if Ubuntu installed / on LVM and automatically expands it to use remaining free VG space.
 # This fixes Ubuntu Server installer behaviour where a 40GB Proxmox disk may only give / around 18GB.
 # No user interaction is required. If free LVM space exists, the script applies the expansion automatically.
@@ -527,7 +585,7 @@ else
     msg_ok "ROOT FILESYSTEM LVM EXPANSION NOT NEEDED"
 fi
 
-# --- 26. UFW FIREWALL SETUP ---
+# --- 28. UFW FIREWALL SETUP ---
 # Enables UFW baseline firewall.
 # Allows SSH, HTTP and HTTPS for Docker/Traefik workloads.
 msg_info "Configuring UFW firewall"
@@ -544,7 +602,7 @@ UFW_ENABLED="yes"
 
 msg_ok "UFW FIREWALL ENABLED"
 
-# --- 27. SSH HARDENING ---
+# --- 29. SSH HARDENING ---
 # Disables SSH password login and root login only if SSH keys exist.
 # This avoids lockout on systems where no authorized_keys are present.
 if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then
@@ -571,7 +629,7 @@ else
     msg_warn "SSH hardening skipped because SSH keys were not detected"
 fi
 
-# --- 28. SYSTEM CLEANUP ---
+# --- 30. SYSTEM CLEANUP ---
 # Cleans package cache and orphan packages.
 msg_info "Cleaning system"
 
@@ -580,8 +638,9 @@ $SUDO_CMD apt-get -y autoremove &>/dev/null
 
 msg_ok "SYSTEM CLEANED"
 
-# --- 29. COMPLETION MARKER ---
+# --- 31. COMPLETION MARKER ---
 # Stores successful setup information.
+# Ubuntu Pro token is intentionally not stored.
 msg_info "Writing completion marker"
 
 $SUDO_CMD bash -c "cat > '$COMPLETED_MARKER'" <<EOF
@@ -590,6 +649,7 @@ Username: $USERNAME
 User Created: $SUDO_USER_CREATED
 Container: $IS_CONTAINER
 VM: $IS_VM
+Ubuntu Pro Attached: $UBUNTU_PRO_ATTACHED
 QEMU Agent: $QEMU_AGENT_INSTALLED
 Root Expanded: $ROOT_EXPANDED
 UFW: $UFW_ENABLED
@@ -598,24 +658,25 @@ EOF
 
 msg_ok "COMPLETION MARKER WRITTEN"
 
-# --- 30. FINAL SUMMARY ---
+# --- 32. FINAL SUMMARY ---
 # Displays clean final setup summary.
 echo ""
 echo -e "${BL}UBUNTU VM SETUP SUMMARY${CL}"
 echo "------------------------------------------------------"
-echo -e "USERNAME:           ${GN}${USERNAME}${CL}"
-echo -e "USER CREATED:       ${GN}${SUDO_USER_CREATED}${CL}"
-echo -e "ENVIRONMENT:        ${GN}$([ "$IS_VM" == "yes" ] && echo "VM" || echo "LXC")${CL}"
-echo -e "QEMU GUEST AGENT:   ${GN}${QEMU_AGENT_INSTALLED}${CL}"
-echo -e "ROOT EXPANDED:      ${GN}${ROOT_EXPANDED}${CL}"
-echo -e "UFW FIREWALL:       ${GN}${UFW_ENABLED}${CL}"
-echo -e "SSH HARDENING:      ${GN}${SSH_HARDENING_APPLIED}${CL}"
-echo -e "LOG FILE:           ${GN}${LOG_FILE}${CL}"
+echo -e "USERNAME:             ${GN}${USERNAME}${CL}"
+echo -e "USER CREATED:         ${GN}${SUDO_USER_CREATED}${CL}"
+echo -e "ENVIRONMENT:          ${GN}$([ "$IS_VM" == "yes" ] && echo "VM" || echo "LXC")${CL}"
+echo -e "UBUNTU PRO ATTACHED:  ${GN}${UBUNTU_PRO_ATTACHED}${CL}"
+echo -e "QEMU GUEST AGENT:     ${GN}${QEMU_AGENT_INSTALLED}${CL}"
+echo -e "ROOT EXPANDED:        ${GN}${ROOT_EXPANDED}${CL}"
+echo -e "UFW FIREWALL:         ${GN}${UFW_ENABLED}${CL}"
+echo -e "SSH HARDENING:        ${GN}${SSH_HARDENING_APPLIED}${CL}"
+echo -e "LOG FILE:             ${GN}${LOG_FILE}${CL}"
 echo "------------------------------------------------------"
 echo -e "${GN}Ubuntu VM setup completed successfully.${CL}"
 echo ""
 
-# --- 31. REBOOT PROMPT ---
+# --- 33. REBOOT PROMPT ---
 # Offers safe reboot using sudo reboot when not root.
 reboot_yn=$(timed_yes_no "Reboot Ubuntu VM now?" "y")
 
