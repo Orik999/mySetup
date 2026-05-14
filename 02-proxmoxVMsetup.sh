@@ -151,7 +151,8 @@ function tty_read_yes_no_blocking() {
 }
 
 # --- 11. TIMED YES/NO PROMPT HELPER ---
-# Shows countdown. SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
+# Uses wall-clock countdown instead of loop-count countdown.
+# SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
@@ -159,13 +160,26 @@ function timed_yes_no() {
     local key=""
     local default_label="Y/n"
     local final_label=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
     if [[ "$default" =~ ^[Nn]$ ]]; then
         default_label="y/N"
     fi
 
-    for ((i=T; i>0; i--)); do
-        tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${remaining}s]${CL} "
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
@@ -227,56 +241,85 @@ function tty_read_text_blocking() {
     echo "$answer"
 }
 
-# --- 13. TIMED TEXT INPUT HELPER ---
-# Shows a live countdown for text input.
+# --- 13. BLOCKING TEXT INPUT WITH INITIAL KEY HELPER ---
+# Used when the user starts typing during countdown.
+# The first typed key pauses the countdown and becomes the first character of the answer.
+function tty_read_text_with_initial_key() {
+    local prompt="$1"
+    local default="$2"
+    local initial_key="$3"
+    local rest=""
+    local answer=""
+
+    answer="$initial_key"
+
+    tty_print "${BFR}${YW}${prompt} [default: ${default}] [typing - countdown paused]: ${CL}${answer}"
+
+    if [ -r /dev/tty ]; then
+        IFS= read -r rest < /dev/tty || true
+    else
+        IFS= read -r rest || true
+    fi
+
+    answer="${answer}${rest}"
+    [ -z "$answer" ] && answer="$default"
+
+    tty_print "${BFR}"
+    echo "$answer"
+}
+
+# --- 14. TIMED TEXT INPUT HELPER ---
+# Shows a live wall-clock countdown for text input.
 # SPACE pauses the timer and waits for typed input.
-# ENTER accepts typed value or default. Timeout accepts default.
+# Any typed character pauses the timer and waits for the rest of the input.
+# Timeout accepts default.
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
     local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    for ((i=T; i>0; i--)); do
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${i}s]: ${CL}${answer}"
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                case "$key" in
-                    " ")
-                        answer="$(tty_read_text_blocking "$prompt" "$default")"
-                        break
-                        ;;
-                    "")
-                        [ -z "$answer" ] && answer="$default"
-                        break
-                        ;;
-                    $'\177'|$'\b')
-                        answer="${answer%?}"
-                        ;;
-                    *)
-                        answer+="$key"
-                        ;;
-                esac
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_text_blocking "$prompt" "$default")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(tty_read_text_with_initial_key "$prompt" "$default" "$key")"
+                    break
+                fi
             fi
         else
             if IFS= read -rsn1 -t 1 key; then
-                case "$key" in
-                    " ")
-                        answer="$(tty_read_text_blocking "$prompt" "$default")"
-                        break
-                        ;;
-                    "")
-                        [ -z "$answer" ] && answer="$default"
-                        break
-                        ;;
-                    $'\177'|$'\b')
-                        answer="${answer%?}"
-                        ;;
-                    *)
-                        answer+="$key"
-                        ;;
-                esac
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_text_blocking "$prompt" "$default")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(tty_read_text_with_initial_key "$prompt" "$default" "$key")"
+                    break
+                fi
             fi
         fi
     done
@@ -289,7 +332,7 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 14. NUMERIC VALIDATION HELPER ---
+# --- 15. NUMERIC VALIDATION HELPER ---
 # Validates numeric input against optional minimum and maximum values.
 function validate_number() {
     local value="$1"
@@ -311,7 +354,7 @@ function validate_number() {
     return 0
 }
 
-# --- 15. NUMERIC ERROR HELPER ---
+# --- 16. NUMERIC ERROR HELPER ---
 # Shows a clear numeric validation error.
 function print_number_error() {
     local min_value="${1:-1}"
@@ -324,10 +367,88 @@ function print_number_error() {
     fi
 }
 
-# --- 16. TIMED NUMERIC INPUT HELPER ---
-# Shows a live countdown for numeric input.
-# SPACE pauses the timer and waits for typed input.
-# ENTER accepts typed number or default. Timeout accepts default.
+# --- 17. BLOCKING NUMERIC INPUT HELPER ---
+# Used when SPACE pauses a numeric prompt.
+# Waits for number input and validates after ENTER.
+function tty_read_number_blocking() {
+    local prompt="$1"
+    local default="$2"
+    local min_value="${3:-1}"
+    local max_value="${4:-}"
+    local answer=""
+
+    while true; do
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [timer stopped - type number or ENTER for default]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -r answer < /dev/tty || true
+        else
+            IFS= read -r answer || true
+        fi
+
+        [ -z "$answer" ] && answer="$default"
+
+        if validate_number "$answer" "$min_value" "$max_value"; then
+            tty_print "${BFR}"
+            echo "$answer"
+            return 0
+        fi
+
+        tty_print "${BFR}"
+        print_number_error "$min_value" "$max_value"
+    done
+}
+
+# --- 18. BLOCKING NUMERIC INPUT WITH INITIAL KEY HELPER ---
+# Used when the user starts typing during numeric countdown.
+# The first typed digit pauses the countdown and becomes the first digit.
+function tty_read_number_with_initial_key() {
+    local prompt="$1"
+    local default="$2"
+    local initial_key="$3"
+    local min_value="${4:-1}"
+    local max_value="${5:-}"
+    local rest=""
+    local answer=""
+
+    if ! [[ "$initial_key" =~ ^[0-9]$ ]]; then
+        print_number_error "$min_value" "$max_value"
+        echo "INVALID"
+        return 0
+    fi
+
+    while true; do
+        answer="$initial_key"
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [typing - countdown paused]: ${CL}${answer}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -r rest < /dev/tty || true
+        else
+            IFS= read -r rest || true
+        fi
+
+        answer="${answer}${rest}"
+        [ -z "$answer" ] && answer="$default"
+
+        if validate_number "$answer" "$min_value" "$max_value"; then
+            tty_print "${BFR}"
+            echo "$answer"
+            return 0
+        fi
+
+        tty_print "${BFR}"
+        print_number_error "$min_value" "$max_value"
+        echo "INVALID"
+        return 0
+    done
+}
+
+# --- 19. TIMED NUMERIC INPUT HELPER ---
+# Shows a live wall-clock countdown for numeric input.
+# SPACE pauses and waits.
+# Any digit pauses countdown and waits for ENTER.
+# Timeout accepts default.
 # Letters/symbols are rejected and the prompt repeats.
 function timed_number_input() {
     local prompt="$1"
@@ -336,67 +457,63 @@ function timed_number_input() {
     local max_value="${4:-}"
     local answer=""
     local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
     while true; do
         answer=""
+        deadline=$(( $(date +%s) + T ))
 
-        for ((i=T; i>0; i--)); do
-            tty_print "${BFR}${YW}${prompt} [default: ${default}] [${i}s]: ${CL}${answer}"
+        while true; do
+            now=$(date +%s)
+            remaining=$(( deadline - now ))
+
+            if [ "$remaining" -le 0 ]; then
+                answer="$default"
+                break
+            fi
+
+            tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
 
             if [ -r /dev/tty ]; then
                 if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                    case "$key" in
-                        " ")
-                            answer="$(tty_read_text_blocking "$prompt" "$default")"
-                            break
-                            ;;
-                        "")
-                            [ -z "$answer" ] && answer="$default"
-                            break
-                            ;;
-                        $'\177'|$'\b')
-                            answer="${answer%?}"
-                            ;;
-                        [0-9])
-                            answer+="$key"
-                            ;;
-                        *)
-                            tty_print "${BFR}"
-                            print_number_error "$min_value" "$max_value"
-                            answer="INVALID"
-                            break
-                            ;;
-                    esac
+                    if [[ "$key" == " " ]]; then
+                        answer="$(tty_read_number_blocking "$prompt" "$default" "$min_value" "$max_value")"
+                        break
+                    elif [[ -z "$key" ]]; then
+                        answer="$default"
+                        break
+                    elif [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer="$(tty_read_number_with_initial_key "$prompt" "$default" "$key" "$min_value" "$max_value")"
+                        break
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer="INVALID"
+                        break
+                    fi
                 fi
             else
                 if IFS= read -rsn1 -t 1 key; then
-                    case "$key" in
-                        " ")
-                            answer="$(tty_read_text_blocking "$prompt" "$default")"
-                            break
-                            ;;
-                        "")
-                            [ -z "$answer" ] && answer="$default"
-                            break
-                            ;;
-                        $'\177'|$'\b')
-                            answer="${answer%?}"
-                            ;;
-                        [0-9])
-                            answer+="$key"
-                            ;;
-                        *)
-                            tty_print "${BFR}"
-                            print_number_error "$min_value" "$max_value"
-                            answer="INVALID"
-                            break
-                            ;;
-                    esac
+                    if [[ "$key" == " " ]]; then
+                        answer="$(tty_read_number_blocking "$prompt" "$default" "$min_value" "$max_value")"
+                        break
+                    elif [[ -z "$key" ]]; then
+                        answer="$default"
+                        break
+                    elif [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer="$(tty_read_number_with_initial_key "$prompt" "$default" "$key" "$min_value" "$max_value")"
+                        break
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer="INVALID"
+                        break
+                    fi
                 fi
             fi
         done
-
-        [ -z "$answer" ] && answer="$default"
 
         if [ "$answer" == "INVALID" ]; then
             continue
@@ -414,13 +531,13 @@ function timed_number_input() {
     done
 }
 
-# --- 17. GPU NAME CLEANUP HELPER ---
+# --- 20. GPU NAME CLEANUP HELPER ---
 # Removes PCI IDs and extra text to make GPU display readable.
 function clean_gpu_name() {
     echo "$1" | sed -E 's/^[0-9a-fA-F:.]+[[:space:]]+//; s/\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]//g; s/\(rev [^)]+\)//g; s/[[:space:]]+/ /g; s/[[:space:]]+$//'
 }
 
-# --- 18. GPU SUMMARY HELPER ---
+# --- 21. GPU SUMMARY HELPER ---
 # Creates readable integrated/discrete GPU summary for the audit screen.
 function build_gpu_summary() {
     local out=""
@@ -442,7 +559,7 @@ function build_gpu_summary() {
     echo "${out%; }"
 }
 
-# --- 19. PHYSICAL RAM DETECTION HELPER ---
+# --- 22. PHYSICAL RAM DETECTION HELPER ---
 # Uses MemTotal and rounds up to physical GiB.
 # This fixes 16GB systems being detected as 15GB and defaulting to 11GB RAM.
 function detect_total_ram_gb() {
@@ -459,7 +576,7 @@ function detect_total_ram_gb() {
     echo $(( (mem_kb + gib_kb - 1) / gib_kb ))
 }
 
-# --- 20. PROXMOX VALIDATION ---
+# --- 23. PROXMOX VALIDATION ---
 # Confirms the script is being run on Proxmox VE 9 or newer.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -471,7 +588,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 21. SYSTEM RESOURCE AUDIT ---
+# --- 24. SYSTEM RESOURCE AUDIT ---
 # Detects RAM, CPU cores and calculates adaptive default VM resources.
 msg_info "Auditing system resources"
 
@@ -486,7 +603,7 @@ DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
 
 msg_ok "SYSTEM RESOURCES DETECTED"
 
-# --- 22. GPU AUDIT ---
+# --- 25. GPU AUDIT ---
 # Detects integrated and discrete GPUs. Only discrete GPU is offered for passthrough.
 msg_info "Detecting GPU hardware"
 
@@ -509,7 +626,7 @@ GPU_SUMMARY=$(build_gpu_summary)
 
 msg_ok "GPU DETECTION COMPLETE"
 
-# --- 23. SYSTEM AUDIT DISPLAY ---
+# --- 26. SYSTEM AUDIT DISPLAY ---
 # Shows available host resources and adaptive defaults before asking user inputs.
 echo ""
 echo -e "${DGN}SYSTEM AUDIT:${CL}"
@@ -526,12 +643,12 @@ fi
 
 echo "------------------------------------------------------"
 
-# --- 24. FINAL START CONFIRMATION ---
+# --- 27. FINAL START CONFIRMATION ---
 # Starts VM setup after the audit screen.
 start_yn=$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 25. USER VM CONFIGURATION INPUTS ---
+# --- 28. USER VM CONFIGURATION INPUTS ---
 # Collects VM ID, name, CPU, RAM and OS disk size using adaptive defaults.
 VMID=$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")
 VM_NAME=$(timed_text_input "Enter VM Name" "$DEFAULT_VM_NAME")
@@ -541,13 +658,13 @@ DISK_GB_INPUT=$(timed_number_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB"
 
 RAM_MB=$(( RAM_GB_INPUT * 1024 ))
 
-# --- 26. VM ID CONFLICT CHECK ---
+# --- 29. VM ID CONFLICT CHECK ---
 # Prevents overwriting an existing VM ID.
 if qm status "$VMID" >/dev/null 2>&1; then
     msg_error "VM ID ${VMID} already exists."
 fi
 
-# --- 27. ISO SELECTION ---
+# --- 30. ISO SELECTION ---
 # Lists ISO files from local storage and lets the user choose one with numeric validation.
 msg_info "Finding ISO images"
 
@@ -569,7 +686,7 @@ else
     ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
 fi
 
-# --- 28. STORAGE SELECTION ---
+# --- 31. STORAGE SELECTION ---
 # Lists Proxmox storage that supports images and lets the user choose where to place VM disks.
 msg_info "Finding Proxmox storage"
 
@@ -590,14 +707,14 @@ done
 STORAGE_IDX=$(timed_number_input "Select storage number" "1" "1" "${#STORAGE_LIST[@]}")
 STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
 
-# --- 29. GPU PASSTHROUGH OPTION ---
+# --- 32. GPU PASSTHROUGH OPTION ---
 # Offers discrete GPU passthrough only if a discrete GPU exists.
 if [ "$DGPU_FOUND" == "yes" ]; then
     gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "y")
     [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y"
 fi
 
-# --- 30. VM CREATE ---
+# --- 33. VM CREATE ---
 # Creates Ubuntu/Linux VM with q35, OVMF, host CPU, fixed RAM and VirtIO network.
 msg_info "Creating VM ${VMID} (${VM_NAME})"
 
@@ -616,7 +733,7 @@ qm create "$VMID" \
 
 msg_ok "VM CREATED"
 
-# --- 31. VM DISK CONFIGURATION ---
+# --- 34. VM DISK CONFIGURATION ---
 # Adds EFI disk and main OS disk with discard enabled for SSD/LVM-thin friendly behaviour.
 msg_info "Configuring VM disks"
 
@@ -626,7 +743,7 @@ qm set "$VMID" --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=on,iothread=1" &>
 
 msg_ok "VM DISKS CONFIGURED"
 
-# --- 32. ISO AND BOOT ORDER ---
+# --- 35. ISO AND BOOT ORDER ---
 # Attaches selected ISO if available and sets VM boot order.
 msg_info "Configuring VM boot"
 
@@ -638,7 +755,7 @@ qm set "$VMID" --boot order=scsi0\;ide2 &>/dev/null
 
 msg_ok "VM BOOT CONFIGURED"
 
-# --- 33. GPU PASSTHROUGH ATTACHMENT ---
+# --- 36. GPU PASSTHROUGH ATTACHMENT ---
 # Adds the first detected discrete GPU BDF to the VM.
 if [ "$ENABLE_GPU" == "y" ]; then
     msg_info "Attaching discrete GPU to VM"
@@ -653,7 +770,7 @@ if [ "$ENABLE_GPU" == "y" ]; then
     fi
 fi
 
-# --- 34. COMPLETION MARKER ---
+# --- 37. COMPLETION MARKER ---
 # Creates marker file so future checks can identify that this setup was already run.
 cat <<EOF > "$COMPLETED_MARKER"
 Proxmox VM Setup completed on: $(date)
@@ -664,7 +781,7 @@ CPU: ${CPU_INPUT}
 Storage: ${STORAGE_ID}
 EOF
 
-# --- 35. FINAL SUMMARY ---
+# --- 38. FINAL SUMMARY ---
 # Shows final VM configuration.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
