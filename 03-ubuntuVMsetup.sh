@@ -7,6 +7,7 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
+# Keeps all colour variables available for future visual changes.
 YW=`echo "\033[33m"`
 BL=`echo "\033[36m"`
 RD=`echo "\033[01;31m"`
@@ -21,21 +22,29 @@ CM="${GN}✓${CL}"
 CROSS="${RD}✗${CL}"
 
 # --- 2. GLOBAL VARIABLES ---
+# Stores timer, log file, defaults and detected environment information.
 T=15
 LOG_FILE="/var/log/ubuntu-vm-setup.log"
 COMPLETED_MARKER="/root/.ubuntu-vm-setup-completed"
 
 DEFAULT_USERNAME="orik"
+
 USERNAME=""
 SUDO_USER_CREATED="no"
 SSH_HARDENING_APPLIED="no"
 QEMU_AGENT_INSTALLED="no"
 UFW_ENABLED="no"
+
 IS_CONTAINER="no"
 IS_VM="no"
 
+ROOT_KEYS="/root/.ssh/authorized_keys"
+CURRENT_USER_KEYS=""
+SOURCE_KEYS=""
+DEST_KEYS=""
+
 # --- 3. HEADER FUNCTION ---
-# Displays the one-line Ubuntu VM Setup banner.
+# Displays the Ubuntu VM Setup banner.
 function header_info {
 echo -e "${BL}
 ██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗████████╗██╗   ██╗    ██╗   ██╗███╗   ███╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
@@ -48,7 +57,7 @@ ${CL}"
 }
 
 # --- 4. MESSAGE HELPER FUNCTIONS ---
-# Provides consistent status messages.
+# Provides consistent display -> apply -> success output style.
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
@@ -62,8 +71,8 @@ trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}
 clear
 header_info
 
-# --- 6. TTY OUTPUT HELPER ---
-# Prints directly to terminal from prompt functions.
+# --- 6. TTY PRINT HELPER ---
+# Prints directly to terminal even when functions return values through stdout.
 function tty_print() {
     if [ -w /dev/tty ]; then
         echo -ne "$*" > /dev/tty
@@ -72,7 +81,7 @@ function tty_print() {
     fi
 }
 
-# --- 7. TTY OUTPUT WITH NEWLINE HELPER ---
+# --- 7. TTY PRINTLN HELPER ---
 # Prints directly to terminal with newline.
 function tty_println() {
     if [ -w /dev/tty ]; then
@@ -86,6 +95,7 @@ function tty_println() {
 # Converts Y/N answers to readable yes/no text.
 function yes_no_label() {
     local value="$1"
+
     if [[ "$value" =~ ^[Yy]$ ]]; then
         echo "yes"
     else
@@ -127,7 +137,10 @@ function tty_read_yes_no_blocking() {
 }
 
 # --- 10. TIMED YES/NO PROMPT HELPER ---
-# Uses wall-clock countdown. SPACE pauses and waits. Timeout accepts default.
+# Uses wall-clock countdown instead of loop countdown.
+# SPACE pauses and waits.
+# Timeout accepts default.
+# Final answer stays visible.
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
@@ -186,6 +199,7 @@ function timed_yes_no() {
     done
 
     [ -z "$answer" ] && answer="$default"
+
     final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
@@ -194,9 +208,9 @@ function timed_yes_no() {
     echo "$answer"
 }
 
-# --- 11. EDITABLE TEXT INPUT HELPER ---
-# Allows text input with countdown. Any typed character or SPACE pauses countdown.
-function editable_text_loop() {
+# --- 11. EDITABLE INPUT LOOP HELPER ---
+# Provides editable text input with backspace support.
+function editable_input_loop() {
     local prompt="$1"
     local default="$2"
     local initial_value="${3:-}"
@@ -215,6 +229,7 @@ function editable_text_loop() {
         case "$key" in
             "")
                 [ -z "$answer" ] && answer="$default"
+
                 tty_print "${BFR}"
                 echo "$answer"
                 return 0
@@ -230,7 +245,8 @@ function editable_text_loop() {
 }
 
 # --- 12. TIMED TEXT INPUT HELPER ---
-# Uses Proxmox VM Setup style countdown and input behaviour.
+# Uses wall-clock countdown with editable text input.
+# SPACE pauses countdown and opens editable mode.
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
@@ -256,26 +272,26 @@ function timed_text_input() {
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 if [[ "$key" == " " ]]; then
-                    answer="$(editable_text_loop "$prompt" "$default" "")"
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
                     break
                 else
-                    answer="$(editable_text_loop "$prompt" "$default" "$key")"
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
                     break
                 fi
             fi
         else
             if IFS= read -rsn1 -t 1 key; then
                 if [[ "$key" == " " ]]; then
-                    answer="$(editable_text_loop "$prompt" "$default" "")"
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
                     break
                 else
-                    answer="$(editable_text_loop "$prompt" "$default" "$key")"
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
                     break
                 fi
             fi
@@ -290,78 +306,116 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 13. ROOT / SUDO COMMAND DETECTION ---
-# Uses sudo when not root, otherwise runs commands directly.
+# --- 13. ROOT / SUDO DETECTION ---
+# Uses sudo when not root.
 if [ "$EUID" -eq 0 ]; then
     SUDO_CMD=""
 else
     SUDO_CMD="sudo"
 fi
 
-# --- 14. ENVIRONMENT DETECTION ---
-# Detects whether the script is running inside LXC or VM/bare Ubuntu.
+# --- 14. SUDO VALIDATION ---
+# Validates sudo once near the start so authentication failures happen early.
+if [ -n "$SUDO_CMD" ]; then
+    msg_info "Validating sudo access"
+
+    $SUDO_CMD -v || msg_error "Sudo authentication failed. Script cancelled."
+
+    msg_ok "SUDO ACCESS CONFIRMED"
+fi
+
+# --- 15. ENVIRONMENT DETECTION ---
+# Detects whether system is VM or LXC container.
+msg_info "Detecting environment"
+
 if grep -qa container=lxc /proc/1/environ 2>/dev/null; then
     IS_CONTAINER="yes"
 else
     IS_VM="yes"
 fi
 
-# --- 15. START CONFIRMATION ---
+msg_ok "ENVIRONMENT DETECTED"
+
+# --- 16. START CONFIRMATION ---
 # Starts Ubuntu VM/LXC setup.
 echo -e "${YW}This script will configure Ubuntu VM/LXC for Docker workloads.${CL}"
+
 start_yn=$(timed_yes_no "Start the Ubuntu VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 16. USERNAME INPUT ---
-# Selects the admin user to configure.
+# --- 17. USERNAME INPUT ---
+# Selects target non-root admin user.
 USERNAME=$(timed_text_input "Enter username" "$DEFAULT_USERNAME")
 
-# --- 17. USER CHECK / CREATE LOGIC ---
-# If the user already exists, the script configures it instead of aborting.
+# --- 18. USER EXISTENCE CHECK ---
+# Detects whether the user already exists.
+msg_info "Checking existing user"
+
 if id "$USERNAME" >/dev/null 2>&1; then
-    msg_ok "USER ${USERNAME} ALREADY EXISTS"
+    EXISTING_USER="yes"
 else
+    EXISTING_USER="no"
+fi
+
+msg_ok "USER CHECK COMPLETE"
+
+# --- 19. SSH KEY SOURCE DETECTION ---
+# Detects best SSH key source automatically.
+msg_info "Detecting SSH key source"
+
+CURRENT_USER_KEYS="/home/${USERNAME}/.ssh/authorized_keys"
+
+if [ -s "$CURRENT_USER_KEYS" ]; then
+    SOURCE_KEYS="$CURRENT_USER_KEYS"
+elif [ -s "$ROOT_KEYS" ]; then
+    SOURCE_KEYS="$ROOT_KEYS"
+else
+    SOURCE_KEYS=""
+fi
+
+msg_ok "SSH KEY DETECTION COMPLETE"
+
+# --- 20. USER CREATION ---
+# Creates user only if missing.
+if [ "$EXISTING_USER" == "no" ]; then
     msg_info "Creating user ${USERNAME}"
+
     $SUDO_CMD useradd -m -s /bin/bash "$USERNAME"
     $SUDO_CMD usermod -aG sudo "$USERNAME"
     $SUDO_CMD passwd -l "$USERNAME" &>/dev/null || true
+
     SUDO_USER_CREATED="yes"
+
     msg_ok "USER CREATED"
+else
+    msg_warn "User ${USERNAME} already exists. Existing user will be reused."
 fi
 
-# --- 18. SSH KEY SOURCE CHECK ---
-# Uses existing user's SSH keys first, then root keys if available.
-SOURCE_KEYS=""
-
-if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then
-    SOURCE_KEYS="/home/${USERNAME}/.ssh/authorized_keys"
-elif [ -n "${SUDO_USER:-}" ] && [ -s "/home/${SUDO_USER}/.ssh/authorized_keys" ]; then
-    SOURCE_KEYS="/home/${SUDO_USER}/.ssh/authorized_keys"
-elif [ -s "/root/.ssh/authorized_keys" ]; then
-    SOURCE_KEYS="/root/.ssh/authorized_keys"
-fi
-
-if [ -z "$SOURCE_KEYS" ]; then
-    msg_warn "No SSH authorized_keys found. SSH password hardening will be skipped."
-fi
-
-# --- 19. SSH KEY COPY ---
-# Copies detected SSH keys to the target user if needed.
+# --- 21. SSH KEY CONFIGURATION ---
+# Configures SSH keys safely and skips same-file copy.
 if [ -n "$SOURCE_KEYS" ]; then
-    msg_info "Configuring SSH keys for ${USERNAME}"
+    DEST_KEYS="/home/${USERNAME}/.ssh/authorized_keys"
 
-    $SUDO_CMD mkdir -p "/home/${USERNAME}/.ssh"
-    $SUDO_CMD cp "$SOURCE_KEYS" "/home/${USERNAME}/.ssh/authorized_keys"
-    $SUDO_CMD chown -R "${USERNAME}:${USERNAME}" "/home/${USERNAME}/.ssh"
-    $SUDO_CMD chmod 700 "/home/${USERNAME}/.ssh"
-    $SUDO_CMD chmod 600 "/home/${USERNAME}/.ssh/authorized_keys"
+    if [ "$(readlink -f "$SOURCE_KEYS")" = "$(readlink -f "$DEST_KEYS" 2>/dev/null || echo "$DEST_KEYS")" ]; then
+        msg_ok "SSH KEYS ALREADY CONFIGURED"
+    else
+        msg_info "Configuring SSH keys for ${USERNAME}"
 
-    msg_ok "SSH KEYS CONFIGURED"
+        $SUDO_CMD mkdir -p "/home/${USERNAME}/.ssh"
+        $SUDO_CMD cp "$SOURCE_KEYS" "$DEST_KEYS"
+        $SUDO_CMD chown -R "${USERNAME}:${USERNAME}" "/home/${USERNAME}/.ssh"
+        $SUDO_CMD chmod 700 "/home/${USERNAME}/.ssh"
+        $SUDO_CMD chmod 600 "$DEST_KEYS"
+
+        msg_ok "SSH KEYS CONFIGURED"
+    fi
+else
+    msg_warn "No SSH authorized_keys source found."
 fi
 
-# --- 20. SYSTEM UPDATE ---
-# Updates Ubuntu packages before installing QEMU guest agent and firewall tools.
-msg_info "Updating system"
+# --- 22. SYSTEM UPDATE ---
+# Updates Ubuntu packages.
+msg_info "Updating system packages"
 
 $SUDO_CMD apt-get update &>/dev/null
 $SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade &>/dev/null
@@ -369,8 +423,8 @@ $SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get -y autoremove &>/dev/null
 
 msg_ok "SYSTEM UPDATED"
 
-# --- 21. QEMU GUEST AGENT INSTALL ---
-# Installs qemu-guest-agent for Proxmox VM visibility and clean shutdown support.
+# --- 23. QEMU GUEST AGENT INSTALL ---
+# Installs qemu-guest-agent for Proxmox VM support.
 if [ "$IS_VM" == "yes" ]; then
     msg_info "Installing QEMU guest agent"
 
@@ -382,8 +436,8 @@ if [ "$IS_VM" == "yes" ]; then
     msg_ok "QEMU GUEST AGENT INSTALLED"
 fi
 
-# --- 22. UFW FIREWALL BASELINE ---
-# Enables UFW with SSH, HTTP and HTTPS allowed for Docker/Traefik workloads.
+# --- 24. UFW FIREWALL SETUP ---
+# Enables UFW baseline firewall.
 msg_info "Configuring UFW firewall"
 
 $SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y ufw &>/dev/null
@@ -398,10 +452,10 @@ UFW_ENABLED="yes"
 
 msg_ok "UFW FIREWALL ENABLED"
 
-# --- 23. SSH HARDENING ---
-# Disables root SSH and password login only if SSH keys exist for the target user.
+# --- 25. SSH HARDENING ---
+# Disables SSH password login and root login only if SSH keys exist.
 if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then
-    msg_info "Hardening SSH"
+    msg_info "Hardening SSH configuration"
 
     SSH_CONFIG="/etc/ssh/sshd_config"
 
@@ -419,13 +473,13 @@ if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then
 
     SSH_HARDENING_APPLIED="yes"
 
-    msg_ok "SSH HARDENED"
+    msg_ok "SSH HARDENING APPLIED"
 else
-    msg_warn "SSH hardening skipped because user SSH keys were not found."
+    msg_warn "SSH hardening skipped because SSH keys were not detected."
 fi
 
-# --- 24. CLEANUP ---
-# Cleans package cache and removes orphan packages.
+# --- 26. SYSTEM CLEANUP ---
+# Cleans package cache and orphan packages.
 msg_info "Cleaning system"
 
 $SUDO_CMD apt-get clean &>/dev/null
@@ -433,12 +487,13 @@ $SUDO_CMD apt-get -y autoremove &>/dev/null
 
 msg_ok "SYSTEM CLEANED"
 
-# --- 25. COMPLETION MARKER ---
-# Creates marker showing the setup ran successfully.
+# --- 27. COMPLETION MARKER ---
+# Stores successful setup information.
+msg_info "Writing completion marker"
+
 $SUDO_CMD bash -c "cat > '$COMPLETED_MARKER'" <<EOF
 Ubuntu VM Setup completed on: $(date)
 Username: $USERNAME
-User Created: $SUDO_USER_CREATED
 Container: $IS_CONTAINER
 VM: $IS_VM
 QEMU Agent: $QEMU_AGENT_INSTALLED
@@ -446,21 +501,22 @@ UFW: $UFW_ENABLED
 SSH Hardened: $SSH_HARDENING_APPLIED
 EOF
 
-# --- 26. FINAL SUMMARY ---
-# Displays final result and next action.
+msg_ok "COMPLETION MARKER WRITTEN"
+
+# --- 28. FINAL SUMMARY ---
+# Displays final setup summary.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
 echo -e "USERNAME: ${GN}${USERNAME}${CL}"
-echo -e "USER CREATED: ${GN}${SUDO_USER_CREATED}${CL}"
 echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_INSTALLED}${CL}"
 echo -e "UFW FIREWALL: ${GN}${UFW_ENABLED}${CL}"
 echo -e "SSH HARDENING: ${GN}${SSH_HARDENING_APPLIED}${CL}"
 echo ""
 
 if [ "$IS_VM" == "yes" ]; then
-    echo -e "${YW}Power off the VM now, then enable/check QEMU Guest Agent in Proxmox if needed.${CL}"
+    echo -e "${YW}Ubuntu VM setup completed successfully.${CL}"
 else
-    echo -e "${YW}Reboot the container when ready.${CL}"
+    echo -e "${YW}Ubuntu LXC setup completed successfully.${CL}"
 fi
 
 exit 0
