@@ -278,7 +278,7 @@ function timed_reboot_countdown() {
             tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
         fi
 
-        tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}\n${YW}(ENTER/Y = reboot now, SPACE/N = cancel)${CL}\n"
+        tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}\n${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}\n"
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
@@ -470,7 +470,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]]; then
 fi
 
 if [ "$PVE_MAJOR" -lt 9 ]; then
-    msg_error "Requires Proxmox VE 9+. Detected Proxmox VE ${PVE_MAJOR}. Script cancelled."
+    msg_error "Requires Proxmox VE 9+. Detected Proxmox VE ${PVE_MAJOR}. Script Cancelled."
 fi
 
 # --- 23. FRESH INSTALL WARNING ---
@@ -759,7 +759,7 @@ msg_ok "NO-SUBSCRIPTION NAG PATCH APPLIED"
 systemctl restart pveproxy &>/dev/null || true
 msg_ok "PVEPROXY RESTARTED"
 
-msg_ok "NAG REMOVED"
+msg_ok "WEBUI NAG REMOVED"
 
 # --- 35. POWER & CHASSIS OPTIMIZATION ---
 # Masks sleep states and ignores laptop lid close on laptop hardware.
@@ -784,7 +784,7 @@ else
     msg_ok "LAPTOP LID SETTINGS NOT REQUIRED"
 fi
 
-msg_ok "POWER OPTIMIZED"
+msg_ok "POWER SETTINGS OPTIMIZED"
 
 # --- 36. GRUB & IOMMU ---
 # Adds IOMMU, passthrough mode and console blanking without removing existing kernel args.
