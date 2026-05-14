@@ -841,7 +841,7 @@ EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
 # Offers discrete GPU passthrough only if sysfs GPU detection found a discrete GPU.
 # Default is no for first Crea Social test because Docker/Postgres/Postiz do not require GPU initially.
 if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
-    gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "n")
+    gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "y")
     [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y"
 else
     ENABLE_GPU="n"
