@@ -28,7 +28,7 @@ T=15
 LOG_FILE="/var/log/proxmox-vm-setup.log"
 COMPLETED_MARKER="/root/.proxmox-vm-setup-completed"
 
-DEFAULT_VM_NAME="ct-crea"
+DEFAULT_VM_NAME="crea-ubuntu"
 DEFAULT_VMID="100"
 DEFAULT_DISK_GB="40"
 DEFAULT_RAM_PERCENT="75"
@@ -665,7 +665,8 @@ function get_efi_format_for_storage_type() {
 # Converts yes/no values into Proxmox qm values.
 function apply_boolean_values() {
     if [ "$BALLOONING_ENABLED" == "yes" ]; then
-        BALLOON_VALUE="1"
+        BALLOON_VALUE="$(( RAM_MB / 2 ))"
+        [ "$BALLOON_VALUE" -lt 512 ] && BALLOON_VALUE="512"
     else
         BALLOON_VALUE="0"
     fi
@@ -683,7 +684,37 @@ function apply_boolean_values() {
     fi
 }
 
-# --- 26. PROXMOX VALIDATION ---
+# --- 26. PROXMOX COMMAND RUNNER ---
+# Runs qm commands while hiding normal successful output.
+# If a Proxmox command fails, it prints the real stderr so the problem can be fixed.
+function run_proxmox_cmd() {
+    local description="$1"
+    shift
+
+    local err_file=""
+    err_file="$(mktemp)"
+
+    if ! "$@" > /dev/null 2> "$err_file"; then
+        echo ""
+        echo -e "${RD}Proxmox command failed during: ${description}${CL}"
+        echo -e "${YW}Command:${CL} $*"
+        echo ""
+        echo -e "${RD}Real Proxmox error:${CL}"
+        cat "$err_file"
+        rm -f "$err_file"
+
+        echo ""
+        echo -e "${YW}Troubleshooting:${CL}"
+        echo "qm list"
+        echo "qm config ${VMID} 2>/dev/null || true"
+        echo "ls -l /etc/pve/qemu-server/${VMID}.conf 2>/dev/null || true"
+        exit 1
+    fi
+
+    rm -f "$err_file"
+}
+
+# --- 27. PROXMOX VALIDATION ---
 # Confirms the script is being run on Proxmox VE 9 or newer.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -695,7 +726,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 27. SYSTEM RESOURCE AUDIT ---
+# --- 28. SYSTEM RESOURCE AUDIT ---
 # Detects RAM, CPU cores and calculates adaptive default VM resources.
 msg_info "Auditing system resources"
 
@@ -710,7 +741,7 @@ DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
 
 msg_ok "SYSTEM RESOURCES DETECTED"
 
-# --- 28. SAFE SYSFS GPU AUDIT ---
+# --- 29. SAFE SYSFS GPU AUDIT ---
 # Detects GPU through sysfs only, avoiding lspci because lspci can hang on some fresh Proxmox/laptop systems.
 msg_info "Detecting GPU hardware"
 
@@ -724,7 +755,7 @@ else
     msg_ok "GPU DETECTION SKIPPED"
 fi
 
-# --- 29. SYSTEM AUDIT DISPLAY ---
+# --- 30. SYSTEM AUDIT DISPLAY ---
 # Shows available host resources and adaptive defaults before asking user inputs.
 echo ""
 echo -e "${DGN}SYSTEM AUDIT:${CL}"
@@ -741,12 +772,12 @@ fi
 
 echo "------------------------------------------------------"
 
-# --- 30. FINAL START CONFIRMATION ---
+# --- 31. FINAL START CONFIRMATION ---
 # Starts input collection after audit. No VM changes happen yet.
 start_yn=$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 31. USER VM CONFIGURATION INPUTS ---
+# --- 32. USER VM CONFIGURATION INPUTS ---
 # Collects VM ID, name, CPU, RAM and OS disk size using adaptive defaults.
 # This stage still does not create or modify any VM.
 VMID=$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")
@@ -757,7 +788,7 @@ DISK_GB_INPUT=$(timed_number_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB"
 
 RAM_MB=$(( RAM_GB_INPUT * 1024 ))
 
-# --- 32. ISO SELECTION ---
+# --- 33. ISO SELECTION ---
 # Lists ISO files from local storage and lets the user choose one with numeric validation.
 # Still input-only; no VM changes are made here.
 msg_info "Finding ISO images"
@@ -780,7 +811,7 @@ else
     ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
 fi
 
-# --- 33. STORAGE SELECTION ---
+# --- 34. STORAGE SELECTION ---
 # Lists Proxmox storage that supports images and lets the user choose where to place VM disks.
 # Still input-only; no VM changes are made here.
 msg_info "Finding Proxmox storage"
@@ -806,17 +837,17 @@ STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
 STORAGE_TYPE="$(get_storage_type "$STORAGE_ID")"
 EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
 
-# --- 34. GPU PASSTHROUGH OPTION ---
+# --- 35. GPU PASSTHROUGH OPTION ---
 # Offers discrete GPU passthrough only if sysfs GPU detection found a discrete GPU.
-# Still input-only; no VM changes are made here.
+# Default is no for first Crea Social test because Docker/Postgres/Postiz do not require GPU initially.
 if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
-    gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "y")
+    gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "n")
     [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y"
 else
     ENABLE_GPU="n"
 fi
 
-# --- 35. ADVANCED SETTINGS PROMPT ---
+# --- 36. ADVANCED SETTINGS PROMPT ---
 # Keeps Crea Social recommended defaults unless user chooses to edit advanced VM options.
 advanced_yn=$(timed_yes_no "Open Advanced VM Settings?" "n")
 
@@ -849,7 +880,7 @@ fi
 
 apply_boolean_values
 
-# --- 36. FINAL APPLY CONFIRMATION ---
+# --- 37. FINAL APPLY CONFIRMATION ---
 # Last checkpoint before any Proxmox VM changes are made.
 # Shows every setting, including safe defaults and advanced options, whether advanced mode was used or not.
 echo ""
@@ -886,17 +917,20 @@ apply_yn=$(timed_yes_no "Create VM now?" "y")
 #  PHASE 2: APPLY / CREATE VM ONLY AFTER ALL INPUTS
 # =========================================================
 
-# --- 37. VM ID CONFLICT CHECK ---
+# --- 38. VM ID CONFLICT CHECK ---
 # Checks conflict only after all input is collected, immediately before creation.
-if qm status "$VMID" >/dev/null 2>&1; then
-    msg_error "VM ID ${VMID} already exists."
+# Uses qm config because it catches partial/incomplete VM configs better than qm status.
+if qm config "$VMID" >/dev/null 2>&1; then
+    msg_error "VM ID ${VMID} already exists. Remove it first or choose another VM ID."
 fi
 
-# --- 38. VM CREATE ---
+# --- 39. VM CREATE ---
 # Creates Ubuntu/Linux VM using selected standard and advanced settings.
+# Proxmox errors are captured and displayed if qm create fails.
 msg_info "Creating VM ${VMID} (${VM_NAME})"
 
-qm create "$VMID" \
+run_proxmox_cmd "creating VM ${VMID}" \
+    qm create "$VMID" \
     --name "$VM_NAME" \
     --machine "$MACHINE_TYPE" \
     --bios "$BIOS_TYPE" \
@@ -906,44 +940,54 @@ qm create "$VMID" \
     --memory "$RAM_MB" \
     --balloon "$BALLOON_VALUE" \
     --net0 "${NETWORK_MODEL},bridge=vmbr0" \
-    --agent "$QEMU_AGENT_VALUE" \
-    &>/dev/null
+    --agent "$QEMU_AGENT_VALUE"
 
 msg_ok "VM CREATED"
 
-# --- 39. EFI DISK CONFIGURATION ---
+# --- 40. EFI DISK CONFIGURATION ---
 # Adds OVMF EFI disk only when OVMF BIOS is selected.
 # SeaBIOS does not use an EFI disk.
 if [ "$BIOS_TYPE" == "ovmf" ]; then
     msg_info "Configuring EFI disk"
 
-    qm set "$VMID" --efidisk0 "${STORAGE_ID}:0,format=${EFI_FORMAT},efitype=4m,pre-enrolled-keys=0" &>/dev/null
+    run_proxmox_cmd "configuring EFI disk" \
+        qm set "$VMID" \
+        --efidisk0 "${STORAGE_ID}:0,format=${EFI_FORMAT},efitype=4m,pre-enrolled-keys=0"
 
     msg_ok "EFI DISK CONFIGURED"
 fi
 
-# --- 40. MAIN VM DISK CONFIGURATION ---
+# --- 41. MAIN VM DISK CONFIGURATION ---
 # Adds main OS disk with selected disk controller, discard setting and iothread.
 msg_info "Configuring VM OS disk"
 
-qm set "$VMID" --scsihw "$DISK_CONTROLLER" &>/dev/null
-qm set "$VMID" --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=${DISCARD_VALUE},iothread=1" &>/dev/null
+run_proxmox_cmd "setting disk controller" \
+    qm set "$VMID" \
+    --scsihw "$DISK_CONTROLLER"
+
+run_proxmox_cmd "creating VM OS disk" \
+    qm set "$VMID" \
+    --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=${DISCARD_VALUE},iothread=1"
 
 msg_ok "VM OS DISK CONFIGURED"
 
-# --- 41. ISO AND BOOT ORDER ---
+# --- 42. ISO AND BOOT ORDER ---
 # Attaches selected ISO if available and sets VM boot order.
 msg_info "Configuring VM boot"
 
 if [ -n "$ISO_PATH" ]; then
-    qm set "$VMID" --cdrom "$ISO_PATH" &>/dev/null
+    run_proxmox_cmd "attaching ISO" \
+        qm set "$VMID" \
+        --cdrom "$ISO_PATH"
 fi
 
-qm set "$VMID" --boot order=scsi0\;ide2 &>/dev/null
+run_proxmox_cmd "setting VM boot order" \
+    qm set "$VMID" \
+    --boot "order=scsi0;ide2"
 
 msg_ok "VM BOOT CONFIGURED"
 
-# --- 42. GPU PASSTHROUGH ATTACHMENT ---
+# --- 43. GPU PASSTHROUGH ATTACHMENT ---
 # Adds the first detected discrete GPU BDF to the VM after all other settings are applied.
 if [ "$ENABLE_GPU" == "y" ]; then
     msg_info "Attaching discrete GPU to VM"
@@ -951,14 +995,17 @@ if [ "$ENABLE_GPU" == "y" ]; then
     GPU_PCI_ID=$(echo "$DGPU_BDFS" | awk '{print $1}')
 
     if [ -n "$GPU_PCI_ID" ]; then
-        qm set "$VMID" --hostpci0 "${GPU_PCI_ID},pcie=1,x-vga=1" &>/dev/null
+        run_proxmox_cmd "attaching discrete GPU ${GPU_PCI_ID}" \
+            qm set "$VMID" \
+            --hostpci0 "${GPU_PCI_ID},pcie=1,x-vga=1"
+
         msg_ok "GPU PASSTHROUGH ENABLED (${GPU_PCI_ID})"
     else
         msg_warn "GPU passthrough selected but no GPU PCI ID found."
     fi
 fi
 
-# --- 43. COMPLETION MARKER ---
+# --- 44. COMPLETION MARKER ---
 # Creates marker file so future checks can identify that this setup was already run.
 cat <<EOF > "$COMPLETED_MARKER"
 Proxmox VM Setup completed on: $(date)
@@ -985,7 +1032,7 @@ Discard/TRIM: ${DISCARD_ENABLED}
 Advanced Settings Used: ${ADVANCED_SETTINGS}
 EOF
 
-# --- 44. FINAL SUMMARY ---
+# --- 45. FINAL SUMMARY ---
 # Shows final VM configuration.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
