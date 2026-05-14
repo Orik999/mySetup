@@ -269,7 +269,8 @@ function timed_reboot_countdown() {
             return 0
         fi
 
-        tty_print "${BFR}${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL} ${YW}(ENTER/Y = reboot now, SPACE/N = cancel)${CL}"
+        tty_print "${BFR}${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}
+${YW}(ENTER/Y = reboot now, SPACE/N = cancel)${CL}"
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
@@ -639,17 +640,18 @@ header_info
 
 # --- 31. STORAGE MERGE ---
 # Removes local-lvm and expands the OS/root storage for simple single-node fresh installs.
+# This restores the previously working flow: remove /dev/pve/data, grow /dev/pve/root, resize ext filesystem, remove local-lvm from Proxmox storage.
 msg_info "Merging local-lvm into local storage"
 
 if lvdisplay /dev/pve/data >/dev/null 2>&1; then
     pvesm freezefs local-lvm &>/dev/null || true
     lvremove -fy /dev/pve/data &>/dev/null
     lvresize -l +100%FREE /dev/pve/root &>/dev/null
-    resize2fs /dev/mapper/pve-root &>/dev/null || true
+    resize2fs /dev/mapper/pve-root &>/dev/null
     pvesm remove local-lvm &>/dev/null || true
 fi
 
-msg_ok "local-lvm storage successfully merged to OS"
+msg_ok "LOCAL-LVM STORAGE SUCCESSFULLY MERGED TO OS"
 
 # --- 32. DNS REDUNDANCY ---
 # Adds Cloudflare DNS redundancy before package updates.
@@ -1040,7 +1042,8 @@ NUMLOCK_CONFIGURED="yes"
 msg_ok "NUMLOCK BOOT SERVICE CONFIGURED"
 
 # --- 46. AUTO-VERIFY GHOST SCRIPT ---
-# Creates one-time verifier that runs after reboot, writes a log, self-deletes, and leaves a login display helper.
+# Creates one-time verifier that runs after reboot, writes a detailed log, self-deletes, and leaves a login display helper.
+# The systemd service logs to journal only, not the physical Proxmox console, so the report is shown upon root SSH login instead.
 msg_info "Creating Auto-Verify Ghost Script"
 
 cat <<EOF > /root/pve_verify.sh
@@ -1103,31 +1106,43 @@ echo ""
 
 sleep 5
 
+# Core Proxmox service checks.
 if pveversion >/dev/null 2>&1; then PASS "Proxmox command tools available"; else FAIL "Proxmox command tools missing"; fi
 if systemctl is-active --quiet pveproxy; then PASS "pveproxy active"; else FAIL "pveproxy inactive"; fi
 if systemctl is-active --quiet pvedaemon; then PASS "pvedaemon active"; else FAIL "pvedaemon inactive"; fi
 if systemctl is-active --quiet pvestatd; then PASS "pvestatd active"; else FAIL "pvestatd inactive"; fi
 if systemctl is-active --quiet pve-cluster; then PASS "pve-cluster active"; else FAIL "pve-cluster inactive"; fi
 
-if grep -q "nameserver 1.1.1.1" /etc/resolv.conf && grep -q "nameserver 1.0.0.1" /etc/resolv.conf; then PASS "DNS redundancy configured"; else WARN "DNS redundancy not detected"; fi
+# DNS checks.
+if grep -q "nameserver 1.1.1.1" /etc/resolv.conf && grep -q "nameserver 1.0.0.1" /etc/resolv.conf; then
+    PASS "DNS redundancy configured"
+else
+    WARN "DNS redundancy not detected"
+fi
 
+# Repository and package health checks.
 if grep -q "pve-no-subscription" /etc/apt/sources.list.d/proxmox.sources 2>/dev/null; then PASS "No-subscription repository configured"; else FAIL "No-subscription repository missing"; fi
 if [ ! -f /etc/apt/sources.list.d/pve-enterprise.sources ]; then PASS "Enterprise repository disabled"; else FAIL "Enterprise repository still present"; fi
 if apt-get check >/dev/null 2>&1; then PASS "APT package database healthy"; else FAIL "APT package database has problems"; fi
 
+# Storage merge checks.
 if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then WARN "local-lvm still exists in storage.cfg"; else PASS "local-lvm removed from Proxmox storage config"; fi
 if lvdisplay /dev/pve/data >/dev/null 2>&1; then WARN "/dev/pve/data still exists"; else PASS "/dev/pve/data not present"; fi
+if df -h /var/lib/vz >/dev/null 2>&1; then PASS "local storage path /var/lib/vz is accessible"; else FAIL "local storage path /var/lib/vz is not accessible"; fi
 
+# GRUB and IOMMU checks.
 if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "\$INSTALL_IOMMU_FLAG"; then PASS "GRUB contains \$INSTALL_IOMMU_FLAG"; else FAIL "GRUB missing \$INSTALL_IOMMU_FLAG"; fi
 if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "iommu=pt"; then PASS "GRUB contains iommu=pt"; else FAIL "GRUB missing iommu=pt"; fi
 if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "consoleblank=60"; then PASS "GRUB contains consoleblank=60"; else WARN "GRUB missing consoleblank=60"; fi
 if grep -q "consoleblank=60" /proc/cmdline; then PASS "Screen blanking active in running kernel"; else WARN "Screen blanking not visible in running kernel"; fi
 if dmesg | grep -Ei "IOMMU|DMAR|AMD-Vi" | grep -qi "enabled"; then PASS "IOMMU appears enabled after reboot"; else WARN "IOMMU not clearly detected in dmesg"; fi
 
+# GPU passthrough checks.
+# This keeps the useful old checks but avoids printing to the local console.
 if [ "\$INSTALL_DGPU_FOUND" == "yes" ]; then
     if [ "\$INSTALL_ENABLE_PASSTHROUGH" == "y" ]; then
-        if grep -R "vfio-pci" /sys/bus/pci/devices/*/driver/module 2>/dev/null | grep -q "vfio-pci"; then
-            PASS "vfio-pci active on at least one function device"
+        if lspci -nnk 2>/dev/null | grep -q "Kernel driver in use: vfio-pci"; then
+            PASS "vfio-pci active on at least one GPU/function device"
         elif find /sys/bus/pci/drivers/vfio-pci -maxdepth 1 -type l 2>/dev/null | grep -q .; then
             PASS "vfio-pci has bound PCI devices"
         else
@@ -1146,18 +1161,21 @@ else
     INFO "No discrete GPU detected during install, GPU passthrough check skipped"
 fi
 
+# SSD TRIM checks.
 if [ "\$INSTALL_IS_SSD" == "yes" ]; then
     if systemctl is-enabled --quiet fstrim.timer && systemctl is-active --quiet fstrim.timer; then PASS "SSD TRIM timer enabled and active"; else FAIL "SSD TRIM timer not enabled/active"; fi
 else
     INFO "No SSD detected during install, TRIM check skipped"
 fi
 
+# CPU governor checks.
 if [ "\$INSTALL_ENABLE_PERFORMANCE" == "y" ]; then
     if grep -q "performance" /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null; then PASS "CPU governor is performance"; else FAIL "CPU governor is not performance"; fi
 else
     INFO "CPU performance governor was not selected, check skipped"
 fi
 
+# SSH hardening checks.
 if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "yes" ]; then
     if sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled"; else FAIL "SSH password authentication still enabled"; fi
     if sshd -T 2>/dev/null | grep -Eq "^permitrootlogin (without-password|prohibit-password)"; then PASS "Root SSH password login disabled"; else FAIL "Root SSH password login not hardened"; fi
@@ -1165,6 +1183,7 @@ else
     WARN "SSH hardening was skipped because root SSH keys were missing"
 fi
 
+# Realtek NIC optimization checks.
 if [ "\$INSTALL_REALTEK_OPTIMIZED" == "yes" ]; then
     if systemctl is-enabled --quiet realtek-optimize.service; then PASS "Realtek optimization service enabled"; else WARN "Realtek optimization service not enabled"; fi
     if [ -n "\$INSTALL_REALTEK_IFACE" ] && [ -r "/sys/class/net/\$INSTALL_REALTEK_IFACE/statistics/rx_packets" ]; then PASS "Realtek interface still present"; else WARN "Realtek interface not found after reboot"; fi
@@ -1172,10 +1191,12 @@ else
     INFO "No Realtek optimization was applied"
 fi
 
+# Proxmox firewall checks.
 if systemctl is-active --quiet pve-firewall; then PASS "Proxmox firewall service active"; else FAIL "Proxmox firewall service inactive"; fi
 if grep -q "firewall: 1" /etc/pve/datacenter.cfg 2>/dev/null; then PASS "Datacenter firewall enabled"; else FAIL "Datacenter firewall not enabled"; fi
 if [ -f "/etc/pve/nodes/\$(hostname -s)/host.fw" ]; then PASS "Node firewall file exists"; else WARN "Node firewall file missing"; fi
 
+# CrowdSec checks.
 if [ "\$INSTALL_ENABLE_CROWDSEC" == "y" ]; then
     if systemctl is-active --quiet crowdsec; then PASS "CrowdSec active"; else FAIL "CrowdSec inactive"; fi
 
@@ -1188,12 +1209,14 @@ else
     INFO "CrowdSec was not selected, check skipped"
 fi
 
+# NumLock checks.
 if [ "\$INSTALL_NUMLOCK_CONFIGURED" == "yes" ]; then
     if systemctl is-enabled --quiet pve-numlock.service; then PASS "NumLock boot service enabled"; else WARN "NumLock boot service not enabled"; fi
 else
     INFO "NumLock was not configured"
 fi
 
+# UI nag and sysctl checks.
 if grep -q "if (false)\\|NoMoreNagging" /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js 2>/dev/null; then PASS "Subscription nag patch detected"; else WARN "Subscription nag patch not detected"; fi
 if [ -f /etc/sysctl.d/99-pve9-hardening-network.conf ]; then PASS "Sysctl hardening file present"; else FAIL "Sysctl hardening file missing"; fi
 if sysctl net.ipv4.tcp_syncookies 2>/dev/null | grep -q "= 1"; then PASS "TCP SYN cookies enabled"; else FAIL "TCP SYN cookies not enabled"; fi
@@ -1221,10 +1244,10 @@ Wants=network-online.target pve-cluster.service
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 45
+ExecStartPre=/bin/sleep 60
 ExecStart=/bin/bash /root/pve_verify.sh
-StandardOutput=journal+console
-StandardError=journal+console
+StandardOutput=journal
+StandardError=journal
 RemainAfterExit=no
 
 [Install]
