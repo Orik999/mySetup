@@ -29,6 +29,7 @@ FLASH_OFF=$'\033[25m'
 T=15
 LOG_FILE="/var/log/pve9-postinstall.log"
 VERIFY_LOG="/var/log/pve9-postinstall-verify.log"
+COMPLETED_MARKER="/root/.pve9-postinstall-completed"
 
 HOSTNAME_SHORT="$(hostname -s)"
 SYSTEM_TYPE="Unknown"
@@ -100,7 +101,7 @@ clear
 header_info
 
 # --- 7. TTY OUTPUT HELPER ---
-# Prints text directly to the active terminal. This is required because prompts are used inside command substitution.
+# Prints text directly to the active terminal. This is required because prompts return only final answer on stdout.
 function tty_print() {
     if [ -w /dev/tty ]; then
         echo -ne "$*" > /dev/tty
@@ -119,20 +120,7 @@ function tty_println() {
     fi
 }
 
-# --- 9. TTY KEY READER HELPER ---
-# Reads one keypress from the real terminal. This keeps prompts visible even when called as answer=$(function).
-function tty_read_key() {
-    local timeout="$1"
-    local key=""
-    if [ -r /dev/tty ]; then
-        read -rsn1 -t "$timeout" key < /dev/tty || true
-    else
-        read -rsn1 -t "$timeout" key || true
-    fi
-    echo "$key"
-}
-
-# --- 10. TTY BLOCKING YES/NO READER HELPER ---
+# --- 9. TTY BLOCKING YES/NO READER HELPER ---
 # Used after SPACE is pressed on timed prompts.
 # SPACE stops the countdown, then this helper waits for Y/N/ENTER instead of proceeding automatically.
 function tty_read_yes_no_blocking() {
@@ -146,26 +134,27 @@ function tty_read_yes_no_blocking() {
     fi
 
     while true; do
-        tty_print "${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+
         if [ -r /dev/tty ]; then
-            read -rsn1 key < /dev/tty || true
+            IFS= read -rsn1 key < /dev/tty || true
         else
-            read -rsn1 key || true
+            IFS= read -rsn1 key || true
         fi
 
-        if [[ "$key" == "" ]]; then
+        if [[ -z "$key" ]]; then
+            tty_print "${BFR}"
             echo "$default"
             return 0
         elif [[ "$key" =~ ^[YyNn]$ ]]; then
+            tty_print "${BFR}"
             echo "$key"
             return 0
         fi
-
-        tty_println ""
     done
 }
 
-# --- 11. SSHD SPACE-SEPARATED CONFIG HELPER ---
+# --- 10. SSHD SPACE-SEPARATED CONFIG HELPER ---
 # Sets or appends SSH-style config lines such as "PasswordAuthentication no".
 # It safely handles commented existing lines, existing active lines, or missing keys.
 function set_or_append_space_config() {
@@ -180,7 +169,7 @@ function set_or_append_space_config() {
     fi
 }
 
-# --- 12. SYSTEMD EQUALS-STYLE CONFIG HELPER ---
+# --- 11. SYSTEMD EQUALS-STYLE CONFIG HELPER ---
 # Sets or appends config lines such as "HandleLidSwitch=ignore".
 # Used for logind/laptop lid settings where key=value syntax is expected.
 function set_or_append_equals_config() {
@@ -195,7 +184,7 @@ function set_or_append_equals_config() {
     fi
 }
 
-# --- 13. GRUB ARGUMENT HELPER ---
+# --- 12. GRUB ARGUMENT HELPER ---
 # Adds a kernel argument to GRUB_CMDLINE_LINUX_DEFAULT without removing existing boot options.
 function append_grub_arg() {
     local arg="$1"
@@ -206,7 +195,7 @@ function append_grub_arg() {
     fi
 }
 
-# --- 14. SAFETY EXIT COUNTDOWN HELPER ---
+# --- 13. SAFETY EXIT COUNTDOWN HELPER ---
 # Displays a visible delay before exiting on unsafe/non-fresh installs so the user can read the reason.
 function countdown_exit() {
     local seconds="$1"
@@ -218,7 +207,7 @@ function countdown_exit() {
     exit 1
 }
 
-# --- 15. YES/NO ANSWER LABEL HELPER ---
+# --- 14. YES/NO ANSWER LABEL HELPER ---
 # Converts Y/N input into a readable final answer line shown after every timed prompt.
 function yes_no_label() {
     local value="$1"
@@ -229,7 +218,7 @@ function yes_no_label() {
     fi
 }
 
-# --- 16. TIMED YES/NO PROMPT HELPER ---
+# --- 15. TIMED YES/NO PROMPT HELPER ---
 # Shows a 15-second countdown for Y/n prompts.
 # SPACE stops the countdown and waits for Y/N/ENTER instead of accepting default.
 # Y or N explicitly selects a value. Timeout accepts the default.
@@ -248,15 +237,33 @@ function timed_yes_no() {
 
     for ((i=T; i>0; i--)); do
         tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
-        key="$(tty_read_key 1)"
 
-        if [[ "$key" == " " ]]; then
-            tty_print "${BFR}"
-            answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
-            break
-        elif [[ "$key" =~ ^[YyNn]$ ]]; then
-            answer="$key"
-            break
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
         fi
     done
 
@@ -269,7 +276,7 @@ function timed_yes_no() {
     echo "$answer"
 }
 
-# --- 17. TIMED REBOOT COUNTDOWN HELPER ---
+# --- 16. TIMED REBOOT COUNTDOWN HELPER ---
 # Shows a blue flashing reboot countdown.
 # SPACE stops the countdown and prevents reboot. Timeout triggers reboot.
 function timed_reboot_countdown() {
@@ -278,12 +285,23 @@ function timed_reboot_countdown() {
 
     for ((i=seconds; i>0; i--)); do
         tty_print "${BFR}${BL}${CLF}REBOOTING IN ${i} SECONDS...${CL} ${YW}(press SPACE to stop countdown)${CL}"
-        key="$(tty_read_key 1)"
 
-        if [[ "$key" == " " ]]; then
-            tty_print "${BFR}"
-            tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
-            return 1
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    tty_print "${BFR}"
+                    tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
+                    return 1
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    tty_print "${BFR}"
+                    tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
+                    return 1
+                fi
+            fi
         fi
     done
 
@@ -291,7 +309,7 @@ function timed_reboot_countdown() {
     return 0
 }
 
-# --- 18. REALTEK NIC DETECTION HELPER ---
+# --- 17. REALTEK NIC DETECTION HELPER ---
 # Finds the active Realtek Ethernet interface by checking kernel driver names through ethtool.
 function detect_realtek_iface() {
     for iface in /sys/class/net/*; do
@@ -307,13 +325,13 @@ function detect_realtek_iface() {
     return 1
 }
 
-# --- 19. GPU NAME CLEANUP HELPER ---
+# --- 18. GPU NAME CLEANUP HELPER ---
 # Removes PCI IDs, revision markers, and extra whitespace so GPU display messages stay readable.
 function clean_gpu_name() {
     echo "$1" | sed -E 's/^[0-9a-fA-F:.]+[[:space:]]+//; s/\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]//g; s/\(rev [^)]+\)//g; s/[[:space:]]+/ /g; s/[[:space:]]+$//'
 }
 
-# --- 20. GPU SUMMARY HELPER ---
+# --- 19. GPU SUMMARY HELPER ---
 # Builds a clean human-readable GPU summary line from integrated/discrete GPU detection results.
 function build_gpu_summary() {
     local out=""
@@ -335,7 +353,7 @@ function build_gpu_summary() {
     echo "${out%; }"
 }
 
-# --- 21. STORAGE SUMMARY HELPER ---
+# --- 20. STORAGE SUMMARY HELPER ---
 # Builds a simple disk summary such as "SSD(sda) SSD(sdb) HDD(sdc)" for the detection screen.
 function build_storage_summary() {
     local out=""
@@ -353,7 +371,7 @@ function build_storage_summary() {
     echo "$out" | xargs
 }
 
-# --- 22. ADAPTIVE GPU LABEL HELPER ---
+# --- 21. ADAPTIVE GPU LABEL HELPER ---
 # Creates a system-type-aware detection message for laptops, workstations, VMs and mixed GPU systems.
 function detected_machine_gpu_label() {
     if [ "$IGPU_FOUND" == "yes" ] && [ "$DGPU_FOUND" == "yes" ]; then
@@ -367,7 +385,7 @@ function detected_machine_gpu_label() {
     fi
 }
 
-# --- 23. PROXMOX VERSION VALIDATION ---
+# --- 22. PROXMOX VERSION VALIDATION ---
 # Validates this is Proxmox VE 9 before showing fresh-install warnings or making changes.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -383,14 +401,14 @@ if [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+. Detected Proxmox VE ${PVE_MAJOR}. Script cancelled."
 fi
 
-# --- 24. FRESH INSTALL WARNING ---
+# --- 23. FRESH INSTALL WARNING ---
 # Shows only after confirming this is a valid Proxmox VE 9 system.
 echo -e "${YW} This script will Perform PVE9 Post Install Routines.${CL}"
 echo ""
 echo -e "${YW}${CLF} Intended for FRESH Proxmox VE 9 installs only.${CL}"
 echo ""
 
-# --- 25. PRE-INSTALL SYSTEM AUDIT ---
+# --- 24. PRE-INSTALL SYSTEM AUDIT ---
 # Detects CPU vendor, IOMMU flag, chassis type, virtual machine state, storage type, default route and LAN CIDR.
 CPU_TYPE=$(grep -m1 "vendor_id" /proc/cpuinfo | awk '{print $3}')
 
@@ -428,15 +446,36 @@ fi
 
 STORAGE_SUMMARY=$(build_storage_summary)
 
-# --- 26. FRESH INSTALL DETECTION ---
-# Checks for existing VMs, LXCs and extra bridges. Exits if the node does not look fresh.
+# --- 25. FRESH INSTALL DETECTION ---
+# Checks for existing VMs, LXCs, extra bridges and script-created artefacts from previous runs.
+# This prevents rerunning after a previous successful post-install even if no VMs/containers exist yet.
 msg_info "Checking for fresh install state"
 
 VM_COUNT=$(qm list 2>/dev/null | awk 'NR>1 {count++} END {print count+0}')
 CT_COUNT=$(pct list 2>/dev/null | awk 'NR>1 {count++} END {print count+0}')
 CUSTOM_BRIDGES=$(grep -Ec "^auto vmbr[1-9]" /etc/network/interfaces 2>/dev/null || true)
 
-if [ "$VM_COUNT" -gt 0 ] || [ "$CT_COUNT" -gt 0 ] || [ "$CUSTOM_BRIDGES" -gt 0 ]; then
+PREVIOUS_RUN_ARTIFACTS=(
+    "$COMPLETED_MARKER"
+    "$VERIFY_LOG"
+    "/usr/local/sbin/pve-no-nag-patch.sh"
+    "/etc/apt/apt.conf.d/no-nag-script"
+    "/etc/sysctl.d/99-pve9-hardening-network.conf"
+    "/etc/systemd/system/pve-numlock.service"
+    "/etc/systemd/system/realtek-optimize.service"
+    "/etc/profile.d/pve-postinstall-verify-display.sh"
+    "/root/.pve9-postinstall-verify-displayed"
+)
+
+PREVIOUS_RUN_HITS=()
+
+for artifact in "${PREVIOUS_RUN_ARTIFACTS[@]}"; do
+    if [ -e "$artifact" ]; then
+        PREVIOUS_RUN_HITS+=("$artifact")
+    fi
+done
+
+if [ "$VM_COUNT" -gt 0 ] || [ "$CT_COUNT" -gt 0 ] || [ "$CUSTOM_BRIDGES" -gt 0 ] || [ "${#PREVIOUS_RUN_HITS[@]}" -gt 0 ]; then
     IS_FRESH="no"
 fi
 
@@ -444,12 +483,20 @@ if [ "$IS_FRESH" == "no" ]; then
     echo ""
     echo -e "${RD}WARNING: This does not look like a fresh install.${CL}"
     echo -e "${YW}Detected VMs: ${VM_COUNT}, LXCs: ${CT_COUNT}, extra bridges: ${CUSTOM_BRIDGES}.${CL}"
+
+    if [ "${#PREVIOUS_RUN_HITS[@]}" -gt 0 ]; then
+        echo -e "${YW}Previous post-install artefacts detected:${CL}"
+        for hit in "${PREVIOUS_RUN_HITS[@]}"; do
+            echo -e "${YW} - ${hit}${CL}"
+        done
+    fi
+
     countdown_exit 30 "For safety this script will not continue on a non-fresh-looking node."
 fi
 
 msg_ok "FRESH INSTALL CHECK PASSED"
 
-# --- 27. GPU HARDWARE DETECTION ---
+# --- 26. GPU HARDWARE DETECTION ---
 # Detects iGPU and dGPU before printing adaptive detection messages or asking passthrough questions.
 msg_info "Detecting GPU hardware"
 
@@ -482,7 +529,7 @@ GPU_SUMMARY=$(build_gpu_summary)
 msg_ok "$(detected_machine_gpu_label)"
 echo -e " ${BL}━━━━━▶${CL} ${GPU_SUMMARY:-No GPU details detected}"
 
-# --- 28. GPU PASSTHROUGH USER OPTION ---
+# --- 27. GPU PASSTHROUGH USER OPTION ---
 # If a discrete GPU exists, asks whether to isolate only the discrete GPU for VM passthrough.
 ENABLE_PASSTHROUGH="n"
 
@@ -506,12 +553,12 @@ else
     echo -e "${YW}No discrete GPU detected. GPU passthrough will be skipped.${CL}"
 fi
 
-# --- 29. STORAGE DETECTION DISPLAY ---
+# --- 28. STORAGE DETECTION DISPLAY ---
 # Displays detected disk types before final confirmation.
 msg_ok "DETECTED STORAGE TYPE"
 echo -e " ${BL}━━━━━▶${CL} ${STORAGE_SUMMARY:-No disk summary detected}"
 
-# --- 30. CPU PERFORMANCE OPTION ---
+# --- 29. CPU PERFORMANCE OPTION ---
 # Optional CPU performance governor. Default is no to avoid unnecessary heat on laptops.
 cpu_yn=$(timed_yes_no "Set CPU Governor to PERFORMANCE?" "n")
 
@@ -521,7 +568,7 @@ else
     ENABLE_PERFORMANCE="n"
 fi
 
-# --- 31. CROWDSEC OPTION ---
+# --- 30. CROWDSEC OPTION ---
 # Optional CrowdSec security suite. Default is yes for your public-facing reverse-proxy/web workload.
 crowdsec_yn=$(timed_yes_no "Install CrowdSec Security Suite?" "y")
 
@@ -531,7 +578,7 @@ else
     ENABLE_CROWDSEC="y"
 fi
 
-# --- 32. FINAL START CONFIRMATION ---
+# --- 31. FINAL START CONFIRMATION ---
 # Last user checkpoint before changes are applied. Default is yes for unattended fresh install flow.
 start_yn=$(timed_yes_no "Start the PVE9 Post Install Script?" "y")
 
@@ -543,7 +590,7 @@ sleep 1
 clear
 header_info
 
-# --- 33. STORAGE MERGE ---
+# --- 32. STORAGE MERGE ---
 # Removes local-lvm if present and expands root/local storage for simple fresh-node usage.
 msg_info "Merging local-lvm into local storage"
 
@@ -557,7 +604,7 @@ fi
 
 msg_ok "local-lvm storage successfully merged to OS"
 
-# --- 34. DNS REDUNDANCY ---
+# --- 33. DNS REDUNDANCY ---
 # Adds Cloudflare primary/secondary DNS before package operations.
 msg_info "Configuring DNS resolvers"
 
@@ -570,7 +617,7 @@ EOF
 
 msg_ok "DNS RESOLVERS CONFIGURED (DNS1 = 1.1.1.1, DNS2 = 1.0.0.1)"
 
-# --- 35. REPOSITORIES & SYSTEM UPDATES ---
+# --- 34. REPOSITORIES & SYSTEM UPDATES ---
 # Removes enterprise repo, adds no-subscription repo, upgrades packages, and hides apt output noise.
 msg_info "Configuring Repositories & Running Updates"
 
@@ -590,7 +637,7 @@ DEBIAN_FRONTEND=noninteractive apt-get -y autoremove &>/dev/null
 
 msg_ok "SYSTEM UPDATED"
 
-# --- 36. SUBSCRIPTION NAG PATCH HELPER ---
+# --- 35. SUBSCRIPTION NAG PATCH HELPER ---
 # Creates a reusable patch script for proxmoxlib.js so the no-subscription popup stays removed after package updates.
 msg_info "Patching UI Nag"
 
@@ -612,7 +659,7 @@ EOF
 
 chmod +x /usr/local/sbin/pve-no-nag-patch.sh
 
-# --- 37. SUBSCRIPTION NAG DPKG HOOK ---
+# --- 36. SUBSCRIPTION NAG DPKG HOOK ---
 # Reapplies the nag patch automatically whenever proxmox-widget-toolkit is updated/reinstalled.
 cat <<'EOF' > /etc/apt/apt.conf.d/no-nag-script
 DPkg::Post-Invoke { "/usr/local/sbin/pve-no-nag-patch.sh && systemctl restart pveproxy >/dev/null 2>&1 || true"; };
@@ -624,13 +671,13 @@ systemctl restart pveproxy &>/dev/null || true
 
 msg_ok "NAG REMOVED"
 
-# --- 38. POWER TARGET MASKING ---
+# --- 37. POWER TARGET MASKING ---
 # Disables sleep/suspend/hibernate targets for always-on server behaviour.
 msg_info "Optimizing Power/Sleep Settings"
 
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target &>/dev/null
 
-# --- 39. LAPTOP LID BEHAVIOUR ---
+# --- 38. LAPTOP LID BEHAVIOUR ---
 # On laptops, ignores lid close so the node can run headless while closed.
 if [ "$SYSTEM_TYPE" == "Laptop" ]; then
     set_or_append_equals_config /etc/systemd/logind.conf "HandleLidSwitch" "ignore"
@@ -641,7 +688,7 @@ fi
 
 msg_ok "POWER OPTIMIZED"
 
-# --- 40. GRUB IOMMU CONFIGURATION ---
+# --- 39. GRUB IOMMU CONFIGURATION ---
 # Enables CPU-specific IOMMU, passthrough mode, and screen blanking without overwriting existing GRUB args.
 msg_info "Configuring GRUB & IOMMU"
 
@@ -653,7 +700,7 @@ update-grub &>/dev/null || true
 
 msg_ok "GRUB UPDATED"
 
-# --- 41. GPU VFIO MODULES AND BLACKLISTS ---
+# --- 40. GPU VFIO MODULES AND BLACKLISTS ---
 # If selected, loads VFIO modules and prevents host GPU drivers from claiming the discrete GPU.
 if [ "$ENABLE_PASSTHROUGH" == "y" ]; then
     if [ -n "$DGPU_IDS" ]; then
@@ -681,7 +728,7 @@ EOF
     fi
 fi
 
-# --- 42. SSH AUTHORIZED KEYS CHECK ---
+# --- 41. SSH AUTHORIZED KEYS CHECK ---
 # Checks whether root SSH keys exist before disabling password authentication to prevent lockout.
 msg_info "Checking for SSH authorized keys"
 
@@ -690,7 +737,7 @@ ROOT_KEYS="/root/.ssh/authorized_keys"
 if [ -s "$ROOT_KEYS" ]; then
     msg_ok "SSH KEYS DETECTED"
 
-    # --- 43. SSH HARDENING ---
+    # --- 42. SSH HARDENING ---
     # Uses root SSH keys as safety proof, then disables password auth and root password login.
     msg_info "Disabling root password login"
 
@@ -712,7 +759,7 @@ else
     msg_warn "SSH keys not found; root password login not disabled"
 fi
 
-# --- 44. SYSCTL HARDENING AND NETWORK TUNING FILE ---
+# --- 43. SYSCTL HARDENING AND NETWORK TUNING FILE ---
 # Adds security hardening and higher connection/network limits for reverse-proxy and upload/download workloads.
 msg_info "Applying Sysctl Hardening & Network Tuning"
 
@@ -750,20 +797,20 @@ net.ipv4.tcp_keepalive_probes = 5
 net.netfilter.nf_conntrack_max = 1048576
 EOF
 
-# --- 45. SYSCTL APPLY ---
+# --- 44. SYSCTL APPLY ---
 # Applies the new sysctl file immediately without requiring reboot.
 sysctl --system &>/dev/null || true
 
 msg_ok "SYSCTL HARDENING APPLIED"
 
-# --- 46. REALTEK DRIVER PACKAGE PREP ---
+# --- 45. REALTEK DRIVER PACKAGE PREP ---
 # Installs ethtool so Realtek offload settings can be detected and changed.
 msg_info "Checking for Realtek NIC optimization"
 
 DEBIAN_FRONTEND=noninteractive apt-get install -y ethtool &>/dev/null || true
 REALTEK_IFACE=$(detect_realtek_iface || true)
 
-# --- 47. REALTEK OFFLOAD OPTIMIZATION ---
+# --- 46. REALTEK OFFLOAD OPTIMIZATION ---
 # For Realtek NICs, disables TSO/GSO/GRO to reduce Docker/reverse-proxy instability under traffic.
 if [ -n "$REALTEK_IFACE" ]; then
     ethtool -K "$REALTEK_IFACE" tso off gso off gro off &>/dev/null || true
@@ -793,7 +840,7 @@ else
     msg_ok "NO REALTEK NIC OPTIMIZATION NEEDED"
 fi
 
-# --- 48. PROXMOX FIREWALL BASELINE ---
+# --- 47. PROXMOX FIREWALL BASELINE ---
 # Creates a LAN-safe host firewall: LAN SSH/WebUI, public 80/443, ICMP allowed, inbound default drop.
 msg_info "Configuring Proxmox Firewall"
 
@@ -831,7 +878,7 @@ else
     msg_warn "Could not detect LAN CIDR. Proxmox firewall rules skipped to avoid lockout."
 fi
 
-# --- 49. CROWDSEC INSTALLATION ---
+# --- 48. CROWDSEC INSTALLATION ---
 # Installs CrowdSec and unattended-upgrades when selected.
 if [ "$ENABLE_CROWDSEC" == "y" ]; then
     msg_info "Installing Security Suite"
@@ -845,7 +892,7 @@ if [ "$ENABLE_CROWDSEC" == "y" ]; then
     DEBIAN_FRONTEND=noninteractive apt-get update &>/dev/null || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec unattended-upgrades &>/dev/null || true
 
-    # --- 50. CROWDSEC BOUNCER SELECTION ---
+    # --- 49. CROWDSEC BOUNCER SELECTION ---
     # Prefers nftables bouncer on modern Proxmox, falls back to iptables if nftables package is unavailable.
     if apt-cache show crowdsec-firewall-bouncer-nftables &>/dev/null; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-firewall-bouncer-nftables &>/dev/null || true
@@ -857,14 +904,14 @@ if [ "$ENABLE_CROWDSEC" == "y" ]; then
         CROWDSEC_BOUNCER_PACKAGE="none"
     fi
 
-    # --- 51. CROWDSEC COLLECTIONS ---
+    # --- 50. CROWDSEC COLLECTIONS ---
     # Adds Linux, SSH, Proxmox and HTTP-CVE collections for host and web-facing attack detection.
     cscli collections install crowdsecurity/linux &>/dev/null || true
     cscli collections install crowdsecurity/sshd &>/dev/null || true
     cscli collections install crowdsecurity/proxmox &>/dev/null || true
     cscli collections install crowdsecurity/http-cve &>/dev/null || true
 
-    # --- 52. CROWDSEC SERVICE ENABLEMENT ---
+    # --- 51. CROWDSEC SERVICE ENABLEMENT ---
     # Enables CrowdSec and bouncer services where available.
     systemctl enable --now crowdsec &>/dev/null || true
     systemctl restart crowdsec &>/dev/null || true
@@ -874,7 +921,7 @@ if [ "$ENABLE_CROWDSEC" == "y" ]; then
         systemctl restart crowdsec-firewall-bouncer &>/dev/null || true
     fi
 
-    # --- 53. UNATTENDED UPGRADES ---
+    # --- 52. UNATTENDED UPGRADES ---
     # Enables daily package list refresh and unattended security upgrades.
     cat <<EOF > /etc/apt/apt.conf.d/20auto-upgrades
 APT::Periodic::Update-Package-Lists "1";
@@ -884,7 +931,7 @@ EOF
     msg_ok "SECURITY INSTALLED"
 fi
 
-# --- 54. PROXMOX FIREWALL SERVICE REINFORCEMENT ---
+# --- 53. PROXMOX FIREWALL SERVICE REINFORCEMENT ---
 # Ensures pve-firewall remains enabled after all firewall/security changes.
 msg_info "Enabling Proxmox firewall service"
 
@@ -893,7 +940,7 @@ systemctl restart pve-firewall &>/dev/null || true
 
 msg_ok "PROXMOX FIREWALL SERVICE ENABLED"
 
-# --- 55. OPTIONAL CPU PERFORMANCE GOVERNOR ---
+# --- 54. OPTIONAL CPU PERFORMANCE GOVERNOR ---
 # Enables persistent CPU performance mode only if the user selected it.
 if [ "$ENABLE_PERFORMANCE" == "y" ]; then
     msg_info "Setting Performance Governor"
@@ -913,7 +960,7 @@ if [ "$ENABLE_PERFORMANCE" == "y" ]; then
     msg_ok "CPU PERFORMANCE ACTIVE"
 fi
 
-# --- 56. SSD TRIM ---
+# --- 55. SSD TRIM ---
 # Enables fstrim timer automatically when SSD/NVMe storage is detected.
 if [ "$IS_SSD" == "yes" ]; then
     msg_info "Enabling SSD TRIM"
@@ -923,7 +970,7 @@ if [ "$IS_SSD" == "yes" ]; then
     msg_ok "SSD TRIM ENABLED"
 fi
 
-# --- 57. NUMLOCK SCRIPT ---
+# --- 56. NUMLOCK SCRIPT ---
 # Creates a helper that enables NumLock on Linux console TTYs when possible.
 msg_info "Configuring NumLock on boot"
 
@@ -940,7 +987,7 @@ EOF
 
 chmod +x /usr/local/sbin/pve-numlock-on.sh
 
-# --- 58. NUMLOCK SYSTEMD SERVICE ---
+# --- 57. NUMLOCK SYSTEMD SERVICE ---
 # Persists NumLock activation across reboots using a simple oneshot service.
 cat <<EOF > /etc/systemd/system/pve-numlock.service
 [Unit]
@@ -963,7 +1010,7 @@ NUMLOCK_CONFIGURED="yes"
 
 msg_ok "NUMLOCK BOOT SERVICE CONFIGURED"
 
-# --- 59. AUTO-VERIFY GHOST SCRIPT CREATION ---
+# --- 58. AUTO-VERIFY GHOST SCRIPT CREATION ---
 # Creates the one-time verifier script that runs after reboot, writes a log, then deletes itself and its service.
 msg_info "Creating Auto-Verify Ghost Script"
 
@@ -1139,7 +1186,7 @@ EOF
 
 chmod +x /root/pve_verify.sh
 
-# --- 60. AUTO-VERIFY SYSTEMD SERVICE ---
+# --- 59. AUTO-VERIFY SYSTEMD SERVICE ---
 # Runs the verifier once after reboot after network, SSH and Proxmox services are available.
 cat <<EOF > /etc/systemd/system/pve-postinstall-verify.service
 [Unit]
@@ -1162,7 +1209,7 @@ EOF
 systemctl daemon-reload
 systemctl enable pve-postinstall-verify.service &>/dev/null
 
-# --- 61. AUTO-VERIFY SSH LOGIN DISPLAY HELPER ---
+# --- 60. AUTO-VERIFY SSH LOGIN DISPLAY HELPER ---
 # Displays the verification log once on SSH login only after the log exists.
 # If the verifier has not finished yet, it stays installed and tries again on the next SSH login.
 cat <<'EOF' > /etc/profile.d/pve-postinstall-verify-display.sh
@@ -1201,6 +1248,13 @@ return 0 2>/dev/null || exit 0
 EOF
 
 chmod +x /etc/profile.d/pve-postinstall-verify-display.sh
+
+# --- 61. COMPLETION MARKER ---
+# Creates a marker so future runs are detected as non-fresh and safely blocked.
+cat <<EOF > "$COMPLETED_MARKER"
+PVE9 Post Install completed on: $(date)
+Hostname: $(hostname)
+EOF
 
 msg_ok "AUTO-VERIFY GHOST SCRIPT CREATED"
 
