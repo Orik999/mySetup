@@ -652,27 +652,49 @@ header_info
 
 # --- 31. STORAGE MERGE ---
 # Removes local-lvm and expands the OS/root storage for simple single-node fresh installs.
-# This restores the previously working flow: remove /dev/pve/data, grow /dev/pve/root, resize ext filesystem, remove local-lvm from Proxmox storage.
+# This keeps the previously working ext4 resize flow but fixes maxvz=0GB installs where /dev/pve/data may not exist.
+# If /dev/pve/data exists, it is removed first to return its extents to the pve volume group.
+# If /dev/pve/data does not exist, the script still checks for free extents in VG "pve" and expands /dev/pve/root.
 msg_info "Merging local-lvm into local storage"
 
-if lvdisplay /dev/pve/data >/dev/null 2>&1; then
-    pvesm freezefs local-lvm &>/dev/null || true
-    msg_ok "LOCAL-LVM STORAGE FREEZE REQUESTED"
-
-    lvremove -fy /dev/pve/data &>/dev/null
-    msg_ok "LOCAL-LVM THIN DATA VOLUME REMOVED"
-
-    lvresize -l +100%FREE /dev/pve/root &>/dev/null
-    msg_ok "ROOT LOGICAL VOLUME EXPANDED WITH FREE SPACE"
-
-    resize2fs /dev/mapper/pve-root &>/dev/null
-    msg_ok "ROOT FILESYSTEM RESIZED"
-
+msg_info "Checking Proxmox local-lvm storage configuration"
+if grep -q "^lvmthin: local-lvm" /etc/pve/storage.cfg 2>/dev/null; then
+    msg_info "Removing local-lvm from Proxmox storage config"
     pvesm remove local-lvm &>/dev/null || true
     msg_ok "LOCAL-LVM REMOVED FROM PROXMOX STORAGE CONFIG"
 else
-    pvesm remove local-lvm &>/dev/null || true
-    msg_ok "LOCAL-LVM DATA VOLUME NOT PRESENT"
+    msg_ok "LOCAL-LVM STORAGE CONFIG NOT PRESENT"
+fi
+
+msg_info "Checking whether local-lvm thin data volume exists"
+if lvdisplay /dev/pve/data >/dev/null 2>&1; then
+    msg_info "Removing local-lvm thin data volume"
+    lvremove -fy /dev/pve/data &>/dev/null
+    msg_ok "LOCAL-LVM THIN DATA VOLUME REMOVED"
+else
+    msg_ok "LOCAL-LVM THIN DATA VOLUME NOT PRESENT"
+fi
+
+msg_info "Checking free space in pve volume group"
+PVE_FREE_EXTENTS="$(vgs --noheadings -o vg_free_count pve 2>/dev/null | awk '{print $1}' || echo 0)"
+
+if [[ "$PVE_FREE_EXTENTS" =~ ^[0-9]+$ ]] && [ "$PVE_FREE_EXTENTS" -gt 0 ]; then
+    msg_info "Expanding root logical volume with all free pve space"
+    lvresize -l +100%FREE /dev/pve/root &>/dev/null
+    msg_ok "ROOT LOGICAL VOLUME EXPANDED WITH FREE SPACE"
+
+    msg_info "Resizing root ext filesystem"
+    resize2fs /dev/mapper/pve-root &>/dev/null
+    msg_ok "ROOT FILESYSTEM RESIZED"
+else
+    msg_ok "NO FREE PVE VOLUME GROUP SPACE FOUND TO MERGE"
+fi
+
+msg_info "Verifying local storage path after merge"
+if df -h /var/lib/vz &>/dev/null; then
+    msg_ok "LOCAL STORAGE PATH VERIFIED (/var/lib/vz)"
+else
+    msg_warn "Local storage path /var/lib/vz could not be verified"
 fi
 
 msg_ok "LOCAL-LVM STORAGE SUCCESSFULLY MERGED TO OS"
@@ -681,9 +703,11 @@ msg_ok "LOCAL-LVM STORAGE SUCCESSFULLY MERGED TO OS"
 # Adds Cloudflare DNS redundancy before package updates.
 msg_info "Configuring DNS resolvers"
 
+msg_info "Backing up current DNS resolver config"
 cp -n /etc/resolv.conf /etc/resolv.conf.pve9-postinstall.bak 2>/dev/null || true
 msg_ok "DNS CONFIG BACKUP CREATED"
 
+msg_info "Writing Cloudflare DNS resolver config"
 cat <<EOF > /etc/resolv.conf
 nameserver 1.1.1.1
 nameserver 1.0.0.1
@@ -695,9 +719,11 @@ msg_ok "DNS RESOLVERS CONFIGURED (DNS1 = 1.1.1.1, DNS2 = 1.0.0.1)"
 # Removes enterprise repositories, enables no-subscription repo and updates packages with hidden output.
 msg_info "Configuring Repositories & Running Updates"
 
+msg_info "Removing enterprise repository files"
 rm -f /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/ceph.sources
 msg_ok "ENTERPRISE / CEPH ENTERPRISE REPOSITORY FILES REMOVED"
 
+msg_info "Writing Proxmox no-subscription repository"
 cat <<EOF > /etc/apt/sources.list.d/proxmox.sources
 Types: deb
 URIs: http://download.proxmox.com/debian/pve
@@ -705,24 +731,27 @@ Suites: trixie
 Components: pve-no-subscription
 Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 EOF
-
 msg_ok "PROXMOX NO-SUBSCRIPTION REPOSITORY CONFIGURED"
 
+msg_info "Updating APT Package Lists"
 DEBIAN_FRONTEND=noninteractive apt-get update &>/dev/null
 msg_ok "APT PACKAGE LISTS UPDATED"
 
+msg_info "Upgrading System Packages"
 DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade &>/dev/null
 msg_ok "SYSTEM PACKAGES UPGRADED"
 
+msg_info "Cleaning Up Unused Packages"
 DEBIAN_FRONTEND=noninteractive apt-get -y autoremove &>/dev/null
 msg_ok "UNUSED PACKAGES REMOVED"
 
-msg_ok "SYSTEM UPDATED"
+msg_ok "SYSTEM UPDATED & CLEANED"
 
 # --- 34. UI NAG REMOVAL ---
 # Installs a persistent helper and dpkg hook to remove the Proxmox no-subscription popup after toolkit updates.
-msg_info "Patching UI Nag"
+msg_info "Patching WEBUI Nag"
 
+msg_info "Writing no-nag patch helper"
 cat <<'EOF' > /usr/local/sbin/pve-no-nag-patch.sh
 #!/usr/bin/env bash
 set -euo pipefail
@@ -741,21 +770,26 @@ if ! grep -q "if (false)\|NoMoreNagging" "$FILE"; then
 fi
 EOF
 
+msg_info "Making no-nag patch helper executable"
 chmod +x /usr/local/sbin/pve-no-nag-patch.sh
 msg_ok "NO-NAG PATCH HELPER INSTALLED"
 
+msg_info "Writing no-nag dpkg post-invoke hook"
 cat <<'EOF' > /etc/apt/apt.conf.d/no-nag-script
 DPkg::Post-Invoke { "/usr/local/sbin/pve-no-nag-patch.sh && systemctl restart pveproxy >/dev/null 2>&1 || true"; };
 EOF
 
 msg_ok "NO-NAG DPKG POST-INVOKE HOOK INSTALLED"
 
+msg_info "Reinstalling Proxmox widget toolkit"
 DEBIAN_FRONTEND=noninteractive apt-get --reinstall install -y proxmox-widget-toolkit &>/dev/null
 msg_ok "PROXMOX WIDGET TOOLKIT REINSTALLED"
 
+msg_info "Applying no-subscription nag patch"
  /usr/local/sbin/pve-no-nag-patch.sh &>/dev/null || true
 msg_ok "NO-SUBSCRIPTION NAG PATCH APPLIED"
 
+msg_info "Restarting pveproxy"
 systemctl restart pveproxy &>/dev/null || true
 msg_ok "PVEPROXY RESTARTED"
 
@@ -765,19 +799,24 @@ msg_ok "WEBUI NAG REMOVED"
 # Masks sleep states and ignores laptop lid close on laptop hardware.
 msg_info "Optimizing Power/Sleep Settings"
 
+msg_info "Masking sleep, suspend, hibernate and hybrid-sleep targets"
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target &>/dev/null
 msg_ok "SLEEP / SUSPEND / HIBERNATE TARGETS MASKED"
 
 if [ "$SYSTEM_TYPE" == "Laptop" ]; then
+    msg_info "Setting laptop lid close behaviour to ignore"
     set_or_append_equals_config /etc/systemd/logind.conf "HandleLidSwitch" "ignore"
     msg_ok "LAPTOP LID SWITCH SET TO IGNORE"
 
+    msg_info "Setting docked laptop lid close behaviour to ignore"
     set_or_append_equals_config /etc/systemd/logind.conf "HandleLidSwitchDocked" "ignore"
     msg_ok "DOCKED LID SWITCH SET TO IGNORE"
 
+    msg_info "Configuring lid switch inhibit behaviour"
     set_or_append_equals_config /etc/systemd/logind.conf "LidSwitchIgnoreInhibited" "no"
     msg_ok "LID SWITCH INHIBIT BEHAVIOUR CONFIGURED"
 
+    msg_info "Restarting systemd-logind"
     systemctl restart systemd-logind &>/dev/null || true
     msg_ok "SYSTEMD-LOGIND RESTARTED"
 else
@@ -790,15 +829,19 @@ msg_ok "POWER SETTINGS OPTIMIZED"
 # Adds IOMMU, passthrough mode and console blanking without removing existing kernel args.
 msg_info "Configuring GRUB & IOMMU"
 
+msg_info "Configuring CPU IOMMU flag"
 append_grub_arg "$IOMMU_FLAG"
 msg_ok "CPU IOMMU FLAG CONFIGURED (${IOMMU_FLAG})"
 
+msg_info "Configuring IOMMU passthrough mode"
 append_grub_arg "iommu=pt"
 msg_ok "IOMMU PASSTHROUGH MODE CONFIGURED"
 
+msg_info "Configuring console blanking"
 append_grub_arg "consoleblank=60"
 msg_ok "CONSOLE BLANKING CONFIGURED"
 
+msg_info "Updating GRUB configuration"
 update-grub &>/dev/null || true
 msg_ok "GRUB CONFIG UPDATED"
 
@@ -810,11 +853,13 @@ if [ "$ENABLE_PASSTHROUGH" == "y" ]; then
     if [ -n "$DGPU_IDS" ]; then
         msg_info "Isolating discrete GPU for Passthrough"
 
+        msg_info "Adding VFIO modules to /etc/modules"
         for module in vfio vfio_iommu_type1 vfio_pci vfio_virqfd; do
             grep -qxF "$module" /etc/modules || echo "$module" >> /etc/modules
         done
         msg_ok "VFIO MODULES ADDED TO /ETC/MODULES"
 
+        msg_info "Writing host GPU driver blacklist"
         cat <<EOF > /etc/modprobe.d/pve-blacklist.conf
 blacklist nvidia
 blacklist nouveau
@@ -826,9 +871,11 @@ EOF
 
         msg_ok "HOST GPU DRIVERS BLACKLISTED FOR PASSTHROUGH"
 
+        msg_info "Writing VFIO PCI device IDs"
         echo "options vfio-pci ids=$DGPU_IDS disable_vga=1" > /etc/modprobe.d/vfio.conf
         msg_ok "VFIO PCI DEVICE IDS CONFIGURED ($DGPU_IDS)"
 
+        msg_info "Updating initramfs for VFIO"
         update-initramfs -u -k all &>/dev/null || true
         msg_ok "INITRAMFS UPDATED FOR VFIO"
 
@@ -851,24 +898,31 @@ if [ -s "$ROOT_KEYS" ]; then
 
     msg_info "Disabling root password login"
 
+    msg_info "Setting root SSH directory permissions"
     chmod 700 /root/.ssh
     msg_ok "ROOT SSH DIRECTORY PERMISSIONS SET"
 
+    msg_info "Setting root authorized_keys permissions"
     chmod 600 "$ROOT_KEYS"
     msg_ok "ROOT AUTHORIZED_KEYS PERMISSIONS SET"
 
+    msg_info "Configuring SSH AddressFamily"
     set_or_append_space_config /etc/ssh/sshd_config "AddressFamily" "inet"
     msg_ok "SSH ADDRESS FAMILY SET TO IPV4"
 
+    msg_info "Disabling SSH password authentication"
     set_or_append_space_config /etc/ssh/sshd_config "PasswordAuthentication" "no"
     msg_ok "SSH PASSWORD AUTHENTICATION DISABLED"
 
+    msg_info "Disabling root SSH password login"
     set_or_append_space_config /etc/ssh/sshd_config "PermitRootLogin" "prohibit-password"
     msg_ok "ROOT SSH PASSWORD LOGIN DISABLED"
 
+    msg_info "Validating sshd config"
     sshd -t &>/dev/null
     msg_ok "SSHD CONFIG VALIDATED"
 
+    msg_info "Restarting SSH service"
     systemctl restart ssh.service &>/dev/null || true
     msg_ok "SSH SERVICE RESTARTED"
 
@@ -884,6 +938,7 @@ fi
 # Adds kernel hardening and high-traffic tuning for reverse proxy / VM workloads.
 msg_info "Applying Sysctl Hardening & Network Tuning"
 
+msg_info "Writing sysctl hardening and network tuning file"
 cat <<EOF > /etc/sysctl.d/99-pve9-hardening-network.conf
 # PVE9 security hardening
 net.ipv4.ip_forward = 1
@@ -920,6 +975,7 @@ EOF
 
 msg_ok "SYSCTL HARDENING / NETWORK TUNING FILE WRITTEN"
 
+msg_info "Applying sysctl settings"
 sysctl --system &>/dev/null || true
 msg_ok "SYSCTL SETTINGS APPLIED"
 
@@ -929,15 +985,19 @@ msg_ok "SYSCTL HARDENING APPLIED"
 # Detects Realtek NICs and disables problematic offloads persistently.
 msg_info "Checking for Realtek NIC optimization"
 
+msg_info "Installing or verifying ethtool"
 DEBIAN_FRONTEND=noninteractive apt-get install -y ethtool &>/dev/null || true
 msg_ok "ETHTOOL INSTALLED / VERIFIED"
 
+msg_info "Detecting Realtek network interface"
 REALTEK_IFACE=$(detect_realtek_iface || true)
 
 if [ -n "$REALTEK_IFACE" ]; then
+    msg_info "Applying Realtek offload settings"
     ethtool -K "$REALTEK_IFACE" tso off gso off gro off &>/dev/null || true
     msg_ok "REALTEK OFFLOAD SETTINGS APPLIED ($REALTEK_IFACE)"
 
+    msg_info "Writing Realtek optimization systemd service"
     cat <<EOF > /etc/systemd/system/realtek-optimize.service
 [Unit]
 Description=Realtek NIC Optimization for Docker/Reverse Proxy Stability
@@ -955,9 +1015,11 @@ EOF
 
     msg_ok "REALTEK OPTIMIZATION SYSTEMD SERVICE WRITTEN"
 
+    msg_info "Reloading systemd daemon"
     systemctl daemon-reload &>/dev/null
     msg_ok "SYSTEMD DAEMON RELOADED"
 
+    msg_info "Enabling Realtek optimization service"
     systemctl enable realtek-optimize.service &>/dev/null
     msg_ok "REALTEK OPTIMIZATION SERVICE ENABLED"
 
@@ -973,10 +1035,12 @@ fi
 # Enables Proxmox firewall with LAN-only SSH/WebUI access and public 80/443 allowance.
 msg_info "Configuring Proxmox Firewall"
 
+msg_info "Creating or verifying Proxmox node firewall directory"
 mkdir -p "/etc/pve/nodes/${HOSTNAME_SHORT}"
 msg_ok "PROXMOX NODE FIREWALL DIRECTORY VERIFIED"
 
 if [ -n "$LAN_CIDR" ]; then
+    msg_info "Enabling datacenter firewall"
     if grep -q "^firewall:" /etc/pve/datacenter.cfg 2>/dev/null; then
         sed -i 's/^firewall:.*/firewall: 1/' /etc/pve/datacenter.cfg
     else
@@ -985,6 +1049,7 @@ if [ -n "$LAN_CIDR" ]; then
 
     msg_ok "DATACENTER FIREWALL ENABLED"
 
+    msg_info "Writing node firewall rules"
     cat <<EOF > "/etc/pve/nodes/${HOSTNAME_SHORT}/host.fw"
 [OPTIONS]
 enable: 1
@@ -1001,9 +1066,11 @@ EOF
 
     msg_ok "NODE FIREWALL RULES WRITTEN"
 
+    msg_info "Enabling pve-firewall service"
     systemctl enable --now pve-firewall &>/dev/null || true
     msg_ok "PVE-FIREWALL SERVICE ENABLED"
 
+    msg_info "Restarting pve-firewall service"
     systemctl restart pve-firewall &>/dev/null || true
     msg_ok "PVE-FIREWALL SERVICE RESTARTED"
 
@@ -1020,25 +1087,32 @@ fi
 if [ "$ENABLE_CROWDSEC" == "y" ]; then
     msg_info "Installing Security Suite"
 
+    msg_info "Installing CrowdSec dependency packages"
     DEBIAN_FRONTEND=noninteractive apt-get install -y curl gnupg ca-certificates &>/dev/null || true
     msg_ok "SECURITY INSTALL DEPENDENCIES INSTALLED"
 
     if command -v curl >/dev/null 2>&1; then
+        msg_info "Running CrowdSec repository installer"
         curl -s https://install.crowdsec.net | sh &>/dev/null || true
         msg_ok "CROWDSEC REPOSITORY INSTALLER EXECUTED"
     fi
 
+    msg_info "Updating APT package lists for CrowdSec"
     DEBIAN_FRONTEND=noninteractive apt-get update &>/dev/null || true
     msg_ok "APT PACKAGE LISTS UPDATED FOR CROWDSEC"
 
+    msg_info "Installing CrowdSec and unattended-upgrades"
     DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec unattended-upgrades &>/dev/null || true
     msg_ok "CROWDSEC AND UNATTENDED-UPGRADES INSTALLED"
 
+    msg_info "Checking available CrowdSec firewall bouncer package"
     if apt-cache show crowdsec-firewall-bouncer-nftables &>/dev/null; then
+        msg_info "Installing CrowdSec nftables firewall bouncer"
         DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-firewall-bouncer-nftables &>/dev/null || true
         CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-nftables"
         msg_ok "CROWDSEC NFTABLES FIREWALL BOUNCER INSTALLED"
     elif apt-cache show crowdsec-firewall-bouncer-iptables &>/dev/null; then
+        msg_info "Installing CrowdSec iptables firewall bouncer"
         DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-firewall-bouncer-iptables &>/dev/null || true
         CROWDSEC_BOUNCER_PACKAGE="crowdsec-firewall-bouncer-iptables"
         msg_ok "CROWDSEC IPTABLES FIREWALL BOUNCER INSTALLED"
@@ -1047,34 +1121,44 @@ if [ "$ENABLE_CROWDSEC" == "y" ]; then
         msg_warn "CrowdSec firewall bouncer package not found"
     fi
 
+    msg_info "Installing CrowdSec Linux collection"
     cscli collections install crowdsecurity/linux &>/dev/null || true
     msg_ok "CROWDSEC LINUX COLLECTION INSTALLED"
 
+    msg_info "Installing CrowdSec sshd collection"
     cscli collections install crowdsecurity/sshd &>/dev/null || true
     msg_ok "CROWDSEC SSHD COLLECTION INSTALLED"
 
+    msg_info "Installing CrowdSec Proxmox collection"
     cscli collections install crowdsecurity/proxmox &>/dev/null || true
     msg_ok "CROWDSEC PROXMOX COLLECTION INSTALLED"
 
+    msg_info "Installing CrowdSec http-cve collection"
     cscli collections install crowdsecurity/http-cve &>/dev/null || true
     msg_ok "CROWDSEC HTTP-CVE COLLECTION INSTALLED"
 
+    msg_info "Enabling CrowdSec service"
     systemctl enable --now crowdsec &>/dev/null || true
     msg_ok "CROWDSEC SERVICE ENABLED"
 
+    msg_info "Restarting CrowdSec service"
     systemctl restart crowdsec &>/dev/null || true
     msg_ok "CROWDSEC SERVICE RESTARTED"
 
+    msg_info "Checking CrowdSec firewall bouncer service"
     if systemctl list-unit-files 'crowdsec-firewall-bouncer*' --no-pager --no-legend 2>/dev/null | grep -q "crowdsec-firewall-bouncer"; then
+        msg_info "Enabling CrowdSec firewall bouncer"
         systemctl enable --now crowdsec-firewall-bouncer &>/dev/null || true
         msg_ok "CROWDSEC FIREWALL BOUNCER ENABLED"
 
+        msg_info "Restarting CrowdSec firewall bouncer"
         systemctl restart crowdsec-firewall-bouncer &>/dev/null || true
         msg_ok "CROWDSEC FIREWALL BOUNCER RESTARTED"
     else
         msg_warn "CrowdSec firewall bouncer service was not found after install"
     fi
 
+    msg_info "Writing unattended-upgrades config"
     cat <<EOF > /etc/apt/apt.conf.d/20auto-upgrades
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -1091,9 +1175,11 @@ fi
 # Ensures the firewall service remains enabled now and at boot.
 msg_info "Enabling Proxmox firewall service"
 
+msg_info "Enabling Proxmox firewall service at boot"
 systemctl enable --now pve-firewall &>/dev/null || true
 msg_ok "PROXMOX FIREWALL SERVICE ENABLED AT BOOT"
 
+msg_info "Restarting Proxmox firewall service"
 systemctl restart pve-firewall &>/dev/null || true
 msg_ok "PROXMOX FIREWALL SERVICE RESTARTED"
 
@@ -1104,13 +1190,16 @@ msg_ok "PROXMOX FIREWALL SERVICE ENABLED"
 if [ "$ENABLE_PERFORMANCE" == "y" ]; then
     msg_info "Setting Performance Governor"
 
+    msg_info "Installing cpufrequtils"
     DEBIAN_FRONTEND=noninteractive apt-get install -y cpufrequtils &>/dev/null || true
     msg_ok "CPUFREQUTILS INSTALLED"
 
+    msg_info "Writing performance governor default"
     echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
     msg_ok "CPU GOVERNOR DEFAULT SET TO PERFORMANCE"
 
     if [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
+        msg_info "Applying live CPU performance governor"
         for r in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
             echo "performance" > "$r" 2>/dev/null || true
         done
@@ -1119,6 +1208,7 @@ if [ "$ENABLE_PERFORMANCE" == "y" ]; then
         msg_warn "CPUFREQ sysfs path not found; live governor change skipped"
     fi
 
+    msg_info "Restarting cpufrequtils service"
     systemctl restart cpufrequtils &>/dev/null || true
     msg_ok "CPUFREQUTILS SERVICE RESTARTED"
 
@@ -1130,6 +1220,7 @@ fi
 if [ "$IS_SSD" == "yes" ]; then
     msg_info "Enabling SSD TRIM"
 
+    msg_info "Enabling and starting fstrim timer"
     systemctl enable --now fstrim.timer &>/dev/null
     msg_ok "FSTRIM TIMER ENABLED AND STARTED"
 
@@ -1142,9 +1233,11 @@ fi
 # Enables NumLock on Linux consoles at boot when console tools support it.
 msg_info "Configuring NumLock on boot"
 
+msg_info "Installing or verifying kbd package"
 DEBIAN_FRONTEND=noninteractive apt-get install -y kbd &>/dev/null || true
 msg_ok "KBD PACKAGE INSTALLED / VERIFIED"
 
+msg_info "Writing NumLock helper script"
 cat <<'EOF' > /usr/local/sbin/pve-numlock-on.sh
 #!/usr/bin/env bash
 set +e
@@ -1156,9 +1249,11 @@ done
 exit 0
 EOF
 
+msg_info "Making NumLock helper script executable"
 chmod +x /usr/local/sbin/pve-numlock-on.sh
 msg_ok "NUMLOCK HELPER SCRIPT INSTALLED"
 
+msg_info "Writing NumLock systemd service"
 cat <<EOF > /etc/systemd/system/pve-numlock.service
 [Unit]
 Description=Enable NumLock on Linux Consoles
@@ -1175,9 +1270,11 @@ EOF
 
 msg_ok "NUMLOCK SYSTEMD SERVICE WRITTEN"
 
+msg_info "Reloading systemd daemon"
 systemctl daemon-reload &>/dev/null
 msg_ok "SYSTEMD DAEMON RELOADED"
 
+msg_info "Enabling NumLock service"
 systemctl enable pve-numlock.service &>/dev/null
 msg_ok "NUMLOCK SERVICE ENABLED"
 
@@ -1190,6 +1287,7 @@ msg_ok "NUMLOCK BOOT SERVICE CONFIGURED"
 # The systemd service logs to journal only, not the physical Proxmox console, so the report is shown upon root SSH login instead.
 msg_info "Creating Auto-Verify Ghost Script"
 
+msg_info "Writing auto-verify script"
 cat <<EOF > /root/pve_verify.sh
 #!/usr/bin/env bash
 set +e
@@ -1378,9 +1476,11 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 echo -e "\${GN}Ghost verifier deleted successfully.\${CL}"
 EOF
 
+msg_info "Making auto-verify script executable"
 chmod +x /root/pve_verify.sh
 msg_ok "AUTO-VERIFY SCRIPT WRITTEN"
 
+msg_info "Writing auto-verify systemd service"
 cat <<EOF > /etc/systemd/system/pve-postinstall-verify.service
 [Unit]
 Description=PVE9 Post Install One-Time Verification
@@ -1401,6 +1501,7 @@ EOF
 
 msg_ok "AUTO-VERIFY SYSTEMD SERVICE WRITTEN"
 
+msg_info "Writing auto-verify login display helper"
 cat <<'EOF' > /etc/profile.d/pve-postinstall-verify-display.sh
 #!/usr/bin/env bash
 
@@ -1434,12 +1535,15 @@ else
 fi
 EOF
 
+msg_info "Making auto-verify login display helper executable"
 chmod +x /etc/profile.d/pve-postinstall-verify-display.sh
 msg_ok "AUTO-VERIFY LOGIN DISPLAY HELPER INSTALLED"
 
+msg_info "Reloading systemd daemon"
 systemctl daemon-reload
 msg_ok "SYSTEMD DAEMON RELOADED"
 
+msg_info "Enabling auto-verify systemd service"
 systemctl enable pve-postinstall-verify.service &>/dev/null
 msg_ok "AUTO-VERIFY SYSTEMD SERVICE ENABLED"
 
@@ -1447,6 +1551,7 @@ msg_ok "AUTO-VERIFY GHOST SCRIPT CREATED"
 
 # --- 47. COMPLETION MARKER ---
 # Writes a completion marker so future reruns are blocked by fresh-install detection.
+msg_info "Writing PVE9 post-install completion marker"
 cat <<EOF > "$COMPLETED_MARKER"
 PVE9 Post Install completed on: $(date)
 System Type: $SYSTEM_TYPE
