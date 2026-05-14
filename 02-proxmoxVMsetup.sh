@@ -8,6 +8,7 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
+# Keeps all colour variables available for future visual changes.
 YW=`echo "\033[33m"`
 BL=`echo "\033[36m"`
 RD=`echo "\033[01;31m"`
@@ -22,6 +23,7 @@ CM="${GN}✓${CL}"
 CROSS="${RD}✗${CL}"
 
 # --- 2. GLOBAL VARIABLES ---
+# Stores timer, log file, defaults, detected hardware and user choices.
 T=15
 LOG_FILE="/var/log/proxmox-vm-setup.log"
 COMPLETED_MARKER="/root/.proxmox-vm-setup-completed"
@@ -129,6 +131,7 @@ function tty_read_yes_no_blocking() {
 
     while true; do
         tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
         else
@@ -195,13 +198,15 @@ function timed_yes_no() {
 
     [ -z "$answer" ] && answer="$default"
     final_label="$(yes_no_label "$answer")"
+
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+
     echo "$answer"
 }
 
 # --- 12. TIMED TEXT INPUT HELPER ---
-# Reads normal text input with a timeout. SPACE does not apply here; ENTER accepts typed value or default.
+# Reads normal text input with timeout. Empty input or timeout uses default.
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
@@ -216,17 +221,62 @@ function timed_text_input() {
     fi
 
     [ -z "$answer" ] && answer="$default"
+
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+
     echo "$answer"
 }
 
-# --- 13. GPU NAME CLEANUP HELPER ---
+# --- 13. TIMED NUMERIC INPUT HELPER ---
+# Reads numeric-only input with timeout.
+# Timeout or ENTER accepts default.
+# Letters/symbols are rejected and the prompt repeats until a valid number is entered.
+function timed_number_input() {
+    local prompt="$1"
+    local default="$2"
+    local min_value="${3:-1}"
+    local max_value="${4:-}"
+    local answer=""
+
+    while true; do
+        tty_print "${YW}${prompt} [default: ${default}] (${T}s): ${CL}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -r -t "$T" answer < /dev/tty || true
+        else
+            IFS= read -r -t "$T" answer || true
+        fi
+
+        [ -z "$answer" ] && answer="$default"
+
+        if ! [[ "$answer" =~ ^[0-9]+$ ]]; then
+            tty_println "${RD}Invalid input. Numbers only.${CL}"
+            continue
+        fi
+
+        if [ "$answer" -lt "$min_value" ]; then
+            tty_println "${RD}Invalid input. Minimum value is ${min_value}.${CL}"
+            continue
+        fi
+
+        if [ -n "$max_value" ] && [ "$answer" -gt "$max_value" ]; then
+            tty_println "${RD}Invalid input. Maximum value is ${max_value}.${CL}"
+            continue
+        fi
+
+        tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+        echo "$answer"
+        return 0
+    done
+}
+
+# --- 14. GPU NAME CLEANUP HELPER ---
 # Removes PCI IDs and extra text to make GPU display readable.
 function clean_gpu_name() {
     echo "$1" | sed -E 's/^[0-9a-fA-F:.]+[[:space:]]+//; s/\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]//g; s/\(rev [^)]+\)//g; s/[[:space:]]+/ /g; s/[[:space:]]+$//'
 }
 
-# --- 14. GPU SUMMARY HELPER ---
+# --- 15. GPU SUMMARY HELPER ---
 # Creates readable integrated/discrete GPU summary for the audit screen.
 function build_gpu_summary() {
     local out=""
@@ -248,7 +298,24 @@ function build_gpu_summary() {
     echo "${out%; }"
 }
 
-# --- 15. PROXMOX VALIDATION ---
+# --- 16. PHYSICAL RAM DETECTION HELPER ---
+# Uses MemTotal and rounds up to physical GiB.
+# This fixes 16GB systems being detected as 15GB and defaulting to 11GB RAM.
+function detect_total_ram_gb() {
+    local mem_kb=""
+    local gib_kb="1048576"
+
+    mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+
+    if ! [[ "$mem_kb" =~ ^[0-9]+$ ]]; then
+        echo "1"
+        return 0
+    fi
+
+    echo $(( (mem_kb + gib_kb - 1) / gib_kb ))
+}
+
+# --- 17. PROXMOX VALIDATION ---
 # Confirms the script is being run on Proxmox VE 9 or newer.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -260,11 +327,11 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 16. SYSTEM RESOURCE AUDIT ---
+# --- 18. SYSTEM RESOURCE AUDIT ---
 # Detects RAM, CPU cores and calculates adaptive default VM resources.
 msg_info "Auditing system resources"
 
-TOTAL_RAM_GB=$(free -g | awk '/^Mem:/{print $2}')
+TOTAL_RAM_GB=$(detect_total_ram_gb)
 TOTAL_CORES=$(nproc)
 
 DEFAULT_RAM_GB=$(( TOTAL_RAM_GB * DEFAULT_RAM_PERCENT / 100 ))
@@ -275,7 +342,7 @@ DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
 
 msg_ok "SYSTEM RESOURCES DETECTED"
 
-# --- 17. GPU AUDIT ---
+# --- 19. GPU AUDIT ---
 # Detects integrated and discrete GPUs. Only discrete GPU is offered for passthrough.
 msg_info "Detecting GPU hardware"
 
@@ -295,9 +362,10 @@ if [ "$DGPU_FOUND" == "yes" ]; then
 fi
 
 GPU_SUMMARY=$(build_gpu_summary)
+
 msg_ok "GPU DETECTION COMPLETE"
 
-# --- 18. SYSTEM AUDIT DISPLAY ---
+# --- 20. SYSTEM AUDIT DISPLAY ---
 # Shows available host resources and adaptive defaults before asking user inputs.
 echo ""
 echo -e "${DGN}SYSTEM AUDIT:${CL}"
@@ -314,29 +382,29 @@ fi
 
 echo "------------------------------------------------------"
 
-# --- 19. FINAL START CONFIRMATION ---
+# --- 21. FINAL START CONFIRMATION ---
 # Starts VM setup after the audit screen.
 start_yn=$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 20. USER VM CONFIGURATION INPUTS ---
+# --- 22. USER VM CONFIGURATION INPUTS ---
 # Collects VM ID, name, CPU, RAM and OS disk size using adaptive defaults.
-VMID=$(timed_text_input "Enter VM ID" "$DEFAULT_VMID")
+VMID=$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")
 VM_NAME=$(timed_text_input "Enter VM Name" "$DEFAULT_VM_NAME")
-CPU_INPUT=$(timed_text_input "Enter CPU CORES" "$DEFAULT_CORES")
-RAM_GB_INPUT=$(timed_text_input "Enter RAM in GB" "$DEFAULT_RAM_GB")
-DISK_GB_INPUT=$(timed_text_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB")
+CPU_INPUT=$(timed_number_input "Enter CPU CORES" "$DEFAULT_CORES" "1" "$TOTAL_CORES")
+RAM_GB_INPUT=$(timed_number_input "Enter RAM in GB" "$DEFAULT_RAM_GB" "1" "$TOTAL_RAM_GB")
+DISK_GB_INPUT=$(timed_number_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB" "8")
 
 RAM_MB=$(( RAM_GB_INPUT * 1024 ))
 
-# --- 21. VM ID CONFLICT CHECK ---
+# --- 23. VM ID CONFLICT CHECK ---
 # Prevents overwriting an existing VM ID.
 if qm status "$VMID" >/dev/null 2>&1; then
     msg_error "VM ID ${VMID} already exists."
 fi
 
-# --- 22. ISO SELECTION ---
-# Lists ISO files from local storage and lets the user choose one.
+# --- 24. ISO SELECTION ---
+# Lists ISO files from local storage and lets the user choose one with numeric validation.
 msg_info "Finding ISO images"
 
 mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" 2>/dev/null | sort || true)
@@ -353,16 +421,11 @@ else
         echo "$((i+1))) $(basename "${ISOS[$i]}")"
     done
 
-    ISO_IDX=$(timed_text_input "Select ISO number" "1")
-
-    if ! [[ "$ISO_IDX" =~ ^[0-9]+$ ]] || [ "$ISO_IDX" -lt 1 ] || [ "$ISO_IDX" -gt "${#ISOS[@]}" ]; then
-        msg_error "Invalid ISO selection."
-    fi
-
+    ISO_IDX=$(timed_number_input "Select ISO number" "1" "1" "${#ISOS[@]}")
     ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
 fi
 
-# --- 23. STORAGE SELECTION ---
+# --- 25. STORAGE SELECTION ---
 # Lists Proxmox storage that supports images and lets the user choose where to place VM disks.
 msg_info "Finding Proxmox storage"
 
@@ -380,22 +443,17 @@ for i in "${!STORAGE_LIST[@]}"; do
     echo "$((i+1))) ${STORAGE_LIST[$i]}"
 done
 
-STORAGE_IDX=$(timed_text_input "Select storage number" "1")
-
-if ! [[ "$STORAGE_IDX" =~ ^[0-9]+$ ]] || [ "$STORAGE_IDX" -lt 1 ] || [ "$STORAGE_IDX" -gt "${#STORAGE_LIST[@]}" ]; then
-    msg_error "Invalid storage selection."
-fi
-
+STORAGE_IDX=$(timed_number_input "Select storage number" "1" "1" "${#STORAGE_LIST[@]}")
 STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
 
-# --- 24. GPU PASSTHROUGH OPTION ---
+# --- 26. GPU PASSTHROUGH OPTION ---
 # Offers discrete GPU passthrough only if a discrete GPU exists.
 if [ "$DGPU_FOUND" == "yes" ]; then
     gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "y")
     [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y"
 fi
 
-# --- 25. VM CREATE ---
+# --- 27. VM CREATE ---
 # Creates Ubuntu/Linux VM with q35, OVMF, host CPU, fixed RAM and VirtIO network.
 msg_info "Creating VM ${VMID} (${VM_NAME})"
 
@@ -414,7 +472,7 @@ qm create "$VMID" \
 
 msg_ok "VM CREATED"
 
-# --- 26. VM DISK CONFIGURATION ---
+# --- 28. VM DISK CONFIGURATION ---
 # Adds EFI disk and main OS disk with discard enabled for SSD/LVM-thin friendly behaviour.
 msg_info "Configuring VM disks"
 
@@ -424,7 +482,7 @@ qm set "$VMID" --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=on,iothread=1" &>
 
 msg_ok "VM DISKS CONFIGURED"
 
-# --- 27. ISO AND BOOT ORDER ---
+# --- 29. ISO AND BOOT ORDER ---
 # Attaches selected ISO if available and sets VM boot order.
 msg_info "Configuring VM boot"
 
@@ -436,7 +494,7 @@ qm set "$VMID" --boot order=scsi0\;ide2 &>/dev/null
 
 msg_ok "VM BOOT CONFIGURED"
 
-# --- 28. GPU PASSTHROUGH ATTACHMENT ---
+# --- 30. GPU PASSTHROUGH ATTACHMENT ---
 # Adds the first detected discrete GPU BDF to the VM.
 if [ "$ENABLE_GPU" == "y" ]; then
     msg_info "Attaching discrete GPU to VM"
@@ -451,7 +509,7 @@ if [ "$ENABLE_GPU" == "y" ]; then
     fi
 fi
 
-# --- 29. COMPLETION MARKER ---
+# --- 31. COMPLETION MARKER ---
 # Creates marker file so future checks can identify that this setup was already run.
 cat <<EOF > "$COMPLETED_MARKER"
 Proxmox VM Setup completed on: $(date)
@@ -462,7 +520,7 @@ CPU: ${CPU_INPUT}
 Storage: ${STORAGE_ID}
 EOF
 
-# --- 30. FINAL SUMMARY ---
+# --- 32. FINAL SUMMARY ---
 # Shows final VM configuration.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
