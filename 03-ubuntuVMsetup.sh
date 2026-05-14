@@ -35,6 +35,7 @@ SUDO_USER_CREATED="no"
 SSH_HARDENING_APPLIED="no"
 QEMU_AGENT_INSTALLED="no"
 UFW_ENABLED="no"
+ROOT_EXPANDED="no"
 
 IS_CONTAINER="no"
 IS_VM="no"
@@ -43,6 +44,11 @@ ROOT_KEYS="/root/.ssh/authorized_keys"
 CURRENT_USER_KEYS=""
 SOURCE_KEYS=""
 DEST_KEYS=""
+
+ROOT_SOURCE=""
+ROOT_LV_PATH=""
+VG_NAME=""
+VG_FREE_BYTES="0"
 
 # --- 3. HEADER FUNCTION ---
 # Displays the Ubuntu VM Setup banner.
@@ -487,7 +493,41 @@ if [ "$IS_VM" == "yes" ]; then
     msg_ok "QEMU GUEST AGENT INSTALLED"
 fi
 
-# --- 25. UFW FIREWALL SETUP ---
+# --- 25. ROOT FILESYSTEM LVM EXPANSION ---
+# Detects if Ubuntu installed / on LVM and automatically expands it to use remaining free VG space.
+# This fixes Ubuntu Server installer behaviour where a 40GB Proxmox disk may only give / around 18GB.
+# No user interaction is required. If free LVM space exists, the script applies the expansion automatically.
+msg_info "Checking root filesystem free space"
+
+ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+ROOT_LV_PATH=""
+
+if [ -n "$ROOT_SOURCE" ]; then
+    ROOT_LV_PATH="$(readlink -f "$ROOT_SOURCE" 2>/dev/null || echo "$ROOT_SOURCE")"
+fi
+
+if [ -n "$ROOT_LV_PATH" ] && $SUDO_CMD lvs "$ROOT_LV_PATH" &>/dev/null; then
+    VG_NAME="$($SUDO_CMD lvs --noheadings -o vg_name "$ROOT_LV_PATH" | xargs)"
+    VG_FREE_BYTES="$($SUDO_CMD vgs --noheadings --units b --nosuffix -o vg_free "$VG_NAME" | xargs | cut -d'.' -f1)"
+
+    if [[ "$VG_FREE_BYTES" =~ ^[0-9]+$ ]] && [ "$VG_FREE_BYTES" -gt 1073741824 ]; then
+        msg_ok "FOUND EMPTY LVM SPACE"
+
+        msg_info "Expanding Ubuntu root filesystem"
+
+        $SUDO_CMD lvextend -r -l +100%FREE "$ROOT_LV_PATH" &>/dev/null
+
+        ROOT_EXPANDED="yes"
+
+        msg_ok "UBUNTU ROOT FILESYSTEM EXPANDED"
+    else
+        msg_ok "NO EMPTY LVM SPACE FOUND"
+    fi
+else
+    msg_ok "ROOT FILESYSTEM LVM EXPANSION NOT NEEDED"
+fi
+
+# --- 26. UFW FIREWALL SETUP ---
 # Enables UFW baseline firewall.
 # Allows SSH, HTTP and HTTPS for Docker/Traefik workloads.
 msg_info "Configuring UFW firewall"
@@ -504,7 +544,7 @@ UFW_ENABLED="yes"
 
 msg_ok "UFW FIREWALL ENABLED"
 
-# --- 26. SSH HARDENING ---
+# --- 27. SSH HARDENING ---
 # Disables SSH password login and root login only if SSH keys exist.
 # This avoids lockout on systems where no authorized_keys are present.
 if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then
@@ -531,7 +571,7 @@ else
     msg_warn "SSH hardening skipped because SSH keys were not detected"
 fi
 
-# --- 27. SYSTEM CLEANUP ---
+# --- 28. SYSTEM CLEANUP ---
 # Cleans package cache and orphan packages.
 msg_info "Cleaning system"
 
@@ -540,7 +580,7 @@ $SUDO_CMD apt-get -y autoremove &>/dev/null
 
 msg_ok "SYSTEM CLEANED"
 
-# --- 28. COMPLETION MARKER ---
+# --- 29. COMPLETION MARKER ---
 # Stores successful setup information.
 msg_info "Writing completion marker"
 
@@ -551,13 +591,14 @@ User Created: $SUDO_USER_CREATED
 Container: $IS_CONTAINER
 VM: $IS_VM
 QEMU Agent: $QEMU_AGENT_INSTALLED
+Root Expanded: $ROOT_EXPANDED
 UFW: $UFW_ENABLED
 SSH Hardened: $SSH_HARDENING_APPLIED
 EOF
 
 msg_ok "COMPLETION MARKER WRITTEN"
 
-# --- 29. FINAL SUMMARY ---
+# --- 30. FINAL SUMMARY ---
 # Displays clean final setup summary.
 echo ""
 echo -e "${BL}UBUNTU VM SETUP SUMMARY${CL}"
@@ -566,6 +607,7 @@ echo -e "USERNAME:           ${GN}${USERNAME}${CL}"
 echo -e "USER CREATED:       ${GN}${SUDO_USER_CREATED}${CL}"
 echo -e "ENVIRONMENT:        ${GN}$([ "$IS_VM" == "yes" ] && echo "VM" || echo "LXC")${CL}"
 echo -e "QEMU GUEST AGENT:   ${GN}${QEMU_AGENT_INSTALLED}${CL}"
+echo -e "ROOT EXPANDED:      ${GN}${ROOT_EXPANDED}${CL}"
 echo -e "UFW FIREWALL:       ${GN}${UFW_ENABLED}${CL}"
 echo -e "SSH HARDENING:      ${GN}${SSH_HARDENING_APPLIED}${CL}"
 echo -e "LOG FILE:           ${GN}${LOG_FILE}${CL}"
@@ -573,7 +615,7 @@ echo "------------------------------------------------------"
 echo -e "${GN}Ubuntu VM setup completed successfully.${CL}"
 echo ""
 
-# --- 30. REBOOT PROMPT ---
+# --- 31. REBOOT PROMPT ---
 # Offers safe reboot using sudo reboot when not root.
 reboot_yn=$(timed_yes_no "Reboot Ubuntu VM now?" "y")
 
