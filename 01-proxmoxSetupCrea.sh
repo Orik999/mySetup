@@ -91,10 +91,38 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-clear; header_info
+clear
+header_info
 
 # --- 5. HELPER FUNCTIONS ---
-# Provides reusable config edits, countdown prompts, GRUB args, display summaries and NIC detection.
+# Provides reusable config edits, tty-safe prompts, countdowns, display summaries and hardware detection.
+function tty_print() {
+    if [ -w /dev/tty ]; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
+}
+
+function tty_println() {
+    if [ -w /dev/tty ]; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
+}
+
+function tty_read_key() {
+    local timeout="$1"
+    local key=""
+    if [ -r /dev/tty ]; then
+        read -rsn1 -t "$timeout" key < /dev/tty || true
+    else
+        read -rsn1 -t "$timeout" key || true
+    fi
+    echo "$key"
+}
+
 function set_or_append_space_config() {
     local file="$1"
     local key="$2"
@@ -150,36 +178,40 @@ function timed_yes_no() {
     fi
 
     for ((i=T; i>0; i--)); do
-        echo -ne "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
-        if read -rsn1 -t 1 key; then
-            if [[ "$key" == " " || "$key" == "" ]]; then
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
+        key="$(tty_read_key 1)"
+
+        if [[ "$key" == " " || "$key" == "" ]]; then
+            if [[ "$key" == " " ]]; then
                 answer="$default"
                 break
-            elif [[ "$key" =~ ^[YyNn]$ ]]; then
-                answer="$key"
-                break
             fi
+        elif [[ "$key" =~ ^[YyNn]$ ]]; then
+            answer="$key"
+            break
         fi
     done
 
     [ -z "$answer" ] && answer="$default"
-    echo -ne "${BFR}"
+    tty_print "${BFR}"
     echo "$answer"
 }
 
 function timed_reboot_countdown() {
     local seconds="$1"
     local key=""
+
     for ((i=seconds; i>0; i--)); do
-        echo -ne "${BFR}${BL}${CLF}REBOOTING IN ${i} SECONDS...${CL} ${YW}(press SPACE to stop countdown)${CL}"
-        if read -rsn1 -t 1 key; then
-            if [[ "$key" == " " ]]; then
-                echo -e "${BFR}${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
-                return 1
-            fi
+        tty_print "${BFR}${BL}${CLF}REBOOTING IN ${i} SECONDS...${CL} ${YW}(press SPACE to stop countdown)${CL}"
+        key="$(tty_read_key 1)"
+
+        if [[ "$key" == " " ]]; then
+            tty_println "${BFR}${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
+            return 1
         fi
     done
-    echo -ne "${BFR}"
+
+    tty_print "${BFR}"
     return 0
 }
 
@@ -187,11 +219,13 @@ function detect_realtek_iface() {
     for iface in /sys/class/net/*; do
         iface_name="$(basename "$iface")"
         [ "$iface_name" = "lo" ] && continue
+
         if ethtool -i "$iface_name" 2>/dev/null | grep -qiE "driver: r8169|driver: r8168|driver: r8125|driver: r8126"; then
             echo "$iface_name"
             return 0
         fi
     done
+
     return 1
 }
 
@@ -201,31 +235,37 @@ function clean_gpu_name() {
 
 function build_gpu_summary() {
     local out=""
+
     if [ -n "$IGPU_LINES" ]; then
         while read -r line; do
             [ -z "$line" ] && continue
             out+="Integrated: $(clean_gpu_name "$line"); "
         done <<< "$IGPU_LINES"
     fi
+
     if [ -n "$DGPU_LINES" ]; then
         while read -r line; do
             [ -z "$line" ] && continue
             out+="Discrete: $(clean_gpu_name "$line"); "
         done <<< "$DGPU_LINES"
     fi
+
     echo "${out%; }"
 }
 
 function build_storage_summary() {
     local out=""
+
     while read -r name rota type; do
         [ "$type" != "disk" ] && continue
+
         if [ "$rota" == "0" ]; then
             out+="SSD(${name}) "
         else
             out+="HDD(${name}) "
         fi
     done < <(lsblk -dn -o NAME,ROTA,TYPE)
+
     echo "$out" | xargs
 }
 
@@ -241,16 +281,33 @@ function detected_machine_gpu_label() {
     fi
 }
 
-# --- 6. PRE-INSTALL AUDIT ---
-# Checks PVE version and detects CPU, chassis, VM state, SSD state, network, storage and hardware details.
+# --- 6. PROXMOX VERSION VALIDATION ---
+# Validates Proxmox before showing fresh-install warning or continuing.
+if ! command -v pveversion >/dev/null 2>&1; then
+    msg_error "This system is not Proxmox VE. Script cancelled."
+fi
+
+PVE_MAJOR=$(pveversion | cut -d'/' -f2 | cut -d'.' -f1)
+
+if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]]; then
+    msg_error "Could not detect Proxmox VE version. Script cancelled."
+fi
+
+if [ "$PVE_MAJOR" -lt 9 ]; then
+    msg_error "Requires Proxmox VE 9+. Detected Proxmox VE ${PVE_MAJOR}. Script cancelled."
+fi
+
+# --- 7. FRESH INSTALL WARNING ---
+# Shows warning only after confirming this is a valid Proxmox VE 9 system.
 echo -e "${YW} This script will Perform PVE9 Post Install Routines.${CL}"
 echo ""
 echo -e "${RD}${CLF} Intended for FRESH Proxmox VE 9 installs only.${CL}"
+echo ""
 
-PVE_MAJOR=$(pveversion | cut -d'/' -f2 | cut -d'.' -f1)
-[ "$PVE_MAJOR" -lt 9 ] && msg_error "Requires Proxmox 9+"
-
+# --- 8. PRE-INSTALL AUDIT ---
+# Detects CPU, chassis, VM state, SSD state, network, storage and hardware details.
 CPU_TYPE=$(grep -m1 "vendor_id" /proc/cpuinfo | awk '{print $3}')
+
 if [ "$CPU_TYPE" == "GenuineIntel" ]; then
     IOMMU_FLAG="intel_iommu=on"
 else
@@ -278,13 +335,14 @@ if lsblk -dn -o ROTA | grep -q "^0$"; then
 fi
 
 DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}' || true)
+
 if [ -n "$DEFAULT_IFACE" ]; then
     LAN_CIDR=$(ip -o -4 addr show dev "$DEFAULT_IFACE" | awk '{print $4; exit}' || true)
 fi
 
 STORAGE_SUMMARY=$(build_storage_summary)
 
-# --- 7. FRESH INSTALL DETECTION ---
+# --- 9. FRESH INSTALL DETECTION ---
 # Detects existing VMs, containers and additional bridges. If found, warns and exits.
 msg_info "Checking for fresh install state"
 
@@ -305,9 +363,9 @@ fi
 
 msg_ok "FRESH INSTALL CHECK PASSED"
 
-# --- 8. GPU DETECTION AND PASSTHROUGH PROMPT ---
-# Shows adaptive GPU detection details and asks about discrete passthrough before final start prompt.
-msg_info "$(detected_machine_gpu_label)"
+# --- 10. GPU DETECTION ---
+# Detects integrated/discrete GPUs before printing adaptive GPU messages.
+msg_info "Detecting GPU hardware"
 
 GPU_ALL=$(lspci -Dnn | grep -Ei "VGA compatible controller|3D controller|Display controller" || true)
 IGPU_LINES=$(echo "$GPU_ALL" | grep -Ei "Intel|Integrated|UHD|Iris" || true)
@@ -322,12 +380,14 @@ if [ "$DGPU_FOUND" == "yes" ]; then
         gpu_bdf=$(echo "$gpu_line" | awk '{print $1}')
         gpu_slot="${gpu_bdf%.*}"
         DGPU_BDFS+="${gpu_bdf} "
+
         while read -r func_line; do
             [ -z "$func_line" ] && continue
             id=$(echo "$func_line" | grep -Po '\[\K[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' | tail -n1 || true)
             [ -n "$id" ] && DGPU_IDS+="${id},"
         done < <(lspci -Dnn -s "$gpu_slot" || true)
     done <<< "$DGPU_LINES"
+
     DGPU_IDS="${DGPU_IDS%,}"
 fi
 
@@ -336,7 +396,10 @@ GPU_SUMMARY=$(build_gpu_summary)
 msg_ok "$(detected_machine_gpu_label)"
 echo -e " ${BL}━━━━━▶${CL} ${GPU_SUMMARY:-No GPU details detected}"
 
+# --- 11. GPU PASSTHROUGH OPTION ---
+# Asks about discrete GPU passthrough only if discrete GPU is detected.
 ENABLE_PASSTHROUGH="n"
+
 if [ "$DGPU_FOUND" == "yes" ]; then
     if [ "$SYSTEM_TYPE" == "Laptop" ] && [ "$IGPU_FOUND" == "yes" ]; then
         echo -e "${YW}Integrated GPU will be kept for laptop screen. Only discrete GPU and same-slot function devices will be isolated.${CL}"
@@ -345,40 +408,53 @@ if [ "$DGPU_FOUND" == "yes" ]; then
     fi
 
     gpu_yn=$(timed_yes_no "Isolate Discrete GPU for VM Passthrough?" "y")
-    [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_PASSTHROUGH="y"
 
-    echo -ne "\033[3A\033[J"
-    if [ "$ENABLE_PASSTHROUGH" == "y" ]; then
+    if [[ "$gpu_yn" =~ ^[Yy] ]]; then
+        ENABLE_PASSTHROUGH="y"
         echo -e "${GN}Discrete GPU passthrough will be activated; Integrated GPU will be left untouched.${CL}"
     else
+        ENABLE_PASSTHROUGH="n"
         echo -e "${YW}Discrete GPU passthrough will not be activated.${CL}"
     fi
 else
     echo -e "${YW}No discrete GPU detected. GPU passthrough will be skipped.${CL}"
 fi
 
-# --- 9. STORAGE DETECTION DISPLAY ---
+# --- 12. STORAGE DETECTION DISPLAY ---
 # Displays detected storage type summary before final start prompt.
 msg_ok "DETECTED STORAGE TYPE"
 echo -e " ${BL}━━━━━▶${CL} ${STORAGE_SUMMARY:-No disk summary detected}"
 
-# --- 10. CPU / CROWDSEC OPTIONS ---
-# Timed prompts with clean line handling and sane unattended defaults.
+# --- 13. CPU / CROWDSEC OPTIONS ---
+# Uses tty-safe timed prompts with clean unattended defaults.
 cpu_yn=$(timed_yes_no "Set CPU Governor to PERFORMANCE?" "n")
-[[ "$cpu_yn" =~ ^[Yy] ]] && ENABLE_PERFORMANCE="y" || ENABLE_PERFORMANCE="n"
+
+if [[ "$cpu_yn" =~ ^[Yy] ]]; then
+    ENABLE_PERFORMANCE="y"
+else
+    ENABLE_PERFORMANCE="n"
+fi
 
 crowdsec_yn=$(timed_yes_no "Install CrowdSec Security Suite?" "y")
-[[ "$crowdsec_yn" =~ ^[Nn] ]] && ENABLE_CROWDSEC="n" || ENABLE_CROWDSEC="y"
 
-# --- 11. FINAL START PROMPT ---
+if [[ "$crowdsec_yn" =~ ^[Nn] ]]; then
+    ENABLE_CROWDSEC="n"
+else
+    ENABLE_CROWDSEC="y"
+fi
+
+# --- 14. FINAL START PROMPT ---
 # Final unattended start question after all detection and user options have been collected.
 start_yn=$(timed_yes_no "Start the PVE9 Post Install Script?" "y")
-[[ "$start_yn" =~ ^[Nn] ]] && exit
+
+if [[ "$start_yn" =~ ^[Nn] ]]; then
+    exit 0
+fi
 
 clear
 header_info
 
-# --- 12. STORAGE MERGE ---
+# --- 15. STORAGE MERGE ---
 # Removes local-lvm and expands root/local storage for fresh single-node use.
 msg_info "Merging local-lvm into local storage"
 
@@ -388,12 +464,11 @@ if lvdisplay /dev/pve/data >/dev/null 2>&1; then
     lvresize -l +100%FREE /dev/pve/root &>/dev/null
     resize2fs /dev/mapper/pve-root &>/dev/null
     pvesm remove local-lvm &>/dev/null || true
-    msg_ok "local-lvm storage successfully merged to OS"
-else
-    msg_ok "local-lvm storage successfully merged to OS"
 fi
 
-# --- 13. DNS REDUNDANCY ---
+msg_ok "local-lvm storage successfully merged to OS"
+
+# --- 16. DNS REDUNDANCY ---
 # Adds Cloudflare DNS redundancy before apt updates to make package operations more reliable.
 msg_info "Configuring DNS resolvers"
 
@@ -406,8 +481,8 @@ EOF
 
 msg_ok "DNS RESOLVERS CONFIGURED (DNS1 = 1.1.1.1 & DNS2 = 1.0.0.1)"
 
-# --- 14. REPOSITORIES & UPDATES ---
-# Removes enterprise repo, adds no-subscription repo, updates and cleans the system with hidden output.
+# --- 17. REPOSITORIES & UPDATES ---
+# Removes enterprise repo, adds no-subscription repo, updates and cleans system with hidden output.
 msg_info "Configuring Repositories & Running Updates"
 
 rm -f /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/ceph.sources
@@ -426,7 +501,7 @@ DEBIAN_FRONTEND=noninteractive apt-get -y autoremove &>/dev/null
 
 msg_ok "SYSTEM UPDATED"
 
-# --- 15. UI NAG REMOVAL ---
+# --- 18. UI NAG REMOVAL ---
 # Installs persistent dpkg hook and helper script to patch the no-subscription popup after toolkit updates.
 msg_info "Patching UI Nag"
 
@@ -436,9 +511,11 @@ set -euo pipefail
 FILE="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 [ -f "$FILE" ] || exit 0
 cp -n "$FILE" "${FILE}.orig" 2>/dev/null || true
+
 if grep -q "res.data.status.toLowerCase() !== 'active'" "$FILE"; then
     sed -i "s/if (res === null || res === undefined || !res || res.data.status.toLowerCase() !== 'active') {/if (false) {/" "$FILE"
 fi
+
 if ! grep -q "if (false)\|NoMoreNagging" "$FILE"; then
     sed -i "/res.data.status/{s/!//;s/active/NoMoreNagging/g;s/Active/NoMoreNagging/g}" "$FILE" || true
 fi
@@ -456,7 +533,7 @@ systemctl restart pveproxy &>/dev/null || true
 
 msg_ok "NAG REMOVED"
 
-# --- 16. POWER & CHASSIS OPTIMIZATION ---
+# --- 19. POWER & CHASSIS OPTIMIZATION ---
 # Masks sleep targets and ignores laptop lid close on laptop hardware.
 msg_info "Optimizing Power/Sleep Settings"
 
@@ -471,7 +548,7 @@ fi
 
 msg_ok "POWER OPTIMIZED"
 
-# --- 17. GRUB & IOMMU ---
+# --- 20. GRUB & IOMMU ---
 # Adds IOMMU, passthrough mode and console blanking without removing existing kernel args.
 msg_info "Configuring GRUB & IOMMU"
 
@@ -483,11 +560,12 @@ update-grub &>/dev/null || true
 
 msg_ok "GRUB UPDATED"
 
-# --- 18. GPU ISOLATION (VFIO) ---
+# --- 21. GPU ISOLATION (VFIO) ---
 # Loads VFIO modules and binds only discrete GPU IDs to vfio-pci.
 if [ "$ENABLE_PASSTHROUGH" == "y" ]; then
     if [ -n "$DGPU_IDS" ]; then
         msg_info "Isolating discrete GPU for Passthrough"
+
         for module in vfio vfio_iommu_type1 vfio_pci vfio_virqfd; do
             grep -qxF "$module" /etc/modules || echo "$module" >> /etc/modules
         done
@@ -503,13 +581,14 @@ EOF
 
         echo "options vfio-pci ids=$DGPU_IDS disable_vga=1" > /etc/modprobe.d/vfio.conf
         update-initramfs -u -k all &>/dev/null || true
+
         msg_ok "GPU ISOLATED"
     else
         msg_warn "Passthrough selected but no safe discrete GPU IDs were found. Skipping VFIO."
     fi
 fi
 
-# --- 19. SSH SECURITY ---
+# --- 22. SSH SECURITY ---
 # Checks for root SSH keys and disables root password login only when keys exist.
 msg_info "Checking for SSH authorized keys"
 
@@ -531,13 +610,14 @@ if [ -s "$ROOT_KEYS" ]; then
     systemctl restart ssh.service &>/dev/null || true
 
     SSH_HARDENING_APPLIED="yes"
+
     msg_ok "ROOT PASSWORD LOGIN DISABLED"
 else
     SSH_HARDENING_APPLIED="no"
     msg_warn "SSH keys not found; root password login not disabled"
 fi
 
-# --- 20. SYSCTL HARDENING & NETWORK TUNING ---
+# --- 23. SYSCTL HARDENING & NETWORK TUNING ---
 # Adds kernel hardening and high-traffic tuning for reverse proxy / VM workloads.
 msg_info "Applying Sysctl Hardening & Network Tuning"
 
@@ -579,7 +659,7 @@ sysctl --system &>/dev/null || true
 
 msg_ok "SYSCTL HARDENING APPLIED"
 
-# --- 21. REALTEK NIC OPTIMIZATION ---
+# --- 24. REALTEK NIC OPTIMIZATION ---
 # Detects Realtek NIC drivers and disables problematic offloads persistently for Docker/reverse-proxy stability.
 msg_info "Checking for Realtek NIC optimization"
 
@@ -607,13 +687,14 @@ EOF
     systemctl daemon-reload &>/dev/null
     systemctl enable realtek-optimize.service &>/dev/null
     REALTEK_OPTIMIZED="yes"
+
     msg_ok "REALTEK NIC OPTIMIZED ($REALTEK_IFACE)"
 else
     REALTEK_OPTIMIZED="no"
     msg_ok "NO REALTEK NIC OPTIMIZATION NEEDED"
 fi
 
-# --- 22. PROXMOX FIREWALL BASELINE ---
+# --- 25. PROXMOX FIREWALL BASELINE ---
 # Enables Proxmox firewall with LAN-only SSH/WebUI access and public 80/443 allowance.
 msg_info "Configuring Proxmox Firewall"
 
@@ -644,13 +725,14 @@ EOF
     systemctl restart pve-firewall &>/dev/null || true
 
     PVE_FIREWALL_APPLIED="yes"
+
     msg_ok "PROXMOX FIREWALL ENABLED"
 else
     PVE_FIREWALL_APPLIED="no"
     msg_warn "Could not detect LAN CIDR. Proxmox firewall rules skipped to avoid lockout."
 fi
 
-# --- 23. CROWDSEC & AUTO UPDATES ---
+# --- 26. CROWDSEC & AUTO UPDATES ---
 # Installs CrowdSec, bouncer, collections and unattended upgrades.
 if [ "$ENABLE_CROWDSEC" == "y" ]; then
     msg_info "Installing Security Suite"
@@ -695,7 +777,7 @@ EOF
     msg_ok "SECURITY INSTALLED"
 fi
 
-# --- 24. PROXMOX FIREWALL SERVICE REINFORCEMENT ---
+# --- 27. PROXMOX FIREWALL SERVICE REINFORCEMENT ---
 # Explicitly ensures pve-firewall is enabled now and at boot.
 msg_info "Enabling Proxmox firewall service"
 
@@ -704,7 +786,7 @@ systemctl restart pve-firewall &>/dev/null || true
 
 msg_ok "PROXMOX FIREWALL SERVICE ENABLED"
 
-# --- 25. PERFORMANCE & TRIM ---
+# --- 28. PERFORMANCE & TRIM ---
 # Optionally enables performance CPU governor and enables SSD TRIM when SSD is detected.
 if [ "$ENABLE_PERFORMANCE" == "y" ]; then
     msg_info "Setting Performance Governor"
@@ -726,11 +808,13 @@ fi
 
 if [ "$IS_SSD" == "yes" ]; then
     msg_info "Enabling SSD TRIM"
+
     systemctl enable --now fstrim.timer &>/dev/null
+
     msg_ok "SSD TRIM ENABLED"
 fi
 
-# --- 26. NUMLOCK BOOT SERVICE ---
+# --- 29. NUMLOCK BOOT SERVICE ---
 # Enables NumLock on boot when console tools support it. Still attempts generally even if full keyboard cannot be detected.
 msg_info "Configuring NumLock on boot"
 
@@ -763,12 +847,13 @@ EOF
 
 systemctl daemon-reload &>/dev/null
 systemctl enable pve-numlock.service &>/dev/null
+
 NUMLOCK_CONFIGURED="yes"
 
 msg_ok "NUMLOCK BOOT SERVICE CONFIGURED"
 
-# --- 27. AUTO-VERIFY GHOST SCRIPT ---
-# Creates one-time systemd verifier that runs after reboot, checks selected features, logs results, then deletes itself.
+# --- 30. AUTO-VERIFY GHOST SCRIPT ---
+# Creates one-time systemd verifier that runs after reboot, logs results, prints to console/journal, then deletes itself.
 msg_info "Creating Auto-Verify Ghost Script"
 
 cat <<EOF > /root/pve_verify.sh
@@ -832,45 +917,31 @@ echo ""
 
 sleep 5
 
-# Core Proxmox service checks.
 if pveversion >/dev/null 2>&1; then PASS "Proxmox command tools available"; else FAIL "Proxmox command tools missing"; fi
 if systemctl is-active --quiet pveproxy; then PASS "pveproxy active"; else FAIL "pveproxy inactive"; fi
 if systemctl is-active --quiet pvedaemon; then PASS "pvedaemon active"; else FAIL "pvedaemon inactive"; fi
 if systemctl is-active --quiet pvestatd; then PASS "pvestatd active"; else FAIL "pvestatd inactive"; fi
 if systemctl is-active --quiet pve-cluster; then PASS "pve-cluster active"; else FAIL "pve-cluster inactive"; fi
 
-# DNS checks.
 if grep -q "nameserver 1.1.1.1" /etc/resolv.conf && grep -q "nameserver 1.0.0.1" /etc/resolv.conf; then PASS "DNS redundancy configured"; else WARN "DNS redundancy not detected"; fi
 
-# Repository and package health checks.
 if grep -q "pve-no-subscription" /etc/apt/sources.list.d/proxmox.sources 2>/dev/null; then PASS "No-subscription repository configured"; else FAIL "No-subscription repository missing"; fi
 if [ ! -f /etc/apt/sources.list.d/pve-enterprise.sources ]; then PASS "Enterprise repository disabled"; else FAIL "Enterprise repository still present"; fi
 if apt-get check >/dev/null 2>&1; then PASS "APT package database healthy"; else FAIL "APT package database has problems"; fi
 
-# Storage merge checks.
 if grep -q "local-lvm" /etc/pve/storage.cfg 2>/dev/null; then WARN "local-lvm still exists in storage.cfg"; else PASS "local-lvm removed from Proxmox storage config"; fi
 if lvdisplay /dev/pve/data >/dev/null 2>&1; then WARN "/dev/pve/data still exists"; else PASS "/dev/pve/data not present"; fi
 
-# GRUB and IOMMU checks.
 if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "\$INSTALL_IOMMU_FLAG"; then PASS "GRUB contains \$INSTALL_IOMMU_FLAG"; else FAIL "GRUB missing \$INSTALL_IOMMU_FLAG"; fi
 if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "iommu=pt"; then PASS "GRUB contains iommu=pt"; else FAIL "GRUB missing iommu=pt"; fi
 if grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | grep -qw "consoleblank=60"; then PASS "GRUB contains consoleblank=60"; else WARN "GRUB missing consoleblank=60"; fi
 if grep -q "consoleblank=60" /proc/cmdline; then PASS "Screen blanking active in running kernel"; else WARN "Screen blanking not visible in running kernel"; fi
 if dmesg | grep -Ei "IOMMU|DMAR|AMD-Vi" | grep -qi "enabled"; then PASS "IOMMU appears enabled after reboot"; else WARN "IOMMU not clearly detected in dmesg"; fi
 
-# GPU passthrough checks.
 if [ "\$INSTALL_DGPU_FOUND" == "yes" ]; then
     if [ "\$INSTALL_ENABLE_PASSTHROUGH" == "y" ]; then
-        if lspci -nnk | grep -q "Kernel driver in use: vfio-pci"; then
-            PASS "vfio-pci active on at least one GPU/function device"
-        else
-            FAIL "GPU passthrough was selected but vfio-pci is not active"
-        fi
-        if [ -f /etc/modprobe.d/vfio.conf ] && grep -q "\$INSTALL_DGPU_IDS" /etc/modprobe.d/vfio.conf 2>/dev/null; then
-            PASS "vfio.conf contains selected discrete GPU IDs"
-        else
-            FAIL "vfio.conf missing selected discrete GPU IDs"
-        fi
+        if lspci -nnk | grep -q "Kernel driver in use: vfio-pci"; then PASS "vfio-pci active on at least one GPU/function device"; else FAIL "GPU passthrough was selected but vfio-pci is not active"; fi
+        if [ -f /etc/modprobe.d/vfio.conf ] && grep -q "\$INSTALL_DGPU_IDS" /etc/modprobe.d/vfio.conf 2>/dev/null; then PASS "vfio.conf contains selected discrete GPU IDs"; else FAIL "vfio.conf missing selected discrete GPU IDs"; fi
     else
         WARN "Discrete GPU present but passthrough was not selected"
     fi
@@ -878,21 +949,18 @@ else
     INFO "No discrete GPU detected during install, GPU passthrough check skipped"
 fi
 
-# SSD TRIM checks.
 if [ "\$INSTALL_IS_SSD" == "yes" ]; then
     if systemctl is-enabled --quiet fstrim.timer && systemctl is-active --quiet fstrim.timer; then PASS "SSD TRIM timer enabled and active"; else FAIL "SSD TRIM timer not enabled/active"; fi
 else
     INFO "No SSD detected during install, TRIM check skipped"
 fi
 
-# CPU governor checks.
 if [ "\$INSTALL_ENABLE_PERFORMANCE" == "y" ]; then
     if grep -q "performance" /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null; then PASS "CPU governor is performance"; else FAIL "CPU governor is not performance"; fi
 else
     INFO "CPU performance governor was not selected, check skipped"
 fi
 
-# SSH hardening checks.
 if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "yes" ]; then
     if sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled"; else FAIL "SSH password authentication still enabled"; fi
     if sshd -T 2>/dev/null | grep -Eq "^permitrootlogin (without-password|prohibit-password)"; then PASS "Root SSH password login disabled"; else FAIL "Root SSH password login not hardened"; fi
@@ -900,7 +968,6 @@ else
     WARN "SSH hardening was skipped because root SSH keys were missing"
 fi
 
-# Realtek NIC optimization checks.
 if [ "\$INSTALL_REALTEK_OPTIMIZED" == "yes" ]; then
     if systemctl is-enabled --quiet realtek-optimize.service; then PASS "Realtek optimization service enabled"; else WARN "Realtek optimization service not enabled"; fi
     if [ -n "\$INSTALL_REALTEK_IFACE" ] && [ -r "/sys/class/net/\$INSTALL_REALTEK_IFACE/statistics/rx_packets" ]; then PASS "Realtek interface still present"; else WARN "Realtek interface not found after reboot"; fi
@@ -908,12 +975,10 @@ else
     INFO "No Realtek optimization was applied"
 fi
 
-# Proxmox firewall checks.
 if systemctl is-active --quiet pve-firewall; then PASS "Proxmox firewall service active"; else FAIL "Proxmox firewall service inactive"; fi
 if grep -q "firewall: 1" /etc/pve/datacenter.cfg 2>/dev/null; then PASS "Datacenter firewall enabled"; else FAIL "Datacenter firewall not enabled"; fi
 if [ -f "/etc/pve/nodes/\$(hostname -s)/host.fw" ]; then PASS "Node firewall file exists"; else WARN "Node firewall file missing"; fi
 
-# CrowdSec checks.
 if [ "\$INSTALL_ENABLE_CROWDSEC" == "y" ]; then
     if systemctl is-active --quiet crowdsec; then PASS "CrowdSec active"; else FAIL "CrowdSec inactive"; fi
     if systemctl list-unit-files | grep -q "crowdsec-firewall-bouncer"; then
@@ -925,14 +990,12 @@ else
     INFO "CrowdSec was not selected, check skipped"
 fi
 
-# NumLock checks.
 if [ "\$INSTALL_NUMLOCK_CONFIGURED" == "yes" ]; then
     if systemctl is-enabled --quiet pve-numlock.service; then PASS "NumLock boot service enabled"; else WARN "NumLock boot service not enabled"; fi
 else
     INFO "NumLock was not configured"
 fi
 
-# UI nag and sysctl checks.
 if grep -q "if (false)\\|NoMoreNagging" /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js 2>/dev/null; then PASS "Subscription nag patch detected"; else WARN "Subscription nag patch not detected"; fi
 if [ -f /etc/sysctl.d/99-pve9-hardening-network.conf ]; then PASS "Sysctl hardening file present"; else FAIL "Sysctl hardening file missing"; fi
 if sysctl net.ipv4.tcp_syncookies 2>/dev/null | grep -q "= 1"; then PASS "TCP SYN cookies enabled"; else FAIL "TCP SYN cookies not enabled"; fi
@@ -960,8 +1023,10 @@ Wants=network-online.target pve-cluster.service
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 25
-ExecStart=/root/pve_verify.sh
+ExecStartPre=/bin/sleep 30
+ExecStart=/bin/bash /root/pve_verify.sh
+StandardOutput=journal+console
+StandardError=journal+console
 RemainAfterExit=no
 
 [Install]
@@ -973,7 +1038,7 @@ systemctl enable pve-postinstall-verify.service &>/dev/null
 
 msg_ok "AUTO-VERIFY GHOST SCRIPT CREATED"
 
-# --- 28. COMPLETE / SAFER REBOOT COUNTDOWN ---
+# --- 31. COMPLETE / SAFER REBOOT COUNTDOWN ---
 # Shows blue flashing 30-second countdown. Press SPACE to stop countdown and reboot manually later.
 if timed_reboot_countdown 30; then
     reboot
