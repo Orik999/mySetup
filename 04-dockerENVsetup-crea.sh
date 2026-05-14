@@ -3,13 +3,10 @@ set -euo pipefail
 shopt -s inherit_errexit nullglob
 
 # =========================================================
-#  DOCKER ENV SETUP
-#  Project: Home-Hosted Social Media SaaS
-#  Creates Docker folders, .env variables, secrets,
-#  PostgreSQL init scripts, and service passwords.
+#  Docker ENV Setup
 # =========================================================
 
-# --- 1. COLOR VARIABLES ---
+# --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
 YW=`echo "\033[33m"`
 BL=`echo "\033[36m"`
 RD=`echo "\033[01;31m"`
@@ -23,14 +20,39 @@ HOLD="-"
 CM="${GN}✓${CL}"
 CROSS="${RD}✗${CL}"
 
+# --- 2. GLOBAL VARIABLES ---
 T=15
-DEFAULT_USER="orik"
-DEFAULT_DOMAIN="najafov.co.uk"
-DEFAULT_TZ="Europe/London"
-DEFAULT_CF_EMAIL="oriknj999@gmail.com"
+LOG_FILE="/var/log/docker-env-setup.log"
+COMPLETED_MARKER="/root/.docker-env-setup-completed"
 
-# --- 2. HEADER & MESSAGE FUNCTIONS ---
-# Displays one-line Docker ENV Setup banner and reusable message helpers.
+DEFAULT_USER="orik"
+DEFAULT_USERDIR="/home/orik"
+DEFAULT_DOCKER_DIR="/home/orik/docker"
+DEFAULT_TZ="Europe/London"
+DEFAULT_DOMAIN="najafov.co.uk"
+DEFAULT_CF_EMAIL="oriknj999@gmail.com"
+DEFAULT_CF_ZONEID=""
+
+DOCKER_USER=""
+USERDIR=""
+DOCKER_DIR=""
+DOCKER_SECRETS_DIR=""
+TZ_VALUE=""
+DOMAIN_VALUE=""
+CF_EMAIL_VALUE=""
+CF_ZONEID_VALUE=""
+PUID_VALUE=""
+PGID_VALUE=""
+
+POSTGRES_PASSWORD=""
+REDIS_PASSWORD=""
+AUTHENTIK_SECRET_KEY=""
+AUTHENTIK_POSTGRES_PASSWORD=""
+POSTIZ_POSTGRES_PASSWORD=""
+TEMPORAL_POSTGRES_PASSWORD=""
+
+# --- 3. HEADER FUNCTION ---
+# Displays one-line Docker ENV Setup banner.
 function header_info {
 echo -e "${BL}
 ██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗     ███████╗███╗   ██╗██╗   ██╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
@@ -42,246 +64,372 @@ echo -e "${BL}
 ${CL}"
 }
 
-function msg_info() { echo -ne " ${HOLD} ${YW}$1..."; }
+# --- 4. MESSAGE HELPER FUNCTIONS ---
+# Provides consistent status messages.
+function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 3. HELPER FUNCTIONS ---
-# Handles timed prompts, secret generation, secret files, and optional Argon2 display.
-function timed_prompt() {
-    local prompt="$1"
-    local default="$2"
-    local input=""
-    read -t "$T" -p "$prompt" input || input="$default"
-    [ -z "$input" ] && input="$default"
-    echo "$input"
-}
-
-function generate_secret() {
-    openssl rand -base64 48 | tr -d '\n'
-}
-
-function write_secret_file() {
-    local file="$1"
-    local value="$2"
-    echo -n "$value" > "$file"
-    chmod 600 "$file"
-}
-
-function argon2_hash() {
-    local password="$1"
-    if command -v argon2 >/dev/null 2>&1; then
-        echo -n "$password" | argon2 "$(openssl rand -base64 16)" -id -t 3 -m 16 -p 4
-    else
-        echo "argon2 command not installed"
-    fi
-}
+# --- 5. LOGGING & ERROR HANDLING ---
+# Logs output and reports failing line.
+exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
 
 clear
 header_info
 
-# --- 4. START PROMPT ---
-# Starts the unattended-friendly Docker environment setup flow.
-echo -e "${YW} This script will create Docker project folders, .env, secrets and PostgreSQL init scripts.${CL}"
-yn=$(timed_prompt "Start DOCKER ENV SETUP? (Y/n): " "y")
-[[ "$yn" =~ ^[Nn] ]] && exit
+# --- 6. TTY OUTPUT HELPER ---
+# Prints directly to terminal from prompt functions.
+function tty_print() {
+    if [ -w /dev/tty ]; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
+}
 
-# --- 5. USER / PROJECT INPUTS ---
-# Lets user reuse this script for future projects while keeping your current project defaults.
-USERNAME=$(timed_prompt "Main user (Default ${DEFAULT_USER}): " "$DEFAULT_USER")
-DOMAIN=$(timed_prompt "Domain (Default ${DEFAULT_DOMAIN}): " "$DEFAULT_DOMAIN")
-TZ=$(timed_prompt "Timezone (Default ${DEFAULT_TZ}): " "$DEFAULT_TZ")
-CF_EMAIL=$(timed_prompt "Cloudflare email (Default ${DEFAULT_CF_EMAIL}): " "$DEFAULT_CF_EMAIL")
-CF_ZONEID=$(timed_prompt "Cloudflare Zone ID (Default blank): " "")
+# --- 7. TTY OUTPUT WITH NEWLINE HELPER ---
+# Prints directly to terminal with newline.
+function tty_println() {
+    if [ -w /dev/tty ]; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
+}
 
-if ! id "$USERNAME" >/dev/null 2>&1; then
-    msg_error "User $USERNAME does not exist"
+# --- 8. YES/NO LABEL HELPER ---
+# Converts Y/N answer into visible yes/no text.
+function yes_no_label() {
+    local value="$1"
+    if [[ "$value" =~ ^[Yy]$ ]]; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
+# --- 9. BLOCKING YES/NO HELPER ---
+# Used when SPACE pauses countdown.
+function tty_read_yes_no_blocking() {
+    local prompt="$1"
+    local default="$2"
+    local default_label="Y/n"
+    local key=""
+
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
+    fi
+
+    while true; do
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+        if [ -r /dev/tty ]; then
+            IFS= read -rsn1 key < /dev/tty || true
+        else
+            IFS= read -rsn1 key || true
+        fi
+
+        if [[ -z "$key" ]]; then
+            tty_print "${BFR}"
+            echo "$default"
+            return 0
+        elif [[ "$key" =~ ^[YyNn]$ ]]; then
+            tty_print "${BFR}"
+            echo "$key"
+            return 0
+        fi
+    done
+}
+
+# --- 10. TIMED YES/NO PROMPT HELPER ---
+# SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
+function timed_yes_no() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+    local key=""
+    local default_label="Y/n"
+    local final_label=""
+
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
+    fi
+
+    for ((i=T; i>0; i--)); do
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        fi
+    done
+
+    [ -z "$answer" ] && answer="$default"
+    final_label="$(yes_no_label "$answer")"
+    tty_print "${BFR}"
+    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    echo "$answer"
+}
+
+# --- 11. TIMED TEXT INPUT HELPER ---
+# Reads text with timeout. Empty input or timeout uses default.
+function timed_text_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+
+    tty_print "${YW}${prompt} [default: ${default}] (${T}s): ${CL}"
+
+    if [ -r /dev/tty ]; then
+        IFS= read -r -t "$T" answer < /dev/tty || true
+    else
+        IFS= read -r -t "$T" answer || true
+    fi
+
+    [ -z "$answer" ] && answer="$default"
+    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    echo "$answer"
+}
+
+# --- 12. SECRET GENERATOR HELPER ---
+# Generates URL-safe random secrets for app/database credentials.
+function generate_secret() {
+    openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48
+}
+
+# --- 13. ROOT / SUDO DETECTION ---
+# Uses sudo when not root.
+if [ "$EUID" -eq 0 ]; then
+    SUDO_CMD=""
+else
+    SUDO_CMD="sudo"
 fi
 
-USERDIR=$(eval echo "~$USERNAME")
-DOCKER_DIR=$(timed_prompt "Docker dir (Default ${USERDIR}/docker): " "${USERDIR}/docker")
-DOCKER_SECRETS_DIR=$(timed_prompt "Secrets dir (Default ${DOCKER_DIR}/secrets): " "${DOCKER_DIR}/secrets")
+# --- 14. START CONFIRMATION ---
+# Starts Docker env setup.
+echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
+start_yn=$(timed_yes_no "Start the Docker ENV Setup Script?" "y")
+[[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-PUID=$(id -u "$USERNAME")
-PGID=$(id -g "$USERNAME")
+# --- 15. USER INPUTS ---
+# Collects reusable defaults for user, paths, timezone, domain and Cloudflare values.
+DOCKER_USER=$(timed_text_input "Enter Linux username" "$DEFAULT_USER")
+USERDIR=$(timed_text_input "Enter user home directory" "$DEFAULT_USERDIR")
+DOCKER_DIR=$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")
+DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
+TZ_VALUE=$(timed_text_input "Enter timezone" "$DEFAULT_TZ")
+DOMAIN_VALUE=$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")
+CF_EMAIL_VALUE=$(timed_text_input "Enter Cloudflare email" "$DEFAULT_CF_EMAIL")
+CF_ZONEID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONEID")
 
-# --- 6. DOCKER FOLDER STRUCTURE ---
-# Creates all folders needed by standalone Portainer stacks and future compose files.
-msg_info "Creating Docker folders"
+# --- 16. USER/GROUP ID DETECTION ---
+# Detects PUID/PGID for container permissions.
+if id "$DOCKER_USER" >/dev/null 2>&1; then
+    PUID_VALUE=$(id -u "$DOCKER_USER")
+    PGID_VALUE=$(id -g "$DOCKER_USER")
+else
+    PUID_VALUE="1000"
+    PGID_VALUE="1000"
+fi
 
-mkdir -p "$DOCKER_DIR"/{appdata,compose,backups,shared}
-mkdir -p "$DOCKER_SECRETS_DIR"
-
-mkdir -p "$DOCKER_DIR/appdata/postgres/data"
-mkdir -p "$DOCKER_DIR/appdata/postgres/init"
-
-mkdir -p "$DOCKER_DIR/appdata/redis"
-mkdir -p "$DOCKER_DIR/appdata/traefik/acme"
-mkdir -p "$DOCKER_DIR/appdata/authentik"/{media,certs,custom-templates}
-mkdir -p "$DOCKER_DIR/appdata/postiz"/{config,uploads}
-mkdir -p "$DOCKER_DIR/appdata/temporal/dynamicconfig"
-mkdir -p "$DOCKER_DIR/appdata/portainer"
-mkdir -p "$DOCKER_DIR/appdata/vscode/config"
-mkdir -p "$DOCKER_DIR/appdata/filebrowser"/{database,config}
-## 2. Create compose folders for CLI deployment
-mkdir -p "$DOCKER_DIR/compose/socket-proxy"
-mkdir -p "$DOCKER_DIR/compose/portainer"
-
-chown -R "$USERNAME:$USERNAME" "$DOCKER_DIR"
-chmod 775 "$DOCKER_DIR"
-chmod 700 "$DOCKER_SECRETS_DIR"
-
-msg_ok "FOLDERS CREATED"
-
-# --- 7. SECRET GENERATION ---
-# Generates strong secrets for PostgreSQL, Redis, Authentik, Postiz and Temporal.
+# --- 17. SECRET GENERATION ---
+# Generates service secrets for PostgreSQL, Redis, Authentik, Postiz and Temporal.
 msg_info "Generating secrets"
 
-POSTGRES_PASSWORD=$(generate_secret)
-REDIS_PASSWORD=$(generate_secret)
-AUTHENTIK_SECRET_KEY=$(generate_secret)
-AUTHENTIK_POSTGRES_PASSWORD=$(generate_secret)
-POSTIZ_POSTGRES_PASSWORD=$(generate_secret)
-POSTIZ_JWT_SECRET=$(generate_secret)
-TEMPORAL_POSTGRES_PASSWORD=$(generate_secret)
-
-CF_TOKEN=$(timed_prompt "Cloudflare API token (Default blank): " "")
-SMTP_HOST=$(timed_prompt "SMTP host (Default blank): " "")
-SMTP_PORT=$(timed_prompt "SMTP port (Default 587): " "587")
-SMTP_USERNAME=$(timed_prompt "SMTP username (Default blank): " "")
-SMTP_PASSWORD=$(timed_prompt "SMTP password (Default blank): " "")
-AUTHENTIK_EMAIL_FROM=$(timed_prompt "Authentik email FROM (Default auth@${DOMAIN}): " "auth@${DOMAIN}")
-
-write_secret_file "$DOCKER_SECRETS_DIR/cf_token" "$CF_TOKEN"
-write_secret_file "$DOCKER_SECRETS_DIR/postgres_password" "$POSTGRES_PASSWORD"
-write_secret_file "$DOCKER_SECRETS_DIR/redis_password" "$REDIS_PASSWORD"
-write_secret_file "$DOCKER_SECRETS_DIR/authentik_secret_key" "$AUTHENTIK_SECRET_KEY"
-write_secret_file "$DOCKER_SECRETS_DIR/authentik_postgres_password" "$AUTHENTIK_POSTGRES_PASSWORD"
-write_secret_file "$DOCKER_SECRETS_DIR/postiz_postgres_password" "$POSTIZ_POSTGRES_PASSWORD"
-write_secret_file "$DOCKER_SECRETS_DIR/postiz_jwt_secret" "$POSTIZ_JWT_SECRET"
-write_secret_file "$DOCKER_SECRETS_DIR/temporal_postgres_password" "$TEMPORAL_POSTGRES_PASSWORD"
-
-touch "$DOCKER_SECRETS_DIR/htpasswd"
-chmod 600 "$DOCKER_SECRETS_DIR/htpasswd"
+POSTGRES_PASSWORD="$(generate_secret)"
+REDIS_PASSWORD="$(generate_secret)"
+AUTHENTIK_SECRET_KEY="$(generate_secret)"
+AUTHENTIK_POSTGRES_PASSWORD="$(generate_secret)"
+POSTIZ_POSTGRES_PASSWORD="$(generate_secret)"
+TEMPORAL_POSTGRES_PASSWORD="$(generate_secret)"
 
 msg_ok "SECRETS GENERATED"
 
-# --- 8. DOCKER .env CREATION ---
-# Writes central .env used by all standalone Docker Compose stacks.
-msg_info "Creating .env"
+# --- 18. DOCKER DIRECTORY CREATION ---
+# Creates project folders for compose, appdata, backups, shared files and secrets.
+msg_info "Creating Docker folder structure"
 
-cat > "$DOCKER_DIR/.env" <<EOF
-# Project: Home-Hosted Social Media SaaS
-DOCKER_DIR="${DOCKER_DIR}"
-DOCKER_SECRETS_DIR="${DOCKER_SECRETS_DIR}"
-PUID="${PUID}"
-PGID="${PGID}"
-TZ="${TZ}"
-USERDIR="${USERDIR}"
-DOMAIN="${DOMAIN}"
+mkdir -p "${DOCKER_DIR}/appdata"
+mkdir -p "${DOCKER_DIR}/compose"
+mkdir -p "${DOCKER_DIR}/backups"
+mkdir -p "${DOCKER_DIR}/shared"
+mkdir -p "${DOCKER_SECRETS_DIR}"
 
-# Cloudflare
-CF_EMAIL="${CF_EMAIL}"
-CF_ZONEID="${CF_ZONEID}"
+mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
+mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
-# Shared PostgreSQL admin
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+msg_ok "DOCKER FOLDERS CREATED"
 
-# Shared Redis
-REDIS_PASSWORD="${REDIS_PASSWORD}"
-
-# Authentik
-AUTHENTIK_SECRET_KEY="${AUTHENTIK_SECRET_KEY}"
-AUTHENTIK_POSTGRES_PASSWORD="${AUTHENTIK_POSTGRES_PASSWORD}"
-AUTHENTIK_EMAIL_FROM="${AUTHENTIK_EMAIL_FROM}"
-
-# Postiz
-POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
-POSTIZ_JWT_SECRET="${POSTIZ_JWT_SECRET}"
-
-# Temporal
-TEMPORAL_POSTGRES_PASSWORD="${TEMPORAL_POSTGRES_PASSWORD}"
-
-# SMTP
-SMTP_HOST="${SMTP_HOST}"
-SMTP_PORT="${SMTP_PORT}"
-SMTP_USERNAME="${SMTP_USERNAME}"
-SMTP_PASSWORD="${SMTP_PASSWORD}"
-EOF
-
-chown "$USERNAME:$USERNAME" "$DOCKER_DIR/.env"
-chmod 600 "$DOCKER_DIR/.env"
-
-msg_ok ".env CREATED"
-
-# --- 9. POSTGRESQL FIRST-START INIT SCRIPT ---
-# Creates app databases/users automatically on first PostgreSQL container startup.
+# --- 19. POSTGRES INIT SCRIPT CREATION ---
+# Creates first-start PostgreSQL init script so app databases/users are created unattended.
 msg_info "Creating PostgreSQL init script"
 
-cat > "$DOCKER_DIR/appdata/postgres/init/01-create-app-databases.sh" <<'EOF'
+cat <<'EOF' > "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================================================
-# PostgreSQL Init Databases
-# Project: Home-Hosted Social Media SaaS
-# Runs automatically only on first PostgreSQL container startup.
-# Creates separate users/databases for Authentik, Postiz and Temporal.
-# =========================================================
+create_user_db() {
+    local user="$1"
+    local password="$2"
+    local database="$3"
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<EOSQL
--- --- 1. AUTHENTIK DATABASE ---
--- Used by Authentik server/worker for identity, SSO, 2FA, sessions and app configuration.
-CREATE USER authentik WITH PASSWORD '${AUTHENTIK_POSTGRES_PASSWORD}';
-CREATE DATABASE authentik OWNER authentik;
-GRANT ALL PRIVILEGES ON DATABASE authentik TO authentik;
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<EOSQL
+DO
+\$\$
+BEGIN
+   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${user}') THEN
+      CREATE USER ${user} WITH PASSWORD '${password}';
+   END IF;
+END
+\$\$;
 
--- --- 2. POSTIZ DATABASE ---
--- Used by Postiz for social accounts, posts, schedules, users and app state.
-CREATE USER postiz WITH PASSWORD '${POSTIZ_POSTGRES_PASSWORD}';
-CREATE DATABASE postiz OWNER postiz;
-GRANT ALL PRIVILEGES ON DATABASE postiz TO postiz;
+SELECT 'CREATE DATABASE ${database} OWNER ${user}'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${database}')\gexec
 
--- --- 3. TEMPORAL DATABASE ---
--- Used by Temporal workflow engine for queues, jobs and workflow state.
-CREATE USER temporal WITH PASSWORD '${TEMPORAL_POSTGRES_PASSWORD}';
-CREATE DATABASE temporal OWNER temporal;
-GRANT ALL PRIVILEGES ON DATABASE temporal TO temporal;
+GRANT ALL PRIVILEGES ON DATABASE ${database} TO ${user};
 EOSQL
+}
+
+create_user_db "authentik" "${AUTHENTIK_POSTGRES_PASSWORD}" "authentik"
+create_user_db "postiz" "${POSTIZ_POSTGRES_PASSWORD}" "postiz"
+create_user_db "temporal" "${TEMPORAL_POSTGRES_PASSWORD}" "temporal"
 EOF
 
-chmod +x "$DOCKER_DIR/appdata/postgres/init/01-create-app-databases.sh"
-chown -R "$USERNAME:$USERNAME" "$DOCKER_DIR/appdata/postgres"
+chmod +x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
-msg_ok "POSTGRESQL INIT SCRIPT CREATED"
+msg_ok "POSTGRES INIT SCRIPT CREATED"
 
-# --- 10. FINAL OUTPUT ---
-# Displays generated values and tells user what to save.
+# --- 20. SECRET FILE WRITING ---
+# Writes secrets to individual files so Docker Compose can consume them as file-based secrets where suitable.
+msg_info "Writing secret files"
+
+printf '%s' "$POSTGRES_PASSWORD" > "${DOCKER_SECRETS_DIR}/postgres_password"
+printf '%s' "$REDIS_PASSWORD" > "${DOCKER_SECRETS_DIR}/redis_password"
+printf '%s' "$AUTHENTIK_SECRET_KEY" > "${DOCKER_SECRETS_DIR}/authentik_secret_key"
+printf '%s' "$AUTHENTIK_POSTGRES_PASSWORD" > "${DOCKER_SECRETS_DIR}/authentik_postgres_password"
+printf '%s' "$POSTIZ_POSTGRES_PASSWORD" > "${DOCKER_SECRETS_DIR}/postiz_postgres_password"
+printf '%s' "$TEMPORAL_POSTGRES_PASSWORD" > "${DOCKER_SECRETS_DIR}/temporal_postgres_password"
+printf '%s' "$CF_EMAIL_VALUE" > "${DOCKER_SECRETS_DIR}/cf_email"
+touch "${DOCKER_SECRETS_DIR}/cf_token"
+touch "${DOCKER_SECRETS_DIR}/htpasswd"
+
+msg_ok "SECRET FILES WRITTEN"
+
+# --- 21. ENV FILE CREATION ---
+# Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
+msg_info "Creating Docker .env file"
+
+cat <<EOF > "${DOCKER_DIR}/.env"
+# =========================================================
+#  Project: Home-Hosted Social Media SaaS
+# =========================================================
+
+# --- Core paths ---
+DOCKER_DIR="${DOCKER_DIR}"
+DOCKER_SECRETS_DIR="${DOCKER_SECRETS_DIR}"
+USERDIR="${USERDIR}"
+
+# --- Linux user/container IDs ---
+PUID="${PUID_VALUE}"
+PGID="${PGID_VALUE}"
+
+# --- Localisation ---
+TZ="${TZ_VALUE}"
+
+# --- Domain / Cloudflare ---
+DOMAIN="${DOMAIN_VALUE}"
+CF_EMAIL="${CF_EMAIL_VALUE}"
+CF_ZONEID="${CF_ZONEID_VALUE}"
+
+# --- PostgreSQL root/admin password ---
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+
+# --- Redis ---
+REDIS_PASSWORD="${REDIS_PASSWORD}"
+
+# --- Authentik ---
+AUTHENTIK_SECRET_KEY="${AUTHENTIK_SECRET_KEY}"
+AUTHENTIK_POSTGRES_PASSWORD="${AUTHENTIK_POSTGRES_PASSWORD}"
+
+# --- Postiz ---
+POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
+
+# --- Temporal ---
+TEMPORAL_POSTGRES_PASSWORD="${TEMPORAL_POSTGRES_PASSWORD}"
+EOF
+
+msg_ok "DOCKER .ENV CREATED"
+
+# --- 22. PERMISSIONS ---
+# Sets Docker folder permissions and stricter secret permissions.
+msg_info "Setting folder permissions"
+
+if id "$DOCKER_USER" >/dev/null 2>&1; then
+    $SUDO_CMD chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
+fi
+
+chmod -R 775 "$DOCKER_DIR"
+chmod -R 700 "$DOCKER_SECRETS_DIR"
+chmod -R 600 "$DOCKER_SECRETS_DIR"/* 2>/dev/null || true
+
+msg_ok "PERMISSIONS SET"
+
+# --- 23. COMPLETION MARKER ---
+# Creates marker showing ENV setup ran successfully.
+$SUDO_CMD bash -c "cat > '$COMPLETED_MARKER'" <<EOF
+Docker ENV Setup completed on: $(date)
+Docker dir: $DOCKER_DIR
+Domain: $DOMAIN_VALUE
+User: $DOCKER_USER
+EOF
+
+# --- 24. FINAL SECRET DISPLAY WARNING ---
+# Displays generated values once so user can save them securely.
 echo ""
-echo -e "${GN}DOCKER ENV SETUP COMPLETE${CL}"
-echo "------------------------------------------------------"
-echo "DOCKER_DIR=${DOCKER_DIR}"
-echo "DOCKER_SECRETS_DIR=${DOCKER_SECRETS_DIR}"
-echo "DOMAIN=${DOMAIN}"
-echo "CF_EMAIL=${CF_EMAIL}"
-echo "CF_ZONEID=${CF_ZONEID}"
+echo -e "${RD}${CLF}SAVE THESE VALUES NOW. THEY WILL NOT BE DISPLAYED AGAIN BY THIS SCRIPT.${CL}"
 echo ""
-echo -e "${YW}SAVE THESE VALUES IN YOUR PASSWORD MANAGER:${CL}"
-echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
-echo "REDIS_PASSWORD=${REDIS_PASSWORD}"
-echo "AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY}"
-echo "AUTHENTIK_POSTGRES_PASSWORD=${AUTHENTIK_POSTGRES_PASSWORD}"
-echo "POSTIZ_POSTGRES_PASSWORD=${POSTIZ_POSTGRES_PASSWORD}"
-echo "POSTIZ_JWT_SECRET=${POSTIZ_JWT_SECRET}"
-echo "TEMPORAL_POSTGRES_PASSWORD=${TEMPORAL_POSTGRES_PASSWORD}"
+echo -e "${GN}POSTGRES_PASSWORD:${CL} ${POSTGRES_PASSWORD}"
+echo -e "${GN}REDIS_PASSWORD:${CL} ${REDIS_PASSWORD}"
+echo -e "${GN}AUTHENTIK_SECRET_KEY:${CL} ${AUTHENTIK_SECRET_KEY}"
+echo -e "${GN}AUTHENTIK_POSTGRES_PASSWORD:${CL} ${AUTHENTIK_POSTGRES_PASSWORD}"
+echo -e "${GN}POSTIZ_POSTGRES_PASSWORD:${CL} ${POSTIZ_POSTGRES_PASSWORD}"
+echo -e "${GN}TEMPORAL_POSTGRES_PASSWORD:${CL} ${TEMPORAL_POSTGRES_PASSWORD}"
 echo ""
-echo -e "${YW}PostgreSQL init script created at:${CL}"
-echo "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+echo -e "${YW}Cloudflare token file created empty:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
+echo -e "${YW}Add your Cloudflare API token before deploying Traefik/cf-ddns/cf-companion.${CL}"
 echo ""
-echo -e "${YW}It will run automatically only on the first startup of 02-postgres-compose.${CL}"
+
+# --- 25. FINAL SUMMARY ---
+# Shows final folder layout.
+echo -e "${GN}FINISHED!${CL}"
+echo -e "DOCKER DIR: ${GN}${DOCKER_DIR}${CL}"
+echo -e ".ENV FILE: ${GN}${DOCKER_DIR}/.env${CL}"
+echo -e "SECRETS DIR: ${GN}${DOCKER_SECRETS_DIR}${CL}"
+echo -e "POSTGRES INIT: ${GN}${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh${CL}"
 echo ""
-echo -e "${YW}Optional Argon2 display for copying into apps that require hashes:${CL}"
-echo "REDIS_PASSWORD_ARGON2=$(argon2_hash "$REDIS_PASSWORD")"
-echo "POSTGRES_PASSWORD_ARGON2=$(argon2_hash "$POSTGRES_PASSWORD")"
-echo "------------------------------------------------------"
+
+exit 0

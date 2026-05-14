@@ -4,12 +4,10 @@ export LVM_SUPPRESS_FD_WARNINGS=1
 shopt -s inherit_errexit nullglob
 
 # =========================================================
-#  PVE9 VM Setup
-#  Template style based on PVE9 Post Install.
-#  Creates an Ubuntu Server VM for Docker / Traefik / Authentik / Postgres / Apps.
+#  Proxmox VM Setup
 # =========================================================
 
-# --- 1. COLOR VARIABLES (RESTORED ALL) ---
+# --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
 YW=`echo "\033[33m"`
 BL=`echo "\033[36m"`
 RD=`echo "\033[01;31m"`
@@ -17,481 +15,391 @@ BGN=`echo "\033[4;92m"`
 GN=`echo "\033[1;92m"`
 DGN=`echo "\033[32m"`
 CL=`echo "\033[m"`
+CLF=`echo "\033[5m"`
 BFR="\\r\\033[K"
 HOLD="-"
 CM="${GN}✓${CL}"
 CROSS="${RD}✗${CL}"
 
+# --- 2. GLOBAL VARIABLES ---
 T=15
+LOG_FILE="/var/log/proxmox-vm-setup.log"
+COMPLETED_MARKER="/root/.proxmox-vm-setup-completed"
 
-# --- 2. GLOBAL DEFAULTS ---
-# These are the base recommendations from your Gemini-created data.
-VM_NAME_DEFAULT="ct-crea"
-VMID_DEFAULT="100"
-BASE_RAM_PERCENT=75
-BASE_CPU_PERCENT=50
-BASE_OS_DISK_GB=40
-BASE_DATA_DISK_GB=0
-DEFAULT_STORAGE=""
-DEFAULT_ISO=""
-LOG_FILE="/var/log/pve9-vm-setup.log"
+DEFAULT_VM_NAME="ct-crea"
+DEFAULT_VMID="100"
+DEFAULT_DISK_GB="40"
+DEFAULT_RAM_PERCENT="75"
+DEFAULT_CPU_PERCENT="50"
 
-# --- 3. RUNTIME VARIABLES ---
-# These are filled during the audit and user option sections.
-TOTAL_RAM_GB=0
-TOTAL_RAM_MB=0
-TOTAL_CORES=0
-TOTAL_DISK_GB=0
-DEFAULT_RAM_GB=0
-DEFAULT_CORES=0
-DEFAULT_OS_DISK_GB=40
-DEFAULT_DATA_DISK_GB=0
-VMID=""
-VM_NAME=""
-CPU_INPUT=""
-RAM_GB_INPUT=""
-RAM_MB=""
-OS_DISK_GB=""
-DATA_DISK_GB=""
-ISO_PATH=""
-SELECTED_STORAGE=""
-SELECTED_STORAGE_TYPE=""
-SELECTED_STORAGE_FREE_GB=0
-STORAGE_IS_SSD="unknown"
-STORAGE_IS_NVME="unknown"
-STORAGE_IS_ZFS="no"
-STORAGE_IS_LVM="no"
-STORAGE_IS_DIR="no"
-ENABLE_GPU="n"
-GPU_FOUND=""
+TOTAL_RAM_GB="0"
+TOTAL_CORES="0"
+DEFAULT_RAM_GB="1"
+DEFAULT_CORES="1"
+
+GPU_ALL=""
+IGPU_LINES=""
 DGPU_LINES=""
-DGPU_BDF=""
-DGPU_SLOT=""
-DGPU_AUDIO_BDF=""
-DGPU_IDS=""
-BOOT_ORDER="scsi0;ide2"
+IGPU_FOUND="no"
+DGPU_FOUND="no"
+DGPU_BDFS=""
+GPU_SUMMARY=""
 
-# --- 4. LOGGING ---
-# Saves output to a log file while still showing it on screen.
-exec > >(tee -a "$LOG_FILE") 2>&1
+STORAGE_ID=""
+ISO_PATH=""
+ENABLE_GPU="n"
 
-# --- 5. HEADER & MESSAGING FUNCTIONS ---
-# Shows the ASCII banner and gives reusable status output helpers.
+# --- 3. HEADER FUNCTION ---
+# Displays the one-line Proxmox VM Setup banner.
 function header_info {
 echo -e "${BL}
- ██████╗ ██████╗  ██████╗ ██╗  ██╗███╗   ███╗ ██████╗ ██╗  ██╗    ██╗   ██╗███╗   ███╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
- ██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝████╗ ████║██╔═══██╗╚██╗██╔╝    ██║   ██║████╗ ████║    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
- ██████╔╝██████╔╝██║   ██║ ╚███╔╝ ██╔████╔██║██║   ██║ ╚███╔╝     ██║   ██║██╔████╔██║    ███████╗█████╗     ██║   ██║   ██║██████╔╝
- ██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗ ██║╚██╔╝██║██║   ██║ ██╔██╗     ╚██╗ ██╔╝██║╚██╔╝██║    ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
- ██║     ██║  ██║╚██████╔╝██╔╝ ██╗██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗     ╚████╔╝ ██║ ╚═╝ ██║    ███████║███████╗   ██║   ╚██████╔╝██║     
- ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝    ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
+██████╗ ██████╗  ██████╗ ██╗  ██╗███╗   ███╗ ██████╗ ██╗  ██╗    ██╗   ██╗███╗   ███╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
+██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝████╗ ████║██╔═══██╗╚██╗██╔╝    ██║   ██║████╗ ████║    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
+██████╔╝██████╔╝██║   ██║ ╚███╔╝ ██╔████╔██║██║   ██║ ╚███╔╝     ██║   ██║██╔████╔██║    ███████╗█████╗     ██║   ██║   ██║██████╔╝
+██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗ ██║╚██╔╝██║██║   ██║ ██╔██╗     ╚██╗ ██╔╝██║╚██╔╝██║    ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
+██║     ██║  ██║╚██████╔╝██╔╝ ██╗██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗     ╚████╔╝ ██║ ╚═╝ ██║    ███████║███████╗   ██║   ╚██████╔╝██║     
+╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝    ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
 ${CL}"
 }
 
-function msg_info() { echo -ne " ${HOLD} ${YW}$1..."; }
+# --- 4. MESSAGE HELPER FUNCTIONS ---
+# Provides consistent status messages for display -> apply -> success flow.
+function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 6. ROOT / PROXMOX CHECKS ---
-# Ensures the script is being run as root on a Proxmox host with qm available.
+# --- 5. LOGGING & ERROR HANDLING ---
+# Logs script output and reports the line number if a command fails.
+exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
+
+# --- 6. ROOT CHECK ---
+# Proxmox VM creation requires root privileges.
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RD}Please run as root.${CL}"
-    exit 1
-fi
-
-if ! command -v qm >/dev/null 2>&1; then
-    echo -e "${RD}qm command not found. This must be run on a Proxmox host.${CL}"
     exit 1
 fi
 
 clear
 header_info
 
-# --- 7. HELPER FUNCTIONS ---
-# Provides input validation, timed prompts, GB calculations, and safe default handling.
-function timed_prompt() {
+# --- 7. TTY PRINT HELPER ---
+# Prints directly to terminal even when functions return values through stdout.
+function tty_print() {
+    if [ -w /dev/tty ]; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
+}
+
+# --- 8. TTY PRINTLN HELPER ---
+# Prints directly to terminal with newline.
+function tty_println() {
+    if [ -w /dev/tty ]; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
+}
+
+# --- 9. YES/NO LABEL HELPER ---
+# Converts Y/N answers to visible yes/no text.
+function yes_no_label() {
+    local value="$1"
+    if [[ "$value" =~ ^[Yy]$ ]]; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
+# --- 10. BLOCKING YES/NO HELPER ---
+# Used when SPACE is pressed. SPACE pauses the timer and waits for Y/N/ENTER.
+function tty_read_yes_no_blocking() {
     local prompt="$1"
     local default="$2"
-    local input=""
-    read -t "$T" -p "$prompt" input || input="$default"
-    if [ -z "$input" ]; then
-        input="$default"
+    local default_label="Y/n"
+    local key=""
+
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
     fi
-    echo "$input"
-}
 
-function is_positive_int() {
-    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
-}
+    while true; do
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+        if [ -r /dev/tty ]; then
+            IFS= read -rsn1 key < /dev/tty || true
+        else
+            IFS= read -rsn1 key || true
+        fi
 
-function clamp_int() {
-    local value="$1"
-    local min="$2"
-    local max="$3"
-    if [ "$value" -lt "$min" ]; then
-        echo "$min"
-    elif [ "$value" -gt "$max" ]; then
-        echo "$max"
-    else
-        echo "$value"
-    fi
-}
-
-function bytes_to_gb() {
-    awk -v bytes="$1" 'BEGIN { printf "%d", bytes / 1024 / 1024 / 1024 }'
-}
-
-# --- 8. SYSTEM AUDIT ---
-# Reads host RAM, CPU cores, total disk space, and calculates adaptive defaults.
-msg_info "Running system audit"
-
-TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
-TOTAL_RAM_GB=$(( TOTAL_RAM_MB / 1024 ))
-[ "$TOTAL_RAM_GB" -lt 1 ] && TOTAL_RAM_GB=1
-
-TOTAL_CORES=$(nproc)
-[ "$TOTAL_CORES" -lt 1 ] && TOTAL_CORES=1
-
-TOTAL_DISK_GB=$(lsblk -b -dn -o SIZE,TYPE | awk '$2=="disk"{sum+=$1} END{printf "%d", sum/1024/1024/1024}')
-[ "$TOTAL_DISK_GB" -lt 1 ] && TOTAL_DISK_GB=1
-
-DEFAULT_RAM_GB=$(( TOTAL_RAM_GB * BASE_RAM_PERCENT / 100 ))
-DEFAULT_RAM_GB=$(clamp_int "$DEFAULT_RAM_GB" 1 "$TOTAL_RAM_GB")
-
-DEFAULT_CORES=$(( TOTAL_CORES * BASE_CPU_PERCENT / 100 ))
-DEFAULT_CORES=$(clamp_int "$DEFAULT_CORES" 1 "$TOTAL_CORES")
-
-DEFAULT_OS_DISK_GB="$BASE_OS_DISK_GB"
-if [ "$TOTAL_DISK_GB" -lt 120 ]; then
-    DEFAULT_OS_DISK_GB=$(( TOTAL_DISK_GB * 25 / 100 ))
-    DEFAULT_OS_DISK_GB=$(clamp_int "$DEFAULT_OS_DISK_GB" 20 "$BASE_OS_DISK_GB")
-fi
-
-msg_ok "SYSTEM AUDIT COMPLETE"
-
-# --- 9. GPU AUDIT ---
-# Detects only discrete GPUs for passthrough and avoids selecting Intel integrated graphics.
-msg_info "Detecting discrete GPU"
-
-GPU_FOUND=$(lspci -Dnn | grep -Ei "VGA compatible controller|3D controller|Display controller" || true)
-DGPU_LINES=$(echo "$GPU_FOUND" | grep -Eiv "Intel|Integrated|UHD|Iris" | grep -Ei "NVIDIA|AMD|ATI|Radeon|GeForce|RTX|GTX|Quadro|Tesla|FirePro|Arc" || true)
-
-if [ -n "$DGPU_LINES" ]; then
-    DGPU_BDF=$(echo "$DGPU_LINES" | head -n 1 | awk '{print $1}')
-    DGPU_SLOT="${DGPU_BDF%.*}"
-
-    while read -r func_line; do
-        [ -z "$func_line" ] && continue
-        func_id=$(echo "$func_line" | grep -Po '\[\K[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' | tail -n1 || true)
-        [ -n "$func_id" ] && DGPU_IDS+="${func_id},"
-    done < <(lspci -Dnn -s "$DGPU_SLOT" || true)
-
-    DGPU_IDS="${DGPU_IDS%,}"
-fi
-
-msg_ok "GPU AUDIT COMPLETE"
-
-# --- 10. STORAGE AUDIT ---
-# Detects Proxmox storages suitable for VM disks and determines type, free space, SSD/HDD, NVMe/SATA, ZFS/LVM/DIR.
-msg_info "Auditing Proxmox storage"
-
-mapfile -t STORAGE_LIST < <(pvesm status --content images 2>/dev/null | awk 'NR>1 && $3=="active"{print $1}' || true)
-
-if [ "${#STORAGE_LIST[@]}" -eq 0 ]; then
-    mapfile -t STORAGE_LIST < <(pvesm status 2>/dev/null | awk 'NR>1 && $3=="active"{print $1}' || true)
-fi
-
-if [ "${#STORAGE_LIST[@]}" -eq 0 ]; then
-    msg_error "No active Proxmox storage found for VM images"
-fi
-
-for storage in "${STORAGE_LIST[@]}"; do
-    if [ "$storage" == "local-lvm" ]; then
-        DEFAULT_STORAGE="$storage"
-        break
-    fi
-done
-
-if [ -z "$DEFAULT_STORAGE" ]; then
-    for storage in "${STORAGE_LIST[@]}"; do
-        if [ "$storage" == "local-zfs" ]; then
-            DEFAULT_STORAGE="$storage"
-            break
+        if [[ -z "$key" ]]; then
+            tty_print "${BFR}"
+            echo "$default"
+            return 0
+        elif [[ "$key" =~ ^[YyNn]$ ]]; then
+            tty_print "${BFR}"
+            echo "$key"
+            return 0
         fi
     done
+}
+
+# --- 11. TIMED YES/NO PROMPT HELPER ---
+# Shows countdown. SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
+function timed_yes_no() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+    local key=""
+    local default_label="Y/n"
+    local final_label=""
+
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
+    fi
+
+    for ((i=T; i>0; i--)); do
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        fi
+    done
+
+    [ -z "$answer" ] && answer="$default"
+    final_label="$(yes_no_label "$answer")"
+    tty_print "${BFR}"
+    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    echo "$answer"
+}
+
+# --- 12. TIMED TEXT INPUT HELPER ---
+# Reads normal text input with a timeout. SPACE does not apply here; ENTER accepts typed value or default.
+function timed_text_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+
+    tty_print "${YW}${prompt} [default: ${default}] (${T}s): ${CL}"
+
+    if [ -r /dev/tty ]; then
+        IFS= read -r -t "$T" answer < /dev/tty || true
+    else
+        IFS= read -r -t "$T" answer || true
+    fi
+
+    [ -z "$answer" ] && answer="$default"
+    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    echo "$answer"
+}
+
+# --- 13. GPU NAME CLEANUP HELPER ---
+# Removes PCI IDs and extra text to make GPU display readable.
+function clean_gpu_name() {
+    echo "$1" | sed -E 's/^[0-9a-fA-F:.]+[[:space:]]+//; s/\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]//g; s/\(rev [^)]+\)//g; s/[[:space:]]+/ /g; s/[[:space:]]+$//'
+}
+
+# --- 14. GPU SUMMARY HELPER ---
+# Creates readable integrated/discrete GPU summary for the audit screen.
+function build_gpu_summary() {
+    local out=""
+
+    if [ -n "$IGPU_LINES" ]; then
+        while read -r line; do
+            [ -z "$line" ] && continue
+            out+="Integrated: $(clean_gpu_name "$line"); "
+        done <<< "$IGPU_LINES"
+    fi
+
+    if [ -n "$DGPU_LINES" ]; then
+        while read -r line; do
+            [ -z "$line" ] && continue
+            out+="Discrete: $(clean_gpu_name "$line"); "
+        done <<< "$DGPU_LINES"
+    fi
+
+    echo "${out%; }"
+}
+
+# --- 15. PROXMOX VALIDATION ---
+# Confirms the script is being run on Proxmox VE 9 or newer.
+if ! command -v pveversion >/dev/null 2>&1; then
+    msg_error "This system is not Proxmox VE. Script cancelled."
 fi
 
-if [ -z "$DEFAULT_STORAGE" ]; then
-    DEFAULT_STORAGE="${STORAGE_LIST[0]}"
+PVE_MAJOR=$(pveversion | cut -d'/' -f2 | cut -d'.' -f1)
+
+if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
+    msg_error "Requires Proxmox VE 9+."
 fi
 
-SELECTED_STORAGE_TYPE=$(pvesm status 2>/dev/null | awk -v s="$DEFAULT_STORAGE" '$1==s{print $2}')
-SELECTED_STORAGE_FREE_GB=$(pvesm status 2>/dev/null | awk -v s="$DEFAULT_STORAGE" '$1==s{printf "%d", $6/1024/1024}')
+# --- 16. SYSTEM RESOURCE AUDIT ---
+# Detects RAM, CPU cores and calculates adaptive default VM resources.
+msg_info "Auditing system resources"
 
-if echo "$SELECTED_STORAGE_TYPE" | grep -qi "zfs"; then
-    STORAGE_IS_ZFS="yes"
+TOTAL_RAM_GB=$(free -g | awk '/^Mem:/{print $2}')
+TOTAL_CORES=$(nproc)
+
+DEFAULT_RAM_GB=$(( TOTAL_RAM_GB * DEFAULT_RAM_PERCENT / 100 ))
+[ "$DEFAULT_RAM_GB" -lt 1 ] && DEFAULT_RAM_GB=1
+
+DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
+[ "$DEFAULT_CORES" -lt 1 ] && DEFAULT_CORES=1
+
+msg_ok "SYSTEM RESOURCES DETECTED"
+
+# --- 17. GPU AUDIT ---
+# Detects integrated and discrete GPUs. Only discrete GPU is offered for passthrough.
+msg_info "Detecting GPU hardware"
+
+GPU_ALL=$(lspci -Dnn | grep -Ei "VGA compatible controller|3D controller|Display controller" || true)
+IGPU_LINES=$(echo "$GPU_ALL" | grep -Ei "Intel|Integrated|UHD|Iris" || true)
+DGPU_LINES=$(echo "$GPU_ALL" | grep -Eiv "Intel|Integrated|UHD|Iris" | grep -Ei "NVIDIA|AMD|ATI|Radeon|GeForce|RTX|GTX|Quadro|Tesla|FirePro|Arc" || true)
+
+[ -n "$IGPU_LINES" ] && IGPU_FOUND="yes"
+[ -n "$DGPU_LINES" ] && DGPU_FOUND="yes"
+
+if [ "$DGPU_FOUND" == "yes" ]; then
+    while read -r gpu_line; do
+        [ -z "$gpu_line" ] && continue
+        gpu_bdf=$(echo "$gpu_line" | awk '{print $1}')
+        DGPU_BDFS+="${gpu_bdf} "
+    done <<< "$DGPU_LINES"
 fi
 
-if echo "$SELECTED_STORAGE_TYPE" | grep -qi "lvm"; then
-    STORAGE_IS_LVM="yes"
-fi
+GPU_SUMMARY=$(build_gpu_summary)
+msg_ok "GPU DETECTION COMPLETE"
 
-if echo "$SELECTED_STORAGE_TYPE" | grep -qi "dir"; then
-    STORAGE_IS_DIR="yes"
-fi
-
-if lsblk -dn -o NAME,ROTA | awk '$2==0{found=1} END{exit !found}'; then
-    STORAGE_IS_SSD="yes"
-else
-    STORAGE_IS_SSD="no"
-fi
-
-if lsblk -dn -o NAME | grep -q "^nvme"; then
-    STORAGE_IS_NVME="yes"
-else
-    STORAGE_IS_NVME="no"
-fi
-
-if [ "$SELECTED_STORAGE_FREE_GB" -gt 0 ] && [ "$DEFAULT_OS_DISK_GB" -gt "$SELECTED_STORAGE_FREE_GB" ]; then
-    DEFAULT_OS_DISK_GB=$(( SELECTED_STORAGE_FREE_GB * 50 / 100 ))
-    DEFAULT_OS_DISK_GB=$(clamp_int "$DEFAULT_OS_DISK_GB" 20 "$SELECTED_STORAGE_FREE_GB")
-fi
-
-msg_ok "STORAGE AUDIT COMPLETE"
-
-# --- 11. SYSTEM AUDIT DISPLAY ---
-# Shows total system resources and detected GPU/storage status before asking for options.
+# --- 18. SYSTEM AUDIT DISPLAY ---
+# Shows available host resources and adaptive defaults before asking user inputs.
 echo ""
 echo -e "${DGN}SYSTEM AUDIT:${CL}"
 echo -e "TOTAL RAM: ${GN}${TOTAL_RAM_GB}GB${CL}"
 echo -e "CPU CORES: ${GN}${TOTAL_CORES}${CL}"
-echo -e "TOTAL DISK SPACE: ${GN}${TOTAL_DISK_GB}GB${CL}"
-echo -e "DEFAULT VM RAM: ${GN}${DEFAULT_RAM_GB}GB${CL} (${BASE_RAM_PERCENT}% of TOTAL RAM)"
-echo -e "DEFAULT VM CPU CORES: ${GN}${DEFAULT_CORES}${CL} (${BASE_CPU_PERCENT}% of CPU CORES)"
-echo -e "DEFAULT OS DISK: ${GN}${DEFAULT_OS_DISK_GB}GB${CL}"
-echo -e "DEFAULT STORAGE: ${GN}${DEFAULT_STORAGE}${CL} (${SELECTED_STORAGE_TYPE:-unknown})"
-echo -e "STORAGE FREE: ${GN}${SELECTED_STORAGE_FREE_GB}GB${CL}"
-echo -e "STORAGE MEDIA: SSD=${GN}${STORAGE_IS_SSD}${CL} | NVME=${GN}${STORAGE_IS_NVME}${CL} | ZFS=${GN}${STORAGE_IS_ZFS}${CL} | LVM=${GN}${STORAGE_IS_LVM}${CL} | DIR=${GN}${STORAGE_IS_DIR}${CL}"
+echo -e "DEFAULT VM RAM: ${GN}${DEFAULT_RAM_GB}GB${CL}"
+echo -e "DEFAULT VM CPU CORES: ${GN}${DEFAULT_CORES}${CL}"
 
-if [ -n "$DGPU_LINES" ]; then
-    echo -e "DISCRETE GPU: ${GN}DETECTED${CL}"
-    echo "$DGPU_LINES"
+if [ -n "$GPU_SUMMARY" ]; then
+    echo -e "GPU: ${GN}${GPU_SUMMARY}${CL}"
 else
-    echo -e "DISCRETE GPU: ${RD}NOT FOUND${CL}"
+    echo -e "GPU: ${YW}No passthrough target detected${CL}"
 fi
 
 echo "------------------------------------------------------"
 
-# --- 12. TIMED START ---
-# Starts the VM creation flow. Defaults to YES after timer.
-yn=$(timed_prompt "Start the Proxmox VM Setup (Y/n)? " "y")
-echo ""
-[[ "$yn" =~ ^[Nn] ]] && exit
+# --- 19. FINAL START CONFIRMATION ---
+# Starts VM setup after the audit screen.
+start_yn=$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")
+[[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- QEMU GUEST AGENT ENABLEMENT ---
-# Enables Proxmox-side guest agent integration for IP reporting, clean shutdowns and backups.
-msg_info "Enabling QEMU Guest Agent on VM"
-qm set "$VMID" --agent enabled=1 &>/dev/null
-msg_ok "QEMU GUEST AGENT ENABLED"
+# --- 20. USER VM CONFIGURATION INPUTS ---
+# Collects VM ID, name, CPU, RAM and OS disk size using adaptive defaults.
+VMID=$(timed_text_input "Enter VM ID" "$DEFAULT_VMID")
+VM_NAME=$(timed_text_input "Enter VM Name" "$DEFAULT_VM_NAME")
+CPU_INPUT=$(timed_text_input "Enter CPU CORES" "$DEFAULT_CORES")
+RAM_GB_INPUT=$(timed_text_input "Enter RAM in GB" "$DEFAULT_RAM_GB")
+DISK_GB_INPUT=$(timed_text_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB")
 
-# --- 13. VM ID / NAME OPTIONS ---
-# Lets user choose VM ID and name with timed defaults.
-VMID=$(timed_prompt "Enter VM ID (Default ${VMID_DEFAULT}): " "$VMID_DEFAULT")
-
-if ! is_positive_int "$VMID"; then
-    msg_error "VM ID must be a positive number"
-fi
-
-if qm status "$VMID" &>/dev/null; then
-    msg_error "VM ID $VMID already exists"
-fi
-
-VM_NAME=$(timed_prompt "Enter VM Name (Default ${VM_NAME_DEFAULT}): " "$VM_NAME_DEFAULT")
-
-if [ -z "$VM_NAME" ]; then
-    VM_NAME="$VM_NAME_DEFAULT"
-fi
-
-# --- 14. CPU / RAM OPTIONS ---
-# RAM input is in GB to avoid MB confusion. Defaults adapt to host resources.
-CPU_INPUT=$(timed_prompt "Enter CPU CORES (Default ${DEFAULT_CORES}): " "$DEFAULT_CORES")
-
-if ! is_positive_int "$CPU_INPUT"; then
-    msg_error "CPU CORES must be a positive number"
-fi
-
-CPU_INPUT=$(clamp_int "$CPU_INPUT" 1 "$TOTAL_CORES")
-
-RAM_GB_INPUT=$(timed_prompt "Enter RAM in GB (Default ${DEFAULT_RAM_GB}GB): " "$DEFAULT_RAM_GB")
-
-if ! is_positive_int "$RAM_GB_INPUT"; then
-    msg_error "RAM must be entered as a positive number in GB"
-fi
-
-RAM_GB_INPUT=$(clamp_int "$RAM_GB_INPUT" 1 "$TOTAL_RAM_GB")
 RAM_MB=$(( RAM_GB_INPUT * 1024 ))
 
-# --- 15. DISK SIZE OPTIONS ---
-# OS disk defaults to 40GB unless host storage is small. Optional DATA disk can be added.
-OS_DISK_GB=$(timed_prompt "Enter OS DISK size in GB (Default ${DEFAULT_OS_DISK_GB}GB): " "$DEFAULT_OS_DISK_GB")
-
-if ! is_positive_int "$OS_DISK_GB"; then
-    msg_error "OS DISK size must be a positive number in GB"
+# --- 21. VM ID CONFLICT CHECK ---
+# Prevents overwriting an existing VM ID.
+if qm status "$VMID" >/dev/null 2>&1; then
+    msg_error "VM ID ${VMID} already exists."
 fi
 
-DATA_DISK_GB=$(timed_prompt "Enter optional DATA DISK size in GB (Default ${BASE_DATA_DISK_GB}GB = none): " "$BASE_DATA_DISK_GB")
+# --- 22. ISO SELECTION ---
+# Lists ISO files from local storage and lets the user choose one.
+msg_info "Finding ISO images"
 
-if ! [[ "$DATA_DISK_GB" =~ ^[0-9]+$ ]]; then
-    msg_error "DATA DISK size must be a number in GB"
-fi
-
-# --- 16. STORAGE SELECTION ---
-# Lists available VM image storages and defaults to local-lvm, local-zfs, or first active storage.
-echo ""
-echo -e "${BL}AVAILABLE VM STORAGE:${CL}"
-
-for i in "${!STORAGE_LIST[@]}"; do
-    storage_name="${STORAGE_LIST[$i]}"
-    storage_type=$(pvesm status | awk -v s="$storage_name" '$1==s{print $2}')
-    storage_free=$(pvesm status | awk -v s="$storage_name" '$1==s{printf "%d", $6/1024/1024}')
-    echo "$((i+1))) ${storage_name} (${storage_type}, FREE ${storage_free}GB)"
-done
-
-DEFAULT_STORAGE_INDEX=1
-
-for i in "${!STORAGE_LIST[@]}"; do
-    if [ "${STORAGE_LIST[$i]}" == "$DEFAULT_STORAGE" ]; then
-        DEFAULT_STORAGE_INDEX=$((i+1))
-        break
-    fi
-done
-
-STORAGE_IDX=$(timed_prompt "Select STORAGE (Default ${DEFAULT_STORAGE_INDEX}: ${DEFAULT_STORAGE}): " "$DEFAULT_STORAGE_INDEX")
-
-if ! is_positive_int "$STORAGE_IDX"; then
-    msg_error "Storage selection must be a number"
-fi
-
-if [ "$STORAGE_IDX" -lt 1 ] || [ "$STORAGE_IDX" -gt "${#STORAGE_LIST[@]}" ]; then
-    msg_error "Invalid storage selection"
-fi
-
-SELECTED_STORAGE="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
-SELECTED_STORAGE_TYPE=$(pvesm status | awk -v s="$SELECTED_STORAGE" '$1==s{print $2}')
-
-# --- 17. ISO SELECTION ---
-# Finds ISO images in Proxmox ISO storage and lets user select one. Uses ide2 cdrom attachment.
-echo ""
-echo -e "${BL}SELECT ISO:${CL}"
-
-mapfile -t ISOS < <(pvesm list local --content iso 2>/dev/null | awk 'NR>1 {print $1}' || true)
+mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" 2>/dev/null | sort || true)
 
 if [ "${#ISOS[@]}" -eq 0 ]; then
-    mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" 2>/dev/null | sed 's|/var/lib/vz/template/iso/|local:iso/|' || true)
-fi
-
-if [ "${#ISOS[@]}" -eq 0 ]; then
-    msg_warn "No ISO found. VM will be created without ISO attached."
+    msg_warn "No ISO images found in /var/lib/vz/template/iso. VM will be created without ISO."
     ISO_PATH=""
 else
+    msg_ok "ISO IMAGES FOUND"
+    echo ""
+    echo -e "${BL}SELECT ISO:${CL}"
+
     for i in "${!ISOS[@]}"; do
-        echo "$((i+1))) ${ISOS[$i]}"
+        echo "$((i+1))) $(basename "${ISOS[$i]}")"
     done
 
-    ISO_IDX=$(timed_prompt "Select ISO (Default 1): " "1")
+    ISO_IDX=$(timed_text_input "Select ISO number" "1")
 
-    if ! is_positive_int "$ISO_IDX"; then
-        msg_error "ISO selection must be a number"
+    if ! [[ "$ISO_IDX" =~ ^[0-9]+$ ]] || [ "$ISO_IDX" -lt 1 ] || [ "$ISO_IDX" -gt "${#ISOS[@]}" ]; then
+        msg_error "Invalid ISO selection."
     fi
 
-    if [ "$ISO_IDX" -lt 1 ] || [ "$ISO_IDX" -gt "${#ISOS[@]}" ]; then
-        msg_error "Invalid ISO selection"
-    fi
-
-    ISO_PATH="${ISOS[$((ISO_IDX-1))]}"
+    ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
 fi
 
-# --- 18. GPU PASSTHROUGH OPTION ---
-# Defaults to YES if a discrete GPU exists. Attaches only the detected discrete GPU, not Intel iGPU.
-ENABLE_GPU="n"
+# --- 23. STORAGE SELECTION ---
+# Lists Proxmox storage that supports images and lets the user choose where to place VM disks.
+msg_info "Finding Proxmox storage"
 
-if [ -n "$DGPU_BDF" ]; then
-    echo ""
-    echo -e "${BL}DISCRETE GPU AVAILABLE:${CL}"
-    echo "$DGPU_LINES"
-    gpu_yn=$(timed_prompt "Add DISCRETE GPU to VM? (Y/n): " "y")
+mapfile -t STORAGE_LIST < <(pvesm status --content images 2>/dev/null | awk 'NR>1 {print $1}' | sort || true)
+
+if [ "${#STORAGE_LIST[@]}" -eq 0 ]; then
+    msg_error "No Proxmox storage found with images content."
+fi
+
+msg_ok "STORAGE FOUND"
+echo ""
+echo -e "${BL}SELECT VM STORAGE:${CL}"
+
+for i in "${!STORAGE_LIST[@]}"; do
+    echo "$((i+1))) ${STORAGE_LIST[$i]}"
+done
+
+STORAGE_IDX=$(timed_text_input "Select storage number" "1")
+
+if ! [[ "$STORAGE_IDX" =~ ^[0-9]+$ ]] || [ "$STORAGE_IDX" -lt 1 ] || [ "$STORAGE_IDX" -gt "${#STORAGE_LIST[@]}" ]; then
+    msg_error "Invalid storage selection."
+fi
+
+STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
+
+# --- 24. GPU PASSTHROUGH OPTION ---
+# Offers discrete GPU passthrough only if a discrete GPU exists.
+if [ "$DGPU_FOUND" == "yes" ]; then
+    gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "y")
     [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y"
 fi
 
-# --- 19. STORAGE OPTIMIZATION LOGIC ---
-# Applies VM disk flags based on detected storage type/media: SSD/NVMe/ZFS/LVM/DIR.
-msg_info "Calculating VM storage optimization"
-
-DISCARD_OPT="discard=on"
-SSD_OPT=""
-IO_THREAD_OPT="iothread=1"
-CACHE_OPT="cache=none"
-OS_DISK_FORMAT=""
-DATA_DISK_FORMAT=""
-
-if [ "$STORAGE_IS_SSD" == "yes" ] || [ "$STORAGE_IS_NVME" == "yes" ]; then
-    SSD_OPT=",ssd=1"
-fi
-
-if echo "$SELECTED_STORAGE_TYPE" | grep -qi "dir"; then
-    OS_DISK_FORMAT=",format=qcow2"
-    DATA_DISK_FORMAT=",format=qcow2"
-fi
-
-if echo "$SELECTED_STORAGE_TYPE" | grep -qi "zfspool"; then
-    STORAGE_IS_ZFS="yes"
-    CACHE_OPT="cache=none"
-fi
-
-if echo "$SELECTED_STORAGE_TYPE" | grep -qi "lvm"; then
-    STORAGE_IS_LVM="yes"
-    CACHE_OPT="cache=none"
-fi
-
-msg_ok "VM STORAGE OPTIMIZATION READY"
-
-# --- 20. HOST STORAGE OPTIMIZATION LOGIC ---
-# Enables fstrim for SSD/NVMe host storage and adds safe sysctl VM tuning for Docker/database workloads.
-msg_info "Applying host storage optimization"
-
-if [ "$STORAGE_IS_SSD" == "yes" ] || [ "$STORAGE_IS_NVME" == "yes" ]; then
-    systemctl enable --now fstrim.timer &>/dev/null || true
-fi
-
-cat <<EOF > /etc/sysctl.d/99-pve-vm-storage-tuning.conf
-# VM host storage and memory tuning for Docker/database workloads
-vm.swappiness = 10
-vm.vfs_cache_pressure = 50
-EOF
-
-sysctl --system &>/dev/null || true
-
-if [ "$STORAGE_IS_ZFS" == "yes" ] && command -v zfs >/dev/null 2>&1; then
-    TOTAL_RAM_BYTES=$(free -b | awk '/^Mem:/{print $2}')
-    ARC_MAX=$(( TOTAL_RAM_BYTES / 4 ))
-    ARC_MIN=$(( TOTAL_RAM_BYTES / 16 ))
-
-    cat <<EOF > /etc/modprobe.d/zfs.conf
-# Limit ZFS ARC so VM RAM remains available
-options zfs zfs_arc_min=${ARC_MIN}
-options zfs zfs_arc_max=${ARC_MAX}
-EOF
-fi
-
-msg_ok "HOST STORAGE OPTIMIZATION APPLIED"
-
-# --- 21. VM CREATION ---
-# Creates the VM using q35, OVMF, VirtIO network, host CPU, fixed RAM, and no ballooning.
-msg_info "Creating VM $VMID ($VM_NAME)"
+# --- 25. VM CREATE ---
+# Creates Ubuntu/Linux VM with q35, OVMF, host CPU, fixed RAM and VirtIO network.
+msg_info "Creating VM ${VMID} (${VM_NAME})"
 
 qm create "$VMID" \
-    --agent enabled=1
     --name "$VM_NAME" \
     --machine q35 \
     --bios ovmf \
@@ -500,132 +408,71 @@ qm create "$VMID" \
     --cores "$CPU_INPUT" \
     --memory "$RAM_MB" \
     --balloon 0 \
-    --agent enabled=1 \
     --net0 virtio,bridge=vmbr0 \
-    --scsihw virtio-scsi-single \
-    --tablet 0 \
-    --onboot 1 &>/dev/null
+    --agent enabled=1 \
+    &>/dev/null
 
-msg_ok "VM BASE CREATED"
+msg_ok "VM CREATED"
 
-# --- 22. EFI DISK CREATION ---
-# Adds EFI disk required by OVMF/UEFI boot.
-msg_info "Adding EFI disk"
+# --- 26. VM DISK CONFIGURATION ---
+# Adds EFI disk and main OS disk with discard enabled for SSD/LVM-thin friendly behaviour.
+msg_info "Configuring VM disks"
 
-qm set "$VMID" --efidisk0 "${SELECTED_STORAGE}:0,efitype=4m,pre-enrolled-keys=0" &>/dev/null
+qm set "$VMID" --efidisk0 "${STORAGE_ID}:0,format=qcow2,efitype=4m,pre-enrolled-keys=0" &>/dev/null
+qm set "$VMID" --scsihw virtio-scsi-single &>/dev/null
+qm set "$VMID" --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=on,iothread=1" &>/dev/null
 
-msg_ok "EFI DISK ADDED"
+msg_ok "VM DISKS CONFIGURED"
 
-# --- 23. OS DISK CREATION ---
-# Adds optimized OS disk with discard/TRIM, SSD flag where appropriate, and IO thread.
-msg_info "Adding OS DISK"
+# --- 27. ISO AND BOOT ORDER ---
+# Attaches selected ISO if available and sets VM boot order.
+msg_info "Configuring VM boot"
 
-qm set "$VMID" --scsi0 "${SELECTED_STORAGE}:${OS_DISK_GB}${OS_DISK_FORMAT},${DISCARD_OPT}${SSD_OPT},${IO_THREAD_OPT},${CACHE_OPT}" &>/dev/null
-
-msg_ok "OS DISK ADDED"
-
-# --- 24. OPTIONAL DATA DISK CREATION ---
-# Adds a secondary DATA disk only if user entered a size greater than 0GB.
-if [ "$DATA_DISK_GB" -gt 0 ]; then
-    msg_info "Adding DATA DISK"
-
-    qm set "$VMID" --scsi1 "${SELECTED_STORAGE}:${DATA_DISK_GB}${DATA_DISK_FORMAT},${DISCARD_OPT}${SSD_OPT},${IO_THREAD_OPT},${CACHE_OPT}" &>/dev/null
-
-    msg_ok "DATA DISK ADDED"
-fi
-
-# --- 25. ISO / BOOT CONFIGURATION ---
-# Attaches selected ISO to ide2 and configures boot order.
 if [ -n "$ISO_PATH" ]; then
-    msg_info "Attaching ISO"
-
-    qm set "$VMID" --ide2 "$ISO_PATH,media=cdrom" &>/dev/null
-
-    msg_ok "ISO ATTACHED"
+    qm set "$VMID" --cdrom "$ISO_PATH" &>/dev/null
 fi
 
-msg_info "Configuring boot order"
+qm set "$VMID" --boot order=scsi0\;ide2 &>/dev/null
 
-qm set "$VMID" --boot order="$BOOT_ORDER" &>/dev/null
+msg_ok "VM BOOT CONFIGURED"
 
-msg_ok "BOOT ORDER CONFIGURED"
-
-# --- 26. GPU PASSTHROUGH ATTACHMENT ---
-# Adds discrete GPU to VM if selected. Uses q35/OVMF compatible PCIe passthrough.
+# --- 28. GPU PASSTHROUGH ATTACHMENT ---
+# Adds the first detected discrete GPU BDF to the VM.
 if [ "$ENABLE_GPU" == "y" ]; then
-    msg_info "Attaching DISCRETE GPU"
+    msg_info "Attaching discrete GPU to VM"
 
-    qm set "$VMID" --hostpci0 "${DGPU_BDF},pcie=1,x-vga=1" &>/dev/null
+    GPU_PCI_ID=$(echo "$DGPU_BDFS" | awk '{print $1}')
 
-    msg_ok "GPU PASSTHROUGH ENABLED ($DGPU_BDF)"
+    if [ -n "$GPU_PCI_ID" ]; then
+        qm set "$VMID" --hostpci0 "${GPU_PCI_ID},pcie=1,x-vga=1" &>/dev/null
+        msg_ok "GPU PASSTHROUGH ENABLED (${GPU_PCI_ID})"
+    else
+        msg_warn "GPU passthrough selected but no GPU PCI ID found."
+    fi
 fi
 
-# --- 27. VM NOTES ---
-# Adds VM notes explaining storage and guest-side optimization recommendations.
-msg_info "Adding VM notes"
+# --- 29. COMPLETION MARKER ---
+# Creates marker file so future checks can identify that this setup was already run.
+cat <<EOF > "$COMPLETED_MARKER"
+Proxmox VM Setup completed on: $(date)
+VMID: $VMID
+Name: $VM_NAME
+RAM: ${RAM_GB_INPUT}GB
+CPU: ${CPU_INPUT}
+Storage: ${STORAGE_ID}
+EOF
 
-VM_NOTES="Created by PVE9 VM Setup.
-
-Recommended VM purpose:
-Ubuntu Server + Docker + Traefik + Authentik + Postgres + application stack.
-
-Configured:
-Machine: q35
-BIOS: OVMF / UEFI
-CPU Type: host
-CPU CORES: ${CPU_INPUT}
-RAM: ${RAM_GB_INPUT}GB fixed, ballooning disabled
-OS DISK: ${OS_DISK_GB}GB
-DATA DISK: ${DATA_DISK_GB}GB
-Network: VirtIO
-Storage: ${SELECTED_STORAGE}
-Storage Type: ${SELECTED_STORAGE_TYPE}
-SSD: ${STORAGE_IS_SSD}
-NVME: ${STORAGE_IS_NVME}
-ZFS: ${STORAGE_IS_ZFS}
-LVM: ${STORAGE_IS_LVM}
-GPU Passthrough: ${ENABLE_GPU}
-
-Inside Ubuntu VM recommended:
-sudo apt update
-sudo apt install -y qemu-guest-agent
-sudo systemctl enable --now qemu-guest-agent
-sudo systemctl enable --now fstrim.timer
-echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-vm-swappiness.conf
-sudo sysctl --system
-"
-
-qm set "$VMID" --description "$VM_NOTES" &>/dev/null
-
-msg_ok "VM NOTES ADDED"
-
-# --- 28. FINAL VALIDATION ---
-# Checks VM config after creation and prints important summary.
-msg_info "Validating VM configuration"
-
-qm config "$VMID" &>/dev/null
-
-msg_ok "VM CONFIG VALIDATED"
-
-# --- 29. FINISH SUMMARY ---
-# Shows final VM details and next steps.
+# --- 30. FINAL SUMMARY ---
+# Shows final VM configuration.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
-echo "------------------------------------------------------"
 echo -e "VM ID: ${GN}${VMID}${CL}"
 echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
-echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
 echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
-echo -e "OS DISK: ${GN}${OS_DISK_GB}GB${CL}"
-echo -e "DATA DISK: ${GN}${DATA_DISK_GB}GB${CL}"
-echo -e "STORAGE: ${GN}${SELECTED_STORAGE}${CL}"
-echo -e "STORAGE TYPE: ${GN}${SELECTED_STORAGE_TYPE}${CL}"
-echo -e "SSD: ${GN}${STORAGE_IS_SSD}${CL}"
-echo -e "NVME: ${GN}${STORAGE_IS_NVME}${CL}"
-echo -e "ZFS: ${GN}${STORAGE_IS_ZFS}${CL}"
-echo -e "LVM: ${GN}${STORAGE_IS_LVM}${CL}"
+echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
+echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
+echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
 echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
-[ -n "$ISO_PATH" ] && echo -e "ISO: ${GN}${ISO_PATH}${CL}"
-echo "------------------------------------------------------"
-echo -e "${YW}Start the VM from Proxmox Web UI and install Ubuntu.${CL}"
-echo -e "${YW}After Ubuntu install, install qemu-guest-agent and enable fstrim.timer inside the VM.${CL}"
+echo ""
+
+exit 0

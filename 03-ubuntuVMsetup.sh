@@ -4,12 +4,9 @@ shopt -s inherit_errexit nullglob
 
 # =========================================================
 #  Ubuntu VM Setup
-#  Post-install bootstrap for Ubuntu Server VM/LXC.
-#  Designed for Docker, Traefik, Authentik, PostgreSQL,
-#  Redis, Portainer, Postiz and future SaaS workloads.
 # =========================================================
 
-# --- 1. COLOR VARIABLES (RESTORED ALL) ---
+# --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
 YW=`echo "\033[33m"`
 BL=`echo "\033[36m"`
 RD=`echo "\033[01;31m"`
@@ -17,39 +14,28 @@ BGN=`echo "\033[4;92m"`
 GN=`echo "\033[1;92m"`
 DGN=`echo "\033[32m"`
 CL=`echo "\033[m"`
+CLF=`echo "\033[5m"`
 BFR="\\r\\033[K"
 HOLD="-"
 CM="${GN}✓${CL}"
 CROSS="${RD}✗${CL}"
 
+# --- 2. GLOBAL VARIABLES ---
 T=15
 LOG_FILE="/var/log/ubuntu-vm-setup.log"
+COMPLETED_MARKER="/root/.ubuntu-vm-setup-completed"
 
-# --- 2. GLOBAL DEFAULTS ---
-# Default user and Docker folder layout based on your saved env/Portainer structure.
-DEFAULT_USER="orik"
-DEFAULT_TZ="Europe/London"
-DEFAULT_DOCKER_DIR="/home/orik/docker"
-DEFAULT_SECRETS_DIR="/home/orik/docker/secrets"
-SETUP_MARKER="/opt/ubuntu-vm-setup.done"
-
+DEFAULT_USERNAME="orik"
 USERNAME=""
-USER_HOME=""
-DOCKER_DIR=""
-DOCKER_SECRETS_DIR=""
-SYSTEM_TYPE="Unknown"
-IS_LXC="no"
-IS_VM="no"
-IS_SSD="no"
-TOTAL_RAM_GB=0
-TOTAL_CORES=0
-ROOT_KEYS_FOUND="no"
-USER_KEYS_READY="no"
+SUDO_USER_CREATED="no"
 SSH_HARDENING_APPLIED="no"
-UBUNTU_PRO_ATTACHED="no"
+QEMU_AGENT_INSTALLED="no"
+UFW_ENABLED="no"
+IS_CONTAINER="no"
+IS_VM="no"
 
-# --- 3. HEADER & MESSAGING FUNCTIONS ---
-# Shows one-line Ubuntu VM Setup title and provides reusable status helpers.
+# --- 3. HEADER FUNCTION ---
+# Displays the one-line Ubuntu VM Setup banner.
 function header_info {
 echo -e "${BL}
 ██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗████████╗██╗   ██╗    ██╗   ██╗███╗   ███╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
@@ -61,487 +47,324 @@ echo -e "${BL}
 ${CL}"
 }
 
-function msg_info() { echo -ne " ${HOLD} ${YW}$1..."; }
+# --- 4. MESSAGE HELPER FUNCTIONS ---
+# Provides consistent status messages.
+function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 4. LOGGING & ERROR HANDLING ---
-# Logs all script output and reports line number on failure.
+# --- 5. LOGGING & ERROR HANDLING ---
+# Logs output and reports failing line.
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
-
-# --- 5. ROOT CHECK ---
-# Requires root because this script edits users, SSH, apt, systemd and kernel settings.
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RD}Please run as root, for example: sudo bash ubuntu-vm-setup.sh${CL}"
-    exit 1
-fi
 
 clear
 header_info
 
-# --- 6. HELPER FUNCTIONS ---
-# Provides timed prompts and safe config editing helpers.
-function timed_prompt() {
+# --- 6. TTY OUTPUT HELPER ---
+# Prints directly to terminal from prompt functions.
+function tty_print() {
+    if [ -w /dev/tty ]; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
+}
+
+# --- 7. TTY OUTPUT WITH NEWLINE HELPER ---
+# Prints directly to terminal with newline.
+function tty_println() {
+    if [ -w /dev/tty ]; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
+}
+
+# --- 8. YES/NO LABEL HELPER ---
+# Converts Y/N answers to readable yes/no text.
+function yes_no_label() {
+    local value="$1"
+    if [[ "$value" =~ ^[Yy]$ ]]; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
+# --- 9. BLOCKING YES/NO HELPER ---
+# SPACE pauses countdown and this waits for Y/N/ENTER.
+function tty_read_yes_no_blocking() {
     local prompt="$1"
     local default="$2"
-    local input=""
-    read -t "$T" -p "$prompt" input || input="$default"
-    [ -z "$input" ] && input="$default"
-    echo "$input"
-}
+    local default_label="Y/n"
+    local key=""
 
-function set_or_append_space_config() {
-    local file="$1"
-    local key="$2"
-    local value="$3"
-    touch "$file"
-    if grep -Eq "^[#[:space:]]*${key}[[:space:]]+" "$file"; then
-        sed -i -E "s|^[#[:space:]]*${key}[[:space:]].*|${key} ${value}|" "$file"
-    else
-        echo "${key} ${value}" >> "$file"
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
     fi
+
+    while true; do
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+        if [ -r /dev/tty ]; then
+            IFS= read -rsn1 key < /dev/tty || true
+        else
+            IFS= read -rsn1 key || true
+        fi
+
+        if [[ -z "$key" ]]; then
+            tty_print "${BFR}"
+            echo "$default"
+            return 0
+        elif [[ "$key" =~ ^[YyNn]$ ]]; then
+            tty_print "${BFR}"
+            echo "$key"
+            return 0
+        fi
+    done
 }
 
-function set_or_append_equals_config() {
-    local file="$1"
-    local key="$2"
-    local value="$3"
-    touch "$file"
-    if grep -Eq "^[#[:space:]]*${key}=.*" "$file"; then
-        sed -i -E "s|^[#[:space:]]*${key}=.*|${key}=${value}|" "$file"
-    else
-        echo "${key}=${value}" >> "$file"
+# --- 10. TIMED YES/NO PROMPT HELPER ---
+# SPACE pauses and waits. Timeout uses default. Final answer stays visible.
+function timed_yes_no() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+    local key=""
+    local default_label="Y/n"
+    local final_label=""
+
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
     fi
+
+    for ((i=T; i>0; i--)); do
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        fi
+    done
+
+    [ -z "$answer" ] && answer="$default"
+    final_label="$(yes_no_label "$answer")"
+
+    tty_print "${BFR}"
+    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+
+    echo "$answer"
 }
 
-# --- 7. PRE-INSTALL AUDIT ---
-# Detects VM/LXC type, resources, SSD state and whether this looks already configured.
-msg_info "Running system audit"
+# --- 11. TIMED TEXT INPUT HELPER ---
+# Reads normal text input with timeout and default.
+function timed_text_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
 
+    tty_print "${YW}${prompt} [default: ${default}] (${T}s): ${CL}"
+
+    if [ -r /dev/tty ]; then
+        IFS= read -r -t "$T" answer < /dev/tty || true
+    else
+        IFS= read -r -t "$T" answer || true
+    fi
+
+    [ -z "$answer" ] && answer="$default"
+    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    echo "$answer"
+}
+
+# --- 12. ROOT / SUDO COMMAND DETECTION ---
+# Uses sudo when not root, otherwise runs commands directly.
+if [ "$EUID" -eq 0 ]; then
+    SUDO_CMD=""
+else
+    SUDO_CMD="sudo"
+fi
+
+# --- 13. ENVIRONMENT DETECTION ---
+# Detects whether the script is running inside LXC or VM/bare Ubuntu.
 if grep -qa container=lxc /proc/1/environ 2>/dev/null; then
-    IS_LXC="yes"
-    SYSTEM_TYPE="LXC Container"
-elif command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet; then
+    IS_CONTAINER="yes"
+else
     IS_VM="yes"
-    SYSTEM_TYPE="Virtual Machine"
-else
-    SYSTEM_TYPE="Bare Metal / Unknown"
 fi
 
-TOTAL_RAM_GB=$(free -g | awk '/^Mem:/{print $2}')
-[ "$TOTAL_RAM_GB" -lt 1 ] && TOTAL_RAM_GB=1
+# --- 14. START CONFIRMATION ---
+# Starts Ubuntu VM/LXC setup.
+echo -e "${YW}This script will configure Ubuntu VM/LXC for Docker workloads.${CL}"
+start_yn=$(timed_yes_no "Start the Ubuntu VM Setup Script?" "y")
+[[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-TOTAL_CORES=$(nproc)
-[ "$TOTAL_CORES" -lt 1 ] && TOTAL_CORES=1
+# --- 15. USERNAME INPUT ---
+# Creates or configures the target non-root admin user.
+USERNAME=$(timed_text_input "Enter username" "$DEFAULT_USERNAME")
 
-if lsblk -dn -o ROTA | grep -q "^0$"; then
-    IS_SSD="yes"
+# --- 16. FRESH SYSTEM / USER CHECK ---
+# If user already exists, warns and exits to avoid damaging an existing system.
+if id "$USERNAME" >/dev/null 2>&1; then
+    msg_error "User ${USERNAME} already exists. This does not look like a fresh system."
 fi
 
-if [ -s /root/.ssh/authorized_keys ]; then
-    ROOT_KEYS_FOUND="yes"
+# --- 17. ROOT SSH KEY CHECK ---
+# Checks whether root has authorized_keys to copy to the new user.
+ROOT_KEYS="/root/.ssh/authorized_keys"
+if [ ! -s "$ROOT_KEYS" ]; then
+    msg_warn "No root SSH authorized_keys found. SSH key copy will be skipped."
 fi
 
-msg_ok "SYSTEM AUDIT COMPLETE"
+# --- 18. USER CREATION ---
+# Creates the user with disabled password by default and sudo membership.
+msg_info "Creating user ${USERNAME}"
 
-# --- 8. AUDIT DISPLAY ---
-# Shows detected system details before changes are made.
-echo ""
-echo -e "${DGN}SYSTEM AUDIT:${CL}"
-echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
-echo -e "TOTAL RAM: ${GN}${TOTAL_RAM_GB}GB${CL}"
-echo -e "CPU CORES: ${GN}${TOTAL_CORES}${CL}"
-echo -e "SSD DETECTED: ${GN}${IS_SSD}${CL}"
-echo -e "ROOT SSH KEYS FOUND: ${GN}${ROOT_KEYS_FOUND}${CL}"
-echo "------------------------------------------------------"
+$SUDO_CMD useradd -m -s /bin/bash "$USERNAME"
+$SUDO_CMD usermod -aG sudo "$USERNAME"
+$SUDO_CMD passwd -l "$USERNAME" &>/dev/null || true
 
-# --- 9. FRESH SYSTEM WARNING ---
-# Warns if the setup marker exists or target user already exists.
-if [ -f "$SETUP_MARKER" ]; then
-    msg_error "Ubuntu VM Setup already appears completed on this system"
+SUDO_USER_CREATED="yes"
+
+msg_ok "USER CREATED"
+
+# --- 19. SSH KEY COPY ---
+# Copies root SSH keys to the new user if keys exist.
+if [ -s "$ROOT_KEYS" ]; then
+    msg_info "Copying SSH keys to ${USERNAME}"
+
+    $SUDO_CMD mkdir -p "/home/${USERNAME}/.ssh"
+    $SUDO_CMD cp "$ROOT_KEYS" "/home/${USERNAME}/.ssh/authorized_keys"
+    $SUDO_CMD chown -R "${USERNAME}:${USERNAME}" "/home/${USERNAME}/.ssh"
+    $SUDO_CMD chmod 700 "/home/${USERNAME}/.ssh"
+    $SUDO_CMD chmod 600 "/home/${USERNAME}/.ssh/authorized_keys"
+
+    msg_ok "SSH KEYS COPIED"
 fi
 
-if id "$DEFAULT_USER" >/dev/null 2>&1; then
-    echo -e "${YW}User '${DEFAULT_USER}' already exists. This may not be a fresh system.${CL}"
-    continue_existing=$(timed_prompt "Continue anyway? (y/N): " "n")
-    [[ "$continue_existing" =~ ^[Yy] ]] || msg_error "Aborted"
+# --- 20. SYSTEM UPDATE ---
+# Updates Ubuntu packages before installing QEMU guest agent and firewall tools.
+msg_info "Updating system"
+
+$SUDO_CMD apt-get update &>/dev/null
+$SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade &>/dev/null
+$SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get -y autoremove &>/dev/null
+
+msg_ok "SYSTEM UPDATED"
+
+# --- 21. QEMU GUEST AGENT INSTALL ---
+# Installs qemu-guest-agent for Proxmox VM visibility and clean shutdown support.
+if [ "$IS_VM" == "yes" ]; then
+    msg_info "Installing QEMU guest agent"
+
+    $SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent &>/dev/null
+    $SUDO_CMD systemctl enable --now qemu-guest-agent &>/dev/null || true
+
+    QEMU_AGENT_INSTALLED="yes"
+
+    msg_ok "QEMU GUEST AGENT INSTALLED"
 fi
 
-# --- 10. TIMED START ---
-# Starts the script with default YES after timer.
-echo -e "${YW} This script will configure Ubuntu VM/LXC for Docker-based services.${CL}"
-yn=$(timed_prompt "Start Ubuntu VM Setup (Y/n)? " "y")
-echo ""
-[[ "$yn" =~ ^[Nn] ]] && exit
+# --- 22. UFW FIREWALL BASELINE ---
+# Enables UFW with SSH, HTTP and HTTPS allowed for Docker/Traefik workloads.
+msg_info "Configuring UFW firewall"
 
-# --- 11. USER OPTIONS ---
-# Lets user choose username, timezone and Docker paths with timed defaults.
-USERNAME=$(timed_prompt "Enter main username (Default ${DEFAULT_USER}): " "$DEFAULT_USER")
-[ -z "$USERNAME" ] && USERNAME="$DEFAULT_USER"
+$SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y ufw &>/dev/null
+$SUDO_CMD ufw default deny incoming &>/dev/null || true
+$SUDO_CMD ufw default allow outgoing &>/dev/null || true
+$SUDO_CMD ufw allow OpenSSH &>/dev/null || true
+$SUDO_CMD ufw allow 80/tcp &>/dev/null || true
+$SUDO_CMD ufw allow 443/tcp &>/dev/null || true
+$SUDO_CMD ufw --force enable &>/dev/null || true
 
-USER_HOME="/home/$USERNAME"
+UFW_ENABLED="yes"
 
-DEFAULT_DOCKER_DIR="/home/${USERNAME}/docker"
-DEFAULT_SECRETS_DIR="/home/${USERNAME}/docker/secrets"
+msg_ok "UFW FIREWALL ENABLED"
 
-TZ_INPUT=$(timed_prompt "Enter timezone (Default ${DEFAULT_TZ}): " "$DEFAULT_TZ")
-[ -z "$TZ_INPUT" ] && TZ_INPUT="$DEFAULT_TZ"
-
-DOCKER_DIR=$(timed_prompt "Enter DOCKER_DIR (Default ${DEFAULT_DOCKER_DIR}): " "$DEFAULT_DOCKER_DIR")
-[ -z "$DOCKER_DIR" ] && DOCKER_DIR="$DEFAULT_DOCKER_DIR"
-
-DOCKER_SECRETS_DIR=$(timed_prompt "Enter DOCKER_SECRETS_DIR (Default ${DEFAULT_SECRETS_DIR}): " "$DEFAULT_SECRETS_DIR")
-[ -z "$DOCKER_SECRETS_DIR" ] && DOCKER_SECRETS_DIR="$DEFAULT_SECRETS_DIR"
-
-# --- 12. SSH KEY INPUT SAFETY ---
-# Uses root authorized_keys if available. If missing, user can paste a public key. SSH hardening only happens if keys exist.
-PUBKEY_INPUT=""
-
-if [ "$ROOT_KEYS_FOUND" == "no" ]; then
-    echo -e "${YW}No root SSH authorized_keys found.${CL}"
-    PUBKEY_INPUT=$(timed_prompt "Paste SSH public key now or leave blank to skip SSH hardening: " "")
-fi
-
-# --- 13. OPTIONAL UBUNTU PRO TOKEN ---
-# Optionally attaches Ubuntu Pro. Tracing is disabled while reading/using token.
-UBUNTU_PRO_YN=$(timed_prompt "Attach Ubuntu Pro token? (y/N): " "n")
-
-UBUNTU_PRO_TOKEN=""
-if [[ "$UBUNTU_PRO_YN" =~ ^[Yy] ]]; then
-    set +x
-    read -s -t "$T" -p "Paste Ubuntu Pro token or leave blank to skip: " UBUNTU_PRO_TOKEN || UBUNTU_PRO_TOKEN=""
-    echo ""
-    set -x
-fi
-
-# --- 14. BASE PACKAGE UPDATE ---
-# Updates Ubuntu, upgrades packages, and installs required base tools.
-msg_info "Updating system and installing base packages"
-
-apt update
-DEBIAN_FRONTEND=noninteractive apt -y dist-upgrade
-
-DEBIAN_FRONTEND=noninteractive apt install -y \
-    ca-certificates \
-    curl \
-    gnupg \
-    lsb-release \
-    apt-transport-https \
-    software-properties-common \
-    sudo \
-    openssh-server \
-    qemu-guest-agent \
-    git \
-    nano \
-    vim \
-    htop \
-    btop \
-    unzip \
-    zip \
-    jq \
-    rsync \
-    net-tools \
-    dnsutils \
-    iproute2 \
-    lsof \
-    tree \
-    acl \
-    fail2ban \
-    unattended-upgrades
-
-msg_ok "BASE SYSTEM UPDATED"
-
-# --- 15. TIMEZONE CONFIGURATION ---
-# Sets system timezone for logs, Docker containers and scheduled tasks.
-msg_info "Setting timezone"
-
-timedatectl set-timezone "$TZ_INPUT" || true
-
-msg_ok "TIMEZONE SET TO $TZ_INPUT"
-
-# --- 16. USER CREATION / USER NORMALIZATION ---
-# Creates main sudo user if missing, or normalizes shell/groups if user already exists.
-if ! id "$USERNAME" >/dev/null 2>&1; then
-    msg_info "Creating user $USERNAME"
-
-    useradd -m -s /bin/bash "$USERNAME"
-    usermod -aG sudo "$USERNAME"
-
-    msg_ok "USER $USERNAME CREATED"
-else
-    msg_info "Normalizing user $USERNAME"
-
-    usermod -aG sudo "$USERNAME"
-    chsh -s /bin/bash "$USERNAME" || true
-
-    msg_ok "USER $USERNAME NORMALIZED"
-fi
-
-# --- 17. SSH KEY SETUP ---
-# Copies root SSH keys or pasted key to the main user. This prevents lockout before SSH hardening.
-msg_info "Configuring SSH keys for $USERNAME"
-
-mkdir -p "$USER_HOME/.ssh"
-chmod 700 "$USER_HOME/.ssh"
-touch "$USER_HOME/.ssh/authorized_keys"
-chmod 600 "$USER_HOME/.ssh/authorized_keys"
-
-if [ "$ROOT_KEYS_FOUND" == "yes" ]; then
-    cat /root/.ssh/authorized_keys >> "$USER_HOME/.ssh/authorized_keys"
-fi
-
-if [ -n "$PUBKEY_INPUT" ]; then
-    echo "$PUBKEY_INPUT" >> "$USER_HOME/.ssh/authorized_keys"
-fi
-
-sort -u "$USER_HOME/.ssh/authorized_keys" -o "$USER_HOME/.ssh/authorized_keys"
-chown -R "$USERNAME:$USERNAME" "$USER_HOME/.ssh"
-
-if [ -s "$USER_HOME/.ssh/authorized_keys" ]; then
-    USER_KEYS_READY="yes"
-fi
-
-msg_ok "SSH KEYS CONFIGURED"
-
-# --- 18. SSH HARDENING ---
-# Disables password login and root login only if the target user has SSH keys.
-if [ "$USER_KEYS_READY" == "yes" ]; then
+# --- 23. SSH HARDENING ---
+# Disables password login and root login only if copied SSH keys exist for the new user.
+if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then
     msg_info "Hardening SSH"
 
-    mkdir -p /etc/ssh/sshd_config.d
+    SSH_CONFIG="/etc/ssh/sshd_config"
 
-    cat <<EOF > /etc/ssh/sshd_config.d/99-ubuntu-vm-setup.conf
-# Ubuntu VM Setup SSH hardening
-AddressFamily inet
-PasswordAuthentication no
-PermitRootLogin no
-PubkeyAuthentication yes
-KbdInteractiveAuthentication no
-X11Forwarding no
-EOF
+    $SUDO_CMD sed -i -E 's/^[#[:space:]]*AddressFamily.*/AddressFamily inet/' "$SSH_CONFIG" || true
+    grep -q "^AddressFamily" "$SSH_CONFIG" || echo "AddressFamily inet" | $SUDO_CMD tee -a "$SSH_CONFIG" >/dev/null
 
-    sshd -t
+    $SUDO_CMD sed -i -E 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/' "$SSH_CONFIG" || true
+    grep -q "^PasswordAuthentication" "$SSH_CONFIG" || echo "PasswordAuthentication no" | $SUDO_CMD tee -a "$SSH_CONFIG" >/dev/null
 
-    if systemctl list-unit-files | grep -q "^ssh.service"; then
-        systemctl restart ssh
-    else
-        systemctl restart sshd
-    fi
+    $SUDO_CMD sed -i -E 's/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin no/' "$SSH_CONFIG" || true
+    grep -q "^PermitRootLogin" "$SSH_CONFIG" || echo "PermitRootLogin no" | $SUDO_CMD tee -a "$SSH_CONFIG" >/dev/null
+
+    $SUDO_CMD sshd -t &>/dev/null
+    $SUDO_CMD systemctl restart ssh &>/dev/null || $SUDO_CMD systemctl restart sshd &>/dev/null || true
 
     SSH_HARDENING_APPLIED="yes"
-    msg_ok "SSH SECURED"
+
+    msg_ok "SSH HARDENED"
 else
-    SSH_HARDENING_APPLIED="no"
-    msg_warn "SSH hardening skipped because no user SSH key exists"
+    msg_warn "SSH hardening skipped because user SSH keys were not found."
 fi
 
-# --- 19. QEMU GUEST AGENT ---
-# Enables qemu-guest-agent in VM mode. Skips it in LXC where it is not needed.
-if [ "$IS_LXC" == "no" ]; then
-    msg_info "Enabling qemu-guest-agent"
+# --- 24. CLEANUP ---
+# Cleans package cache and removes orphan packages.
+msg_info "Cleaning system"
 
-    systemctl enable --now qemu-guest-agent &>/dev/null || true
-
-    msg_ok "QEMU GUEST AGENT ENABLED"
-else
-    msg_warn "LXC detected, skipping qemu-guest-agent"
-fi
-
-# --- 20. DOCKER-READY DIRECTORY STRUCTURE ---
-# Creates standard folders for future Docker Compose stacks, secrets, appdata and backups.
-msg_info "Creating Docker directory structure"
-
-mkdir -p "$DOCKER_DIR"
-mkdir -p "$DOCKER_DIR/appdata"
-mkdir -p "$DOCKER_DIR/compose"
-mkdir -p "$DOCKER_DIR/backups"
-mkdir -p "$DOCKER_DIR/shared"
-mkdir -p "$DOCKER_SECRETS_DIR"
-
-chmod 700 "$DOCKER_SECRETS_DIR"
-chown -R "$USERNAME:$USERNAME" "$DOCKER_DIR"
-
-msg_ok "DOCKER FOLDERS CREATED"
-
-# --- 21. ENV TEMPLATE CREATION ---
-# Creates a base .env file matching your saved Portainer/environment variable style.
-msg_info "Creating base .env template"
-
-cat <<EOF > "$DOCKER_DIR/.env"
-# Ubuntu VM Setup environment
-PUID="1000"
-PGID="1000"
-TZ="${TZ_INPUT}"
-USERDIR="${USER_HOME}"
-DOCKER_DIR="${DOCKER_DIR}"
-DOCKER_SECRETS_DIR="${DOCKER_SECRETS_DIR}"
-DOMAIN="najafov.co.uk"
-CF_EMAIL="oriknj999@gmail.com"
-CF_ZONEID=""
-POSTGRES_PASSWORD=""
-EOF
-
-chown "$USERNAME:$USERNAME" "$DOCKER_DIR/.env"
-chmod 600 "$DOCKER_DIR/.env"
-
-msg_ok "BASE .env CREATED"
-
-# --- 22. SSD TRIM / STORAGE OPTIMIZATION ---
-# Enables fstrim on SSD-backed systems and applies sane VM storage memory tuning.
-if [ "$IS_SSD" == "yes" ]; then
-    msg_info "Enabling SSD TRIM"
-
-    systemctl enable --now fstrim.timer &>/dev/null || true
-
-    msg_ok "SSD TRIM ENABLED"
-fi
-
-msg_info "Applying VM storage tuning"
-
-cat <<EOF > /etc/sysctl.d/99-ubuntu-vm-storage-tuning.conf
-# Ubuntu VM storage tuning for Docker/database workloads
-vm.swappiness = 10
-vm.vfs_cache_pressure = 50
-EOF
-
-sysctl --system &>/dev/null || true
-
-msg_ok "VM STORAGE TUNING APPLIED"
-
-# --- 23. NETWORK / HIGH TRAFFIC TUNING ---
-# Adds safe high-traffic tuning for reverse proxy, uploads, downloads and many connections.
-msg_info "Applying network tuning"
-
-cat <<EOF > /etc/sysctl.d/99-ubuntu-vm-network-tuning.conf
-# Ubuntu VM network tuning for Docker reverse-proxy workloads
-net.core.somaxconn = 65535
-net.core.netdev_max_backlog = 250000
-net.ipv4.tcp_max_syn_backlog = 65535
-net.ipv4.ip_local_port_range = 1024 65535
-net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_keepalive_time = 600
-net.ipv4.tcp_keepalive_intvl = 60
-net.ipv4.tcp_keepalive_probes = 5
-net.ipv4.tcp_syncookies = 1
-EOF
-
-sysctl --system &>/dev/null || true
-
-msg_ok "NETWORK TUNING APPLIED"
-
-# --- 24. FAIL2BAN BASIC SSH JAIL ---
-# Enables basic SSH protection inside the VM. Main public protection still comes from Cloudflare/Traefik/CrowdSec later.
-msg_info "Configuring fail2ban"
-cat <<EOF > /etc/fail2ban/jail.d/sshd.local
-[sshd]
-enabled = true
-port = ssh
-filter = sshd
-logpath = %(sshd_log)s
-maxretry = 5
-bantime = 1h
-findtime = 10m
-EOF
-
-systemctl enable --now fail2ban &>/dev/null || true
-systemctl restart fail2ban &>/dev/null || true
-msg_ok "FAIL2BAN CONFIGURED"
-
-# --- FIREWALL BASICS ---
-# Enables UFW baseline firewall for Docker VM. Allows SSH, HTTP and HTTPS only.
-msg_info "Configuring basic firewall"
-apt install -y ufw &>/dev/null
-
-ufw --force reset &>/dev/null
-ufw default deny incoming &>/dev/null
-ufw default allow outgoing &>/dev/null
-
-ufw allow 22/tcp comment 'SSH' &>/dev/null
-ufw allow 80/tcp comment 'HTTP Traefik' &>/dev/null
-ufw allow 443/tcp comment 'HTTPS Traefik' &>/dev/null
-
-ufw --force enable &>/dev/null
-msg_ok "BASIC FIREWALL ENABLED"
-
-# --- 25. UNATTENDED UPGRADES ---
-# Enables automatic security package update checks.
-msg_info "Configuring unattended upgrades"
-
-cat <<EOF > /etc/apt/apt.conf.d/20auto-upgrades
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-EOF
-
-systemctl enable --now unattended-upgrades &>/dev/null || true
-
-msg_ok "UNATTENDED UPGRADES ENABLED"
-
-# --- 26. OPTIONAL UBUNTU PRO ATTACH ---
-# Attaches Ubuntu Pro only if a token was provided.
-if [ -n "$UBUNTU_PRO_TOKEN" ]; then
-    msg_info "Attaching Ubuntu Pro"
-
-    set +x
-    pro attach "$UBUNTU_PRO_TOKEN" >/dev/null 2>&1 && UBUNTU_PRO_ATTACHED="yes" || UBUNTU_PRO_ATTACHED="no"
-    set -x
-
-    if [ "$UBUNTU_PRO_ATTACHED" == "yes" ]; then
-        msg_ok "UBUNTU PRO ATTACHED"
-    else
-        msg_warn "Ubuntu Pro attach failed or was skipped"
-    fi
-fi
-
-# --- 27. CLEANUP ---
-# Cleans apt cache and removes unused packages.
-msg_info "Cleaning packages"
-
-apt clean
-apt -y autoremove
+$SUDO_CMD apt-get clean &>/dev/null
+$SUDO_CMD apt-get -y autoremove &>/dev/null
 
 msg_ok "SYSTEM CLEANED"
 
-# --- 28. SETUP MARKER ---
-# Writes a marker file documenting completed setup details.
-msg_info "Writing setup marker"
-
-mkdir -p /opt
-
-cat <<EOF > "$SETUP_MARKER"
-Ubuntu VM Setup completed: $(date)
-User: $USERNAME
-System type: $SYSTEM_TYPE
-Docker dir: $DOCKER_DIR
-Secrets dir: $DOCKER_SECRETS_DIR
-SSH hardening applied: $SSH_HARDENING_APPLIED
-Ubuntu Pro attached: $UBUNTU_PRO_ATTACHED
+# --- 25. COMPLETION MARKER ---
+# Creates marker showing the setup ran successfully.
+$SUDO_CMD bash -c "cat > '$COMPLETED_MARKER'" <<EOF
+Ubuntu VM Setup completed on: $(date)
+Username: $USERNAME
+Container: $IS_CONTAINER
+VM: $IS_VM
+QEMU Agent: $QEMU_AGENT_INSTALLED
+UFW: $UFW_ENABLED
+SSH Hardened: $SSH_HARDENING_APPLIED
 EOF
 
-msg_ok "SETUP MARKER WRITTEN"
-
-# --- 29. FINAL SUMMARY ---
-# Displays final status and recommends reboot/poweroff based on VM/LXC type.
+# --- 26. FINAL SUMMARY ---
+# Displays final result and next action.
 echo ""
-echo -e "${GN}UBUNTU VM SETUP COMPLETE!${CL}"
-echo "------------------------------------------------------"
-echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
-echo -e "USER: ${GN}${USERNAME}${CL}"
+echo -e "${GN}FINISHED!${CL}"
+echo -e "USERNAME: ${GN}${USERNAME}${CL}"
+echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_INSTALLED}${CL}"
+echo -e "UFW FIREWALL: ${GN}${UFW_ENABLED}${CL}"
 echo -e "SSH HARDENING: ${GN}${SSH_HARDENING_APPLIED}${CL}"
-echo -e "DOCKER DIR: ${GN}${DOCKER_DIR}${CL}"
-echo -e "SECRETS DIR: ${GN}${DOCKER_SECRETS_DIR}${CL}"
-echo -e "SSD TRIM: ${GN}${IS_SSD}${CL}"
-echo -e "QEMU AGENT: ${GN}$([ "$IS_LXC" == "no" ] && echo "enabled" || echo "skipped")${CL}"
-echo -e "FIREWALL: ${GN}UFW enabled, ports 22/80/443 allowed${CL}"
-echo -e "UBUNTU PRO: ${GN}${UBUNTU_PRO_ATTACHED}${CL}"
-echo "------------------------------------------------------"
-echo -e "${YW}Next script should install Docker Engine and Docker Compose plugin.${CL}"
 echo ""
 
-# --- 30. REBOOT / POWEROFF ---
-# Reboots by default after 30 seconds. User can cancel with Ctrl+C.
-echo -e "${GN}REBOOTING IN 30 SECONDS...${CL}"
-echo -e "${YW}Press Ctrl+C now to cancel automatic reboot.${CL}"
-sleep 30
-reboot
+if [ "$IS_VM" == "yes" ]; then
+    echo -e "${YW}Power off the VM now, then enable QEMU Guest Agent in Proxmox if not already enabled.${CL}"
+else
+    echo -e "${YW}Reboot the container when ready.${CL}"
+fi
+
+exit 0
