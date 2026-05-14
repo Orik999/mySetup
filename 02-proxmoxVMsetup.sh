@@ -46,10 +46,20 @@ IGPU_FOUND="no"
 DGPU_FOUND="no"
 DGPU_BDFS=""
 GPU_SUMMARY=""
+GPU_DETECTION_STATUS="ok"
 
 STORAGE_ID=""
+STORAGE_TYPE=""
+EFI_FORMAT="raw"
 ISO_PATH=""
 ENABLE_GPU="n"
+
+VMID=""
+VM_NAME=""
+CPU_INPUT=""
+RAM_GB_INPUT=""
+RAM_MB=""
+DISK_GB_INPUT=""
 
 # --- 3. HEADER FUNCTION ---
 # Displays the one-line Proxmox VM Setup banner.
@@ -85,6 +95,10 @@ fi
 
 clear
 header_info
+
+# =========================================================
+#  PHASE 1: SAFE AUDIT + USER INPUT COLLECTION ONLY
+# =========================================================
 
 # --- 7. TTY PRINT HELPER ---
 # Prints directly to terminal even when functions return values through stdout.
@@ -256,7 +270,7 @@ function print_number_error() {
 
 # --- 14. EDITABLE INPUT LOOP HELPER ---
 # Shared editable input system for text and numeric prompts.
-# The initial key is passed into the same editable buffer, so Backspace can delete it.
+# The initial key is passed into the same editable buffer, so Backspace/Delete can delete it.
 function editable_input_loop() {
     local prompt="$1"
     local default="$2"
@@ -320,7 +334,7 @@ function editable_input_loop() {
 # Shows wall-clock countdown.
 # SPACE pauses with empty editable buffer.
 # Any typed character pauses with that character already inside the editable buffer.
-# Backspace can delete every typed character, including the first.
+# Backspace/Delete can delete every typed character, including the first.
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
@@ -384,7 +398,7 @@ function timed_text_input() {
 # Shows wall-clock countdown.
 # SPACE pauses with empty editable numeric buffer.
 # Any typed digit pauses with that digit already inside the editable buffer.
-# Backspace can delete the first digit.
+# Backspace/Delete can delete the first digit.
 # Timeout accepts default.
 # Letters/symbols are rejected.
 function timed_number_input() {
@@ -467,35 +481,7 @@ function timed_number_input() {
     done
 }
 
-# --- 17. GPU NAME CLEANUP HELPER ---
-# Removes PCI IDs and extra text to make GPU display readable.
-function clean_gpu_name() {
-    echo "$1" | sed -E 's/^[0-9a-fA-F:.]+[[:space:]]+//; s/\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]//g; s/\(rev [^)]+\)//g; s/[[:space:]]+/ /g; s/[[:space:]]+$//'
-}
-
-# --- 18. GPU SUMMARY HELPER ---
-# Creates readable integrated/discrete GPU summary for the audit screen.
-function build_gpu_summary() {
-    local out=""
-
-    if [ -n "$IGPU_LINES" ]; then
-        while read -r line; do
-            [ -z "$line" ] && continue
-            out+="Integrated: $(clean_gpu_name "$line"); "
-        done <<< "$IGPU_LINES"
-    fi
-
-    if [ -n "$DGPU_LINES" ]; then
-        while read -r line; do
-            [ -z "$line" ] && continue
-            out+="Discrete: $(clean_gpu_name "$line"); "
-        done <<< "$DGPU_LINES"
-    fi
-
-    echo "${out%; }"
-}
-
-# --- 19. PHYSICAL RAM DETECTION HELPER ---
+# --- 17. PHYSICAL RAM DETECTION HELPER ---
 # Uses MemTotal and rounds up to physical GiB.
 # This fixes 16GB systems being detected as 15GB and defaulting to 11GB RAM.
 function detect_total_ram_gb() {
@@ -512,7 +498,132 @@ function detect_total_ram_gb() {
     echo $(( (mem_kb + gib_kb - 1) / gib_kb ))
 }
 
-# --- 20. PROXMOX VALIDATION ---
+# --- 18. PCI VENDOR NAME HELPER ---
+# Converts PCI vendor IDs to readable GPU vendor names without calling lspci.
+function pci_vendor_name() {
+    local vendor="$1"
+
+    case "$vendor" in
+        0x8086) echo "Intel" ;;
+        0x10de) echo "NVIDIA" ;;
+        0x1002) echo "AMD" ;;
+        0x1022) echo "AMD" ;;
+        *) echo "Unknown" ;;
+    esac
+}
+
+# --- 19. SYSFS GPU DETECTION HELPER ---
+# Detects GPUs through /sys/bus/pci/devices instead of lspci.
+# This avoids lspci hangs on some fresh Proxmox/laptop PCI states.
+function detect_gpus_sysfs() {
+    local dev=""
+    local bdf=""
+    local class=""
+    local vendor=""
+    local device=""
+    local vendor_name=""
+    local line=""
+
+    GPU_ALL=""
+    IGPU_LINES=""
+    DGPU_LINES=""
+    IGPU_FOUND="no"
+    DGPU_FOUND="no"
+    DGPU_BDFS=""
+    GPU_SUMMARY=""
+
+    for dev in /sys/bus/pci/devices/*; do
+        [ -e "$dev/class" ] || continue
+        [ -e "$dev/vendor" ] || continue
+        [ -e "$dev/device" ] || continue
+
+        class="$(cat "$dev/class" 2>/dev/null || true)"
+
+        case "$class" in
+            0x030000|0x030200|0x038000)
+                bdf="$(basename "$dev")"
+                vendor="$(cat "$dev/vendor" 2>/dev/null || true)"
+                device="$(cat "$dev/device" 2>/dev/null || true)"
+                vendor_name="$(pci_vendor_name "$vendor")"
+                line="${bdf} ${vendor_name} GPU [${vendor#0x}:${device#0x}]"
+
+                GPU_ALL+="${line}"$'\n'
+
+                if [ "$vendor" == "0x8086" ]; then
+                    IGPU_LINES+="${line}"$'\n'
+                    IGPU_FOUND="yes"
+                elif [ "$vendor" == "0x10de" ] || [ "$vendor" == "0x1002" ] || [ "$vendor" == "0x1022" ]; then
+                    DGPU_LINES+="${line}"$'\n'
+                    DGPU_BDFS+="${bdf} "
+                    DGPU_FOUND="yes"
+                fi
+                ;;
+        esac
+    done
+}
+
+# --- 20. GPU SUMMARY HELPER ---
+# Creates readable integrated/discrete GPU summary for the audit screen.
+function build_gpu_summary() {
+    local out=""
+
+    if [ -n "$IGPU_LINES" ]; then
+        while read -r line; do
+            [ -z "$line" ] && continue
+            out+="Integrated: ${line}; "
+        done <<< "$IGPU_LINES"
+    fi
+
+    if [ -n "$DGPU_LINES" ]; then
+        while read -r line; do
+            [ -z "$line" ] && continue
+            out+="Discrete: ${line}; "
+        done <<< "$DGPU_LINES"
+    fi
+
+    echo "${out%; }"
+}
+
+# --- 21. STORAGE LIST HELPER ---
+# Finds Proxmox storage suitable for VM images.
+# First tries content-aware pvesm status. If unsupported, safely falls back to all active storage.
+function get_storage_list() {
+    local list=""
+
+    list=$(pvesm status --content images 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort || true)
+
+    if [ -z "$list" ]; then
+        list=$(pvesm status 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort || true)
+    fi
+
+    echo "$list"
+}
+
+# --- 22. STORAGE TYPE HELPER ---
+# Detects selected Proxmox storage type from pvesm status.
+function get_storage_type() {
+    local storage="$1"
+
+    pvesm status 2>/dev/null | awk -v s="$storage" 'NR>1 && $1==s {print $2; exit}'
+}
+
+# --- 23. EFI FORMAT HELPER ---
+# Chooses correct EFI disk format for selected storage type.
+# File-based storage supports qcow2; block/pool storage should use raw.
+function get_efi_format_for_storage_type() {
+    local type="$1"
+
+    case "$type" in
+        dir|nfs|cifs|glusterfs)
+            echo "qcow2"
+            ;;
+        *)
+            echo "raw"
+            ;;
+    esac
+}
+
+# --- 24. PROXMOX VALIDATION ---
 # Confirms the script is being run on Proxmox VE 9 or newer.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -524,7 +635,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 21. SYSTEM RESOURCE AUDIT ---
+# --- 25. SYSTEM RESOURCE AUDIT ---
 # Detects RAM, CPU cores and calculates adaptive default VM resources.
 msg_info "Auditing system resources"
 
@@ -539,30 +650,21 @@ DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
 
 msg_ok "SYSTEM RESOURCES DETECTED"
 
-# --- 22. GPU AUDIT ---
-# Detects integrated and discrete GPUs. Only discrete GPU is offered for passthrough.
+# --- 26. SAFE SYSFS GPU AUDIT ---
+# Detects GPU through sysfs only, avoiding lspci because lspci can hang on some fresh Proxmox/laptop systems.
 msg_info "Detecting GPU hardware"
 
-GPU_ALL=$(lspci -Dnn | grep -Ei "VGA compatible controller|3D controller|Display controller" || true)
-IGPU_LINES=$(echo "$GPU_ALL" | grep -Ei "Intel|Integrated|UHD|Iris" || true)
-DGPU_LINES=$(echo "$GPU_ALL" | grep -Eiv "Intel|Integrated|UHD|Iris" | grep -Ei "NVIDIA|AMD|ATI|Radeon|GeForce|RTX|GTX|Quadro|Tesla|FirePro|Arc" || true)
-
-[ -n "$IGPU_LINES" ] && IGPU_FOUND="yes"
-[ -n "$DGPU_LINES" ] && DGPU_FOUND="yes"
-
-if [ "$DGPU_FOUND" == "yes" ]; then
-    while read -r gpu_line; do
-        [ -z "$gpu_line" ] && continue
-        gpu_bdf=$(echo "$gpu_line" | awk '{print $1}')
-        DGPU_BDFS+="${gpu_bdf} "
-    done <<< "$DGPU_LINES"
-fi
-
+detect_gpus_sysfs
 GPU_SUMMARY=$(build_gpu_summary)
 
-msg_ok "GPU DETECTION COMPLETE"
+if [ -n "$GPU_ALL" ]; then
+    msg_ok "GPU DETECTION COMPLETE"
+else
+    GPU_DETECTION_STATUS="skipped"
+    msg_ok "GPU DETECTION SKIPPED"
+fi
 
-# --- 23. SYSTEM AUDIT DISPLAY ---
+# --- 27. SYSTEM AUDIT DISPLAY ---
 # Shows available host resources and adaptive defaults before asking user inputs.
 echo ""
 echo -e "${DGN}SYSTEM AUDIT:${CL}"
@@ -574,18 +676,19 @@ echo -e "DEFAULT VM CPU CORES: ${GN}${DEFAULT_CORES}${CL}"
 if [ -n "$GPU_SUMMARY" ]; then
     echo -e "GPU: ${GN}${GPU_SUMMARY}${CL}"
 else
-    echo -e "GPU: ${YW}No passthrough target detected${CL}"
+    echo -e "GPU: ${YW}No passthrough target detected or GPU detection skipped${CL}"
 fi
 
 echo "------------------------------------------------------"
 
-# --- 24. FINAL START CONFIRMATION ---
-# Starts VM setup after the audit screen.
+# --- 28. FINAL START CONFIRMATION ---
+# Starts input collection after audit. No VM changes happen yet.
 start_yn=$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 25. USER VM CONFIGURATION INPUTS ---
+# --- 29. USER VM CONFIGURATION INPUTS ---
 # Collects VM ID, name, CPU, RAM and OS disk size using adaptive defaults.
+# This stage still does not create or modify any VM.
 VMID=$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")
 VM_NAME=$(timed_text_input "Enter VM Name" "$DEFAULT_VM_NAME")
 CPU_INPUT=$(timed_number_input "Enter CPU CORES" "$DEFAULT_CORES" "1" "$TOTAL_CORES")
@@ -594,14 +697,9 @@ DISK_GB_INPUT=$(timed_number_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB"
 
 RAM_MB=$(( RAM_GB_INPUT * 1024 ))
 
-# --- 26. VM ID CONFLICT CHECK ---
-# Prevents overwriting an existing VM ID.
-if qm status "$VMID" >/dev/null 2>&1; then
-    msg_error "VM ID ${VMID} already exists."
-fi
-
-# --- 27. ISO SELECTION ---
+# --- 30. ISO SELECTION ---
 # Lists ISO files from local storage and lets the user choose one with numeric validation.
+# Still input-only; no VM changes are made here.
 msg_info "Finding ISO images"
 
 mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" 2>/dev/null | sort || true)
@@ -622,14 +720,15 @@ else
     ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
 fi
 
-# --- 28. STORAGE SELECTION ---
+# --- 31. STORAGE SELECTION ---
 # Lists Proxmox storage that supports images and lets the user choose where to place VM disks.
+# Still input-only; no VM changes are made here.
 msg_info "Finding Proxmox storage"
 
-mapfile -t STORAGE_LIST < <(pvesm status --content images 2>/dev/null | awk 'NR>1 {print $1}' | sort || true)
+mapfile -t STORAGE_LIST < <(get_storage_list)
 
 if [ "${#STORAGE_LIST[@]}" -eq 0 ]; then
-    msg_error "No Proxmox storage found with images content."
+    msg_error "No active Proxmox storage found for VM images."
 fi
 
 msg_ok "STORAGE FOUND"
@@ -637,21 +736,57 @@ echo ""
 echo -e "${BL}SELECT VM STORAGE:${CL}"
 
 for i in "${!STORAGE_LIST[@]}"; do
-    echo "$((i+1))) ${STORAGE_LIST[$i]}"
+    storage_name="${STORAGE_LIST[$i]}"
+    storage_type="$(get_storage_type "$storage_name")"
+    echo "$((i+1))) ${storage_name} (${storage_type:-unknown})"
 done
 
 STORAGE_IDX=$(timed_number_input "Select storage number" "1" "1" "${#STORAGE_LIST[@]}")
 STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
+STORAGE_TYPE="$(get_storage_type "$STORAGE_ID")"
+EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
 
-# --- 29. GPU PASSTHROUGH OPTION ---
-# Offers discrete GPU passthrough only if a discrete GPU exists.
-if [ "$DGPU_FOUND" == "yes" ]; then
+# --- 32. GPU PASSTHROUGH OPTION ---
+# Offers discrete GPU passthrough only if sysfs GPU detection found a discrete GPU.
+# Still input-only; no VM changes are made here.
+if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
     gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "y")
     [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y"
+else
+    ENABLE_GPU="n"
 fi
 
-# --- 30. VM CREATE ---
-# Creates Ubuntu/Linux VM with q35, OVMF, host CPU, fixed RAM and VirtIO network.
+# --- 33. FINAL APPLY CONFIRMATION ---
+# Last checkpoint before any Proxmox VM changes are made.
+echo ""
+echo -e "${BL}READY TO CREATE VM WITH THESE SETTINGS:${CL}"
+echo -e "VM ID: ${GN}${VMID}${CL}"
+echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
+echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
+echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
+echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
+echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
+echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
+echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
+echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
+echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
+echo ""
+
+apply_yn=$(timed_yes_no "Create VM now?" "y")
+[[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+
+# =========================================================
+#  PHASE 2: APPLY / CREATE VM ONLY AFTER ALL INPUTS
+# =========================================================
+
+# --- 34. VM ID CONFLICT CHECK ---
+# Checks conflict only after all input is collected, immediately before creation.
+if qm status "$VMID" >/dev/null 2>&1; then
+    msg_error "VM ID ${VMID} already exists."
+fi
+
+# --- 35. VM CREATE ---
+# Creates Ubuntu/Linux VM with q35, OVMF, host CPU, fixed RAM, VirtIO network and QEMU guest agent enabled.
 msg_info "Creating VM ${VMID} (${VM_NAME})"
 
 qm create "$VMID" \
@@ -669,17 +804,24 @@ qm create "$VMID" \
 
 msg_ok "VM CREATED"
 
-# --- 31. VM DISK CONFIGURATION ---
-# Adds EFI disk and main OS disk with discard enabled for SSD/LVM-thin friendly behaviour.
-msg_info "Configuring VM disks"
+# --- 36. EFI DISK CONFIGURATION ---
+# Adds OVMF EFI disk with storage-compatible format.
+msg_info "Configuring EFI disk"
 
-qm set "$VMID" --efidisk0 "${STORAGE_ID}:0,format=qcow2,efitype=4m,pre-enrolled-keys=0" &>/dev/null
+qm set "$VMID" --efidisk0 "${STORAGE_ID}:0,format=${EFI_FORMAT},efitype=4m,pre-enrolled-keys=0" &>/dev/null
+
+msg_ok "EFI DISK CONFIGURED"
+
+# --- 37. MAIN VM DISK CONFIGURATION ---
+# Adds main OS disk with virtio-scsi-single, discard and iothread for SSD/LVM-thin friendly behaviour.
+msg_info "Configuring VM OS disk"
+
 qm set "$VMID" --scsihw virtio-scsi-single &>/dev/null
 qm set "$VMID" --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=on,iothread=1" &>/dev/null
 
-msg_ok "VM DISKS CONFIGURED"
+msg_ok "VM OS DISK CONFIGURED"
 
-# --- 32. ISO AND BOOT ORDER ---
+# --- 38. ISO AND BOOT ORDER ---
 # Attaches selected ISO if available and sets VM boot order.
 msg_info "Configuring VM boot"
 
@@ -691,8 +833,8 @@ qm set "$VMID" --boot order=scsi0\;ide2 &>/dev/null
 
 msg_ok "VM BOOT CONFIGURED"
 
-# --- 33. GPU PASSTHROUGH ATTACHMENT ---
-# Adds the first detected discrete GPU BDF to the VM.
+# --- 39. GPU PASSTHROUGH ATTACHMENT ---
+# Adds the first detected discrete GPU BDF to the VM after all other settings are applied.
 if [ "$ENABLE_GPU" == "y" ]; then
     msg_info "Attaching discrete GPU to VM"
 
@@ -706,7 +848,7 @@ if [ "$ENABLE_GPU" == "y" ]; then
     fi
 fi
 
-# --- 34. COMPLETION MARKER ---
+# --- 40. COMPLETION MARKER ---
 # Creates marker file so future checks can identify that this setup was already run.
 cat <<EOF > "$COMPLETED_MARKER"
 Proxmox VM Setup completed on: $(date)
@@ -715,9 +857,13 @@ Name: $VM_NAME
 RAM: ${RAM_GB_INPUT}GB
 CPU: ${CPU_INPUT}
 Storage: ${STORAGE_ID}
+Storage Type: ${STORAGE_TYPE}
+EFI Format: ${EFI_FORMAT}
+ISO: ${ISO_PATH:-none}
+GPU Passthrough: ${ENABLE_GPU}
 EOF
 
-# --- 35. FINAL SUMMARY ---
+# --- 41. FINAL SUMMARY ---
 # Shows final VM configuration.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
@@ -727,6 +873,9 @@ echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
 echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
 echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
 echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
+echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
+echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
+echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
 echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
 echo ""
 
