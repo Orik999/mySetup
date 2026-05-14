@@ -1,0 +1,37 @@
+name: cf-companion
+
+secrets:
+  cf_token:
+    file: ${DOCKER_SECRETS_DIR}/cf_token
+
+services:
+  cf-companion:
+    image: tiredofit/traefik-cloudflare-companion:latest
+    container_name: cf-companion
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - t2_proxy
+      - socket_proxy
+    secrets:
+      - cf_token
+    environment:
+      TIMEZONE: ${TZ}
+      TRAEFIK_VERSION: 2
+      ENABLE_TRAEFIK_POLL: "TRUE"
+      TARGET_DOMAIN: ${DOMAIN}
+      DOMAIN1: ${DOMAIN}
+      DOMAIN1_ZONE_ID: ${CF_ZONEID}
+      DOMAIN1_PROXIED: "true"
+      DEFAULT_TTL: 1
+      DOCKER_HOST: tcp://socket-proxy:2375
+      CF_TOKEN__FILE: /run/secrets/cf_token
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
+  socket_proxy:
+    name: socket_proxy
+    external: true

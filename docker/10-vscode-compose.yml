@@ -1,0 +1,32 @@
+name: vscode
+
+services:
+  vscode:
+    image: lscr.io/linuxserver/code-server:latest
+    container_name: vscode
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - t2_proxy
+    volumes:
+      - ${DOCKER_DIR}:/data/docker
+      - ${DOCKER_DIR}/appdata/vscode/config:/config
+    environment:
+      TZ: ${TZ}
+      PUID: ${PUID}
+      PGID: ${PGID}
+      DEFAULT_WORKSPACE: /data/docker
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.vscode.rule: Host(`code.${DOMAIN}`)
+      traefik.http.routers.vscode.entrypoints: https
+      traefik.http.routers.vscode.tls: "true"
+      traefik.http.routers.vscode.middlewares: authentik@docker
+      traefik.http.routers.vscode.service: vscode
+      traefik.http.services.vscode.loadbalancer.server.port: 8443
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true

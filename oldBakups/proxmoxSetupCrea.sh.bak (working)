@@ -1,0 +1,209 @@
+#!/usr/bin/env bash -ex
+set -euo pipefail
+shopt -s inherit_errexit nullglob
+
+# Color Variables
+YW=`echo "\033[33m"`
+BL=`echo "\033[36m"`
+RD=`echo "\033[01;31m"`
+BGN=`echo "\033[4;92m"`
+GN=`echo "\033[1;92m"`
+DGN=`echo "\033[32m"`
+CL=`echo "\033[m"`
+BFR="\\r\\033[K"
+HOLD="-"
+CM="${GN}✓${CL}"
+CROSS="${RD}✗${CL}"
+
+echo -e "${YW} This script will Perform Post Install Routines. PVE9 ONLY ${CL}"
+while true; do
+    read -p "Start the PVE9 Post Install Script (Y/n)?" yn
+    case $yn in
+        ""|"y"|"Y" ) break;;
+        [Nn]* ) exit;;
+        * ) echo "Please answer yes or no.";;
+    esac
+done
+
+# Check if the version is 9 or higher
+PVE_MAJOR=$(pveversion | cut -d'/' -f2 | cut -d'.' -f1)
+if [ "$PVE_MAJOR" -lt 9 ]; then
+    echo -e "${RD}This script requires Proxmox Virtual Environment 9.0 or greater.${CL}"
+    echo -e "Detected version: $PVE_MAJOR"
+    exit 1
+fi
+
+#   Bellow ascii created with https://manytools.org/hacker-tools/ascii-banner/
+function header_info {
+echo -e "${RD}
+██████╗ ██╗   ██╗███████╗ █████╗     ██████╗  ██████╗ ███████╗████████╗    ██╗███╗   ██╗███████╗████████╗ █████╗ ██╗     ██╗     
+██╔══██╗██║   ██║██╔════╝██╔══██╗    ██╔══██╗██╔═══██╗██╔════╝╚══██╔══╝    ██║████╗  ██║██╔════╝╚══██╔══╝██╔══██╗██║     ██║     
+██████╔╝██║   ██║█████╗  ╚██████║    ██████╔╝██║   ██║███████╗   ██║       ██║██╔██╗ ██║███████╗   ██║   ███████║██║     ██║     
+██╔═══╝ ╚██╗ ██╔╝██╔══╝   ╚═══██║    ██╔═══╝ ██║   ██║╚════██║   ██║       ██║██║╚██╗██║╚════██║   ██║   ██╔══██║██║     ██║     
+██║      ╚████╔╝ ███████╗ █████╔╝    ██║     ╚██████╔╝███████║   ██║       ██║██║ ╚████║███████║   ██║   ██║  ██║███████╗███████╗
+╚═╝       ╚═══╝  ╚══════╝ ╚════╝     ╚═╝      ╚═════╝ ╚══════╝   ╚═╝       ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚══════╝
+${CL}"
+}
+
+function msg_info() {
+    local msg="$1"
+    echo -ne " ${HOLD} ${YW}${msg}..."
+}
+
+function msg_ok() {
+    local msg="$1"
+    echo -e "${BFR} ${CM} ${GN}${msg}${CL}"
+}
+
+clear
+header_info
+
+# Removing local-lvm and adding regained space to local
+msg_info "Merging local-lvm into local storage"
+
+# 1. Check if local-lvm actually exists before trying to delete it
+if lvdisplay /dev/pve/data >/dev/null 2>&1; then
+    # 2. Remove the LVM volume
+    lvremove -y /dev/pve/data &>/dev/null
+    
+    # 3. Resize the root partition to take up the 100% of the newly freed space
+    lvresize -l +100%FREE /dev/pve/root &>/dev/null
+    
+    # 4. Expand the file system to recognize the new size
+    resize2fs /dev/mapper/pve-root &>/dev/null
+    
+    # 5. TELL PROXMOX the storage is gone (Crucial UI step)
+    pvesm freezefs local-lvm &>/dev/null || true
+    pvesm remove local-lvm &>/dev/null || true
+    
+    msg_ok "local-lvm removed and space merged into 'local'"
+else
+    msg_ok "local-lvm not found, skipping merge (already merged?)"
+fi
+
+# Remove enterprise list
+msg_info "Disabling Enterprise Repository"
+rm -f /etc/apt/sources.list.d/pve-enterprise.sources
+rm -f /etc/apt/sources.list.d/ceph.sources
+msg_ok "Disabled Enterprise Repository"
+
+# 2. Create the new DEB822 repository file
+msg_info "Adding PVE9 No-Subscription Sources"
+cat <<EOF > /etc/apt/sources.list.d/proxmox.sources
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+msg_ok "Added PVE9 Sources"
+
+# Update and clean
+msg_info "Updating system (this may take a while)"
+apt update &>/dev/null
+apt -y dist-upgrade &>/dev/null
+apt -y autoremove &>/dev/null
+msg_ok "System updated"
+
+# Restrict Root login and to IPv4 only
+msg_info "Securing SSH (IPv4 only, No Password for Root)"
+sed -i 's/^[#]*AddressFamily.*/AddressFamily inet/; s/^[#]*PasswordAuthentication.*/PasswordAuthentication no/; s/^[#]*PermitRootLogin.*/PermitRootLogin prohibit-password/;' /etc/ssh/sshd_config
+systemctl restart ssh
+msg_ok "SSH Secured"
+
+# Disabling the "No Subscription" warning
+msg_info "Disabling Subscription Nag"
+echo "DPkg::Post-Invoke { \"dpkg -V proxmox-widget-toolkit | grep -q '/proxmoxlib\.js$'; if [ \$? -eq 1 ]; then { echo 'Removing subscription nag from UI...'; sed -i '/res.data.status/{s/\!//;s/active/NoMoreNagging/}' /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js; } && systemctl restart pveproxy; fi\"; };" > /etc/apt/apt.conf.d/no-nag-script
+apt --reinstall install proxmox-widget-toolkit &>/dev/null
+msg_ok "Disabled Subscription Nag"
+
+# Power Management - Disabling sleep, hibernate, and suspend for ALL systems
+msg_info "Disabling sleep, hibernate, and suspend (Server Optimization)"
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target &>/dev/null
+msg_ok "Sleep and Suspend disabled for all system types"
+
+# Chassis-specific logic (Lid Switch)
+CHASSIS=$(dmidecode -s chassis-type)
+if [[ "$CHASSIS" == "Laptop" || "$CHASSIS" == "Notebook" || "$CHASSIS" == "Portable" ]]; then
+    msg_info "Laptop detected ($CHASSIS) - Configuring Lid Switch"
+    sed -i 's/^[#]*HandleLidSwitch=.*/HandleLidSwitch=ignore/; s/^[#]*HandleLidSwitchDocked=.*/HandleLidSwitchDocked=ignore/; s/^[#]*LidSwitchIgnoreInhibited=.*/LidSwitchIgnoreInhibited=no/;' /etc/systemd/logind.conf
+    systemctl restart systemd-logind &>/dev/null
+    msg_ok "Lid Switch ignored (Laptop only)"
+fi
+
+# Optimizing for GPU Passthrough
+msg_info "Optimizing for GPU Passthrough"
+
+# 1. Load VFIO Modules into /etc/modules
+if ! grep -q "vfio" /etc/modules; then
+  echo -e "vfio\nvfio_iommu_type1\nvfio_pci\nvfio_virqfd" >> /etc/modules
+fi
+
+# 2. Detect CPU type for IOMMU
+CPU_TYPE=$(grep -m1 "vendor_id" /proc/cpuinfo | awk '{print $3}')
+IOMMU_CONF=""
+if [[ "$CPU_TYPE" == "GenuineIntel" ]]; then
+    IOMMU_CONF="intel_iommu=on iommu=pt"
+elif [[ "$CPU_TYPE" == "AuthenticAMD" ]]; then
+    IOMMU_CONF="amd_iommu=on iommu=pt"
+fi
+
+# 3. Apply GRUB changes (consoleblank + IOMMU)
+# I set consoleblank=60 (1 minutes) to ensure the screen turns off eventually, 
+# which is helpful for both Laptop battery life and Workstation monitor longevity.
+msg_info "Updating GRUB configuration"
+sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"quiet $IOMMU_CONF consoleblank=60\"|" /etc/default/grub
+update-grub &>/dev/null
+msg_ok "GRUB updated (IOMMU and ConsoleBlank active)"
+
+# 4. Detect Discrete GPU & Isolate if found (NVIDIA or ATI/AMD)
+# This finds the VGA/3D controller and pulls the [VendorID:DeviceID]
+DGPU_IDs=$(lspci -nn | grep -Ei "vga|3d" | grep -Ei "nvidia|amd|ati" | grep -Po '\[\K[0-9a-f]{4}:[0-9a-f]{4}' | tr '\n' ',' | sed 's/,$//')
+
+if [ ! -z "$DGPU_IDs" ]; then
+    msg_ok "Discrete GPU(s) detected: $DGPU_IDs"
+    # Blacklist all possible GPU drivers so they don't conflict with VFIO
+    msg_info "Applying driver blacklists"
+    echo -e "blacklist nvidia\nblacklist nouveau\nblacklist nvidiafb\nblacklist nvidia-gpu\nblacklist radeon\nblacklist amdgpu" > /etc/modprobe.d/pve-blacklist.conf
+    # Assign IDs to VFIO
+    echo "options vfio-pci ids=$DGPU_IDs disable_vga=1" > /etc/modprobe.d/vfio.conf
+    # Enforcing blacklist
+    msg_info "Baking blacklist into Initramfs- Updating (holding GPU for VM)"
+    update-initramfs -u -k all &>/dev/null
+    msg_ok "Driver blacklist enforced"
+    msg_ok "GPU Isolated: VFIO configured and initramfs updated for $DGPU_IDs"
+else
+    msg_ok "No Discrete GPU found. System will boot normally."
+fi
+
+##    When you run this script and reboot, you can verify gpu passthrough:
+# lspci -nnk | grep -A 3 -i vga
+##    Success looks like this: Kernel driver in use: vfio-pci
+##    Failure looks like this: Kernel driver in use: nvidia or amdgpu
+##    If you see vfio-pci, successfully "stolen" the hardware from the host and it is ready to be added to a VM via the Proxmox Web UI (Hardware -> Add -> PCI Device).
+
+# Setting CPU Governor to Performance
+msg_info "Installing cpufrequtils and setting Governor to Performance"
+# Install the utility
+apt-get install -y cpufrequtils &>/dev/null
+# Apply the configuration
+echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
+# Direct kernel override for modern kernels/drivers (intel_pstate/amd_pstate)
+# This forces every CPU core to performance mode via sysfs as a backup
+if [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
+    for r in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do 
+        echo "performance" > "$r" 2>/dev/null || true
+    done
+fi
+# Restart the service to make it persistent
+systemctl restart cpufrequtils &>/dev/null
+msg_ok "CPU Governor set to Performance"
+#   How to verify it worked
+#   After running the script, you can check the current speed of all your CPU cores with this
+cpufreq-info | grep "current CPU frequency"
+
+echo ""
+echo -e "${GN}Finished post install config....${CL}"
+echo ""
+read -n 1 -s -r -p "Press any key to REBOOT NOW (Recommended). "
+reboot

@@ -1,0 +1,36 @@
+name: portainer
+
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # ports:
+    #   - "9443:9443"
+    command: -H tcp://socket-proxy:2375
+    networks:
+      - t2_proxy
+      - socket_proxy
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${DOCKER_DIR}/appdata/portainer:/data
+    environment:
+      TZ: ${TZ}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.portainer.rule: Host(`portainer.${DOMAIN}`)
+      traefik.http.routers.portainer.entrypoints: https
+      traefik.http.routers.portainer.tls: "true"
+      traefik.http.routers.portainer.middlewares: authentik@docker
+      traefik.http.routers.portainer.service: portainer
+      traefik.http.services.portainer.loadbalancer.server.port: 9000
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
+  socket_proxy:
+    name: socket_proxy
+    external: true

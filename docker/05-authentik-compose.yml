@@ -1,0 +1,74 @@
+name: authentik
+
+services:
+  authentik-server:
+    image: ghcr.io/goauthentik/server:latest
+    container_name: authentik-server
+    restart: unless-stopped
+    command: server
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - t2_proxy
+      - database
+    volumes:
+      - ${DOCKER_DIR}/appdata/authentik/media:/media
+      - ${DOCKER_DIR}/appdata/authentik/custom-templates:/templates
+    environment:
+      TZ: ${TZ}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PASSWORD: ${REDIS_PASSWORD}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD}
+      AUTHENTIK_EMAIL__HOST: ${SMTP_HOST}
+      AUTHENTIK_EMAIL__PORT: ${SMTP_PORT}
+      AUTHENTIK_EMAIL__USERNAME: ${SMTP_USERNAME}
+      AUTHENTIK_EMAIL__PASSWORD: ${SMTP_PASSWORD}
+      AUTHENTIK_EMAIL__USE_TLS: "true"
+      AUTHENTIK_EMAIL__FROM: ${AUTHENTIK_EMAIL_FROM}
+    labels:
+      traefik.enable: "true"
+
+      traefik.http.routers.authentik.rule: Host(`auth.${DOMAIN}`)
+      traefik.http.routers.authentik.entrypoints: https
+      traefik.http.routers.authentik.tls: "true"
+      traefik.http.routers.authentik.service: authentik
+      traefik.http.services.authentik.loadbalancer.server.port: 9000
+
+      traefik.http.middlewares.authentik.forwardauth.address: http://authentik-server:9000/outpost.goauthentik.io/auth/traefik
+      traefik.http.middlewares.authentik.forwardauth.trustForwardHeader: "true"
+      traefik.http.middlewares.authentik.forwardauth.authResponseHeaders: X-authentik-username,X-authentik-groups,X-authentik-email,X-authentik-name,X-authentik-uid,X-authentik-jwt,X-authentik-meta-jwks,X-authentik-meta-outpost,X-authentik-meta-provider,X-authentik-meta-app,X-authentik-meta-version
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:latest
+    container_name: authentik-worker
+    restart: unless-stopped
+    command: worker
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - database
+    volumes:
+      - ${DOCKER_DIR}/appdata/authentik/media:/media
+      - ${DOCKER_DIR}/appdata/authentik/certs:/certs
+      - ${DOCKER_DIR}/appdata/authentik/custom-templates:/templates
+    environment:
+      TZ: ${TZ}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PASSWORD: ${REDIS_PASSWORD}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_POSTGRES_PASSWORD}
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
+  database:
+    name: database
+    external: true

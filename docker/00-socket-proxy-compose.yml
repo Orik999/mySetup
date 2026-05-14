@@ -1,0 +1,56 @@
+name: socket-proxy
+
+services:
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: socket-proxy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /run
+    networks:
+      socket_proxy:
+        ipv4_address: 192.168.91.254
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      LOG_LEVEL: info
+      EVENTS: 1
+      PING: 1
+      VERSION: 1
+      INFO: 1
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      SERVICES: 1
+      TASKS: 1
+      POST: 1
+      AUTH: 0
+      SECRETS: 0
+      BUILD: 0
+      COMMIT: 0
+      CONFIGS: 0
+      DISTRIBUTION: 0
+      EXEC: 0
+      NODES: 0
+      PLUGINS: 0
+      SESSION: 0
+      SWARM: 0
+      SYSTEM: 0
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:2375/version || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+networks:
+  socket_proxy:
+    name: socket_proxy
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.91.0/24

@@ -1,0 +1,28 @@
+name: docker-gc
+
+services:
+  docker-gc:
+    image: docker:cli
+    container_name: docker-gc
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - socket_proxy
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+      PRUNE_CRON: "0 4 * * 0"
+    entrypoint: /bin/sh
+    command: >
+      -c "while true; do
+      echo 'Docker safe prune running...';
+      docker container prune -f;
+      docker image prune -f;
+      docker builder prune -f --filter 'until=168h';
+      sleep 604800;
+      done"
+
+networks:
+  socket_proxy:
+    name: socket_proxy
+    external: true

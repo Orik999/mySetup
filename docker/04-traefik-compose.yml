@@ -1,0 +1,50 @@
+name: traefik
+
+secrets:
+  cf_token:
+    file: ${DOCKER_SECRETS_DIR}/cf_token
+  htpasswd:
+    file: ${DOCKER_SECRETS_DIR}/htpasswd
+
+services:
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      t2_proxy:
+        ipv4_address: 192.168.90.254
+      socket_proxy:
+    ports:
+      - "80:80"
+      - "443:443"
+    secrets:
+      - cf_token
+      - htpasswd
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${DOCKER_DIR}/appdata/traefik:/etc/traefik
+      - ${DOCKER_DIR}/appdata/traefik/acme:/acme
+    environment:
+      TZ: ${TZ}
+      CF_DNS_API_TOKEN_FILE: /run/secrets/cf_token
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.traefik.rule: Host(`traefik.${DOMAIN}`)
+      traefik.http.routers.traefik.entrypoints: https
+      traefik.http.routers.traefik.tls: "true"
+      traefik.http.routers.traefik.middlewares: authentik@docker
+      traefik.http.routers.traefik.service: api@internal
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.90.0/24
+  socket_proxy:
+    name: socket_proxy
+    external: true

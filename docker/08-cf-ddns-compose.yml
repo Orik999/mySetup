@@ -1,0 +1,29 @@
+name: cf-ddns
+
+secrets:
+  cf_token:
+    file: ${DOCKER_SECRETS_DIR}/cf_token
+
+services:
+  cf-ddns:
+    image: oznu/cloudflare-ddns:latest
+    container_name: cf-ddns
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - t2_proxy
+    secrets:
+      - cf_token
+    environment:
+      API_KEY_FILE: /run/secrets/cf_token
+      ZONE: ${DOMAIN}
+      PROXIED: "true"
+      RRTYPE: A
+      DELETE_ON_STOP: "false"
+      DNS_SERVER: 1.1.1.1
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
