@@ -134,15 +134,18 @@ function tty_read_yes_no_blocking() {
             IFS= read -rsn1 key || true
         fi
 
-        if [[ -z "$key" ]]; then
-            tty_print "${BFR}"
-            echo "$default"
-            return 0
-        elif [[ "$key" =~ ^[YyNn]$ ]]; then
-            tty_print "${BFR}"
-            echo "$key"
-            return 0
-        fi
+        case "$key" in
+            ""|$'\n'|$'\r')
+                tty_print "${BFR}"
+                echo "$default"
+                return 0
+                ;;
+            [YyNn])
+                tty_print "${BFR}"
+                echo "$key"
+                return 0
+                ;;
+        esac
     done
 }
 
@@ -177,32 +180,28 @@ function timed_yes_no() {
         tty_print "${BFR}${YW}${prompt} (${default_label}) [${remaining}s]${CL} "
 
         if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
-                    break
-                elif [[ "$key" =~ ^[YyNn]$ ]]; then
-                    answer="$key"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                fi
-            fi
+            IFS= read -rsn1 -t 1 key < /dev/tty || key=""
         else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
-                    break
-                elif [[ "$key" =~ ^[YyNn]$ ]]; then
-                    answer="$key"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                fi
-            fi
+            IFS= read -rsn1 -t 1 key || key=""
         fi
+
+        case "$key" in
+            " ")
+                answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                break
+                ;;
+            "")
+                continue
+                ;;
+            $'\n'|$'\r')
+                answer="$default"
+                break
+                ;;
+            [YyNn])
+                answer="$key"
+                break
+                ;;
+        esac
     done
 
     [ -z "$answer" ] && answer="$default"
@@ -233,7 +232,7 @@ function tty_read_text_blocking() {
         fi
 
         case "$key" in
-            "")
+            ""|$'\n'|$'\r')
                 tty_print "${BFR}"
                 if [ -z "$buffer" ]; then
                     echo "$default"
@@ -277,32 +276,28 @@ function timed_text_input() {
         tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
 
         if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
+            IFS= read -rsn1 -t 1 key < /dev/tty || key=""
         else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
+            IFS= read -rsn1 -t 1 key || key=""
         fi
+
+        case "$key" in
+            " ")
+                answer="$(tty_read_text_blocking "$prompt" "$default" "")"
+                break
+                ;;
+            "")
+                continue
+                ;;
+            $'\n'|$'\r')
+                answer="$default"
+                break
+                ;;
+            *)
+                answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
+                break
+                ;;
+        esac
     done
 
     [ -z "$answer" ] && answer="$default"
@@ -348,36 +343,26 @@ function timed_reboot_countdown() {
         tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}\n${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}\n"
 
         if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                case "$key" in
-                    ""|[Yy])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                        tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
-                        return 0
-                        ;;
-                    " "|[Nn])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                        tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
-                        return 1
-                        ;;
-                esac
-            fi
+            IFS= read -rsn1 -t 1 key < /dev/tty || key=""
         else
-            if IFS= read -rsn1 -t 1 key; then
-                case "$key" in
-                    ""|[Yy])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                        tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
-                        return 0
-                        ;;
-                    " "|[Nn])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                        tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
-                        return 1
-                        ;;
-                esac
-            fi
+            IFS= read -rsn1 -t 1 key || key=""
         fi
+
+        case "$key" in
+            "" )
+                continue
+                ;;
+            $'\n'|$'\r'|[Yy])
+                tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
+                return 0
+                ;;
+            " "|[Nn])
+                tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
+                return 1
+                ;;
+        esac
     done
 }
 
