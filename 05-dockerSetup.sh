@@ -3,7 +3,7 @@ set -euo pipefail
 shopt -s inherit_errexit nullglob
 
 # =========================================================
-#  Docker ENV Setup
+#  Docker Setup
 # =========================================================
 
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
@@ -22,47 +22,24 @@ CROSS="${RD}✗${CL}"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
-LOG_FILE="/var/log/docker-env-setup.log"
-COMPLETED_MARKER="/root/.docker-env-setup-completed"
+LOG_FILE="/var/log/docker-setup.log"
+COMPLETED_MARKER="/root/.docker-setup-completed"
 
-DEFAULT_USER="youruser"
-DEFAULT_USERDIR="/home/${DEFAULT_USER}"
-DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
-DEFAULT_TZ="Europe/London"
-DEFAULT_DOMAIN="example.com"
-DEFAULT_CF_EMAIL="cloudflare-email@example.com"
-DEFAULT_CF_ZONEID=""
-
-SUDO_CMD=""
-
-DOCKER_USER=""
-USERDIR=""
-DOCKER_DIR=""
-DOCKER_SECRETS_DIR=""
-TZ_VALUE=""
-DOMAIN_VALUE=""
-CF_EMAIL_VALUE=""
-CF_ZONEID_VALUE=""
-PUID_VALUE=""
-PGID_VALUE=""
-
-POSTGRES_PASSWORD=""
-REDIS_PASSWORD=""
-AUTHENTIK_SECRET_KEY=""
-AUTHENTIK_POSTGRES_PASSWORD=""
-POSTIZ_POSTGRES_PASSWORD=""
-TEMPORAL_POSTGRES_PASSWORD=""
+TARGET_USER="${SUDO_USER:-$USER}"
+DISABLE_SWAP="y"
+INSTALL_DOCKER_GC="n"
+DOCKER_FIREWALL_MODE="enabled"
 
 # --- 3. HEADER FUNCTION ---
-# Displays one-line Docker ENV Setup banner.
+# Displays the one-line Docker Setup banner.
 function header_info {
 echo -e "${BL}
-██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗     ███████╗███╗   ██╗██╗   ██╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
-██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗    ██╔════╝████╗  ██║██║   ██║    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
-██║  ██║██║   ██║██║     █████╔╝ █████╗  ██████╔╝    █████╗  ██╔██╗ ██║██║   ██║    ███████╗█████╗     ██║   ██║   ██║██████╔╝
-██║  ██║██║   ██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗    ██╔══╝  ██║╚██╗██║╚██╗ ██╔╝    ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
-██████╔╝╚██████╔╝╚██████╗██║  ██╗███████╗██║  ██║    ███████╗██║ ╚████║ ╚████╔╝     ███████║███████╗   ██║   ╚██████╔╝██║     
-╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝    ╚══════╝╚═╝  ╚═══╝  ╚═══╝      ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
+██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗     ███████╗███████╗████████╗██╗   ██╗██████╗ 
+██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
+██║  ██║██║   ██║██║     █████╔╝ █████╗  ██████╔╝    ███████╗█████╗     ██║   ██║   ██║██████╔╝
+██║  ██║██║   ██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗    ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
+██████╔╝╚██████╔╝╚██████╗██║  ██╗███████╗██║  ██║    ███████║███████╗   ██║   ╚██████╔╝██║     
+╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝    ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
 ${CL}"
 }
 
@@ -73,35 +50,15 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 5. ROOT / SUDO VALIDATION ---
-# Allows running as the normal Ubuntu VM user, validates sudo once, and then uses sudo for privileged writes.
-if [ "$EUID" -eq 0 ]; then
-    SUDO_CMD=""
-else
-    SUDO_CMD="sudo"
-
-    echo -e "${YW}Sudo privileges are required for Docker ENV Setup.${CL}"
-
-    if ! sudo -v; then
-        echo -e "${RD}ERROR:${CL} Sudo authentication failed."
-        exit 1
-    fi
-fi
-
-# --- 6. LOGGING & ERROR HANDLING ---
-# Logs output and reports failing line. Uses sudo tee when not running as root.
-if [ -n "$SUDO_CMD" ]; then
-    exec > >($SUDO_CMD tee -a "$LOG_FILE") 2>&1
-else
-    exec > >(tee -a "$LOG_FILE") 2>&1
-fi
-
+# --- 5. LOGGING & ERROR HANDLING ---
+# Logs output and reports failing line.
+exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
 
 clear
 header_info
 
-# --- 7. TTY OUTPUT HELPER ---
+# --- 6. TTY OUTPUT HELPER ---
 # Prints directly to terminal from prompt functions.
 function tty_print() {
     if [ -w /dev/tty ]; then
@@ -111,7 +68,7 @@ function tty_print() {
     fi
 }
 
-# --- 8. TTY OUTPUT WITH NEWLINE HELPER ---
+# --- 7. TTY OUTPUT WITH NEWLINE HELPER ---
 # Prints directly to terminal with newline.
 function tty_println() {
     if [ -w /dev/tty ]; then
@@ -121,11 +78,10 @@ function tty_println() {
     fi
 }
 
-# --- 9. YES/NO LABEL HELPER ---
-# Converts Y/N answer into visible yes/no text.
+# --- 8. YES/NO LABEL HELPER ---
+# Converts Y/N answers to visible yes/no.
 function yes_no_label() {
     local value="$1"
-
     if [[ "$value" =~ ^[Yy]$ ]]; then
         echo "yes"
     else
@@ -133,8 +89,8 @@ function yes_no_label() {
     fi
 }
 
-# --- 10. BLOCKING YES/NO HELPER ---
-# Used when SPACE pauses countdown.
+# --- 9. BLOCKING YES/NO HELPER ---
+# SPACE pauses countdown and waits for Y/N/ENTER.
 function tty_read_yes_no_blocking() {
     local prompt="$1"
     local default="$2"
@@ -146,8 +102,7 @@ function tty_read_yes_no_blocking() {
     fi
 
     while true; do
-        tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
-
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
         else
@@ -166,8 +121,8 @@ function tty_read_yes_no_blocking() {
     done
 }
 
-# --- 11. TIMED YES/NO PROMPT HELPER ---
-# SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
+# --- 10. TIMED YES/NO PROMPT HELPER ---
+# SPACE pauses and waits. Timeout uses default. Final answer stays visible.
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
@@ -175,26 +130,13 @@ function timed_yes_no() {
     local key=""
     local default_label="Y/n"
     local final_label=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
     if [[ "$default" =~ ^[Nn]$ ]]; then
         default_label="y/N"
     fi
 
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} (${default_label}) [${remaining}s]${CL} "
+    for ((i=T; i>0; i--)); do
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
@@ -227,334 +169,181 @@ function timed_yes_no() {
 
     [ -z "$answer" ] && answer="$default"
     final_label="$(yes_no_label "$answer")"
-
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
-
     echo "$answer"
 }
 
-# --- 12. BLOCKING EDITABLE TEXT INPUT HELPER ---
-# Used when user starts typing or presses SPACE during text input.
-# The countdown disappears and the user can edit normally. ENTER accepts typed value or default.
-function tty_read_text_blocking() {
-    local prompt="$1"
-    local default="$2"
-    local buffer="${3:-}"
-    local key=""
+# --- 11. ROOT / SUDO DETECTION ---
+# Uses sudo when not root.
+if [ "$EUID" -eq 0 ]; then
+    SUDO_CMD=""
+else
+    SUDO_CMD="sudo"
+fi
 
-    while true; do
-        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${buffer}"
-
-        if [ -r /dev/tty ]; then
-            IFS= read -rsn1 key < /dev/tty || true
-        else
-            IFS= read -rsn1 key || true
-        fi
-
-        case "$key" in
-            "")
-                tty_print "${BFR}"
-                if [ -z "$buffer" ]; then
-                    echo "$default"
-                else
-                    echo "$buffer"
-                fi
-                return 0
-                ;;
-            $'\177'|$'\b')
-                buffer="${buffer%?}"
-                ;;
-            *)
-                buffer+="$key"
-                ;;
-        esac
-    done
-}
-
-# --- 13. TIMED TEXT INPUT HELPER ---
-# Reads editable text with countdown. Typing or SPACE stops timer. Empty input or timeout uses default.
-function timed_text_input() {
-    local prompt="$1"
-    local default="$2"
-    local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
-
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
-    [ -z "$answer" ] && answer="$default"
-
-    tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-
-    echo "$answer"
-}
-
-# --- 14. SECRET GENERATOR HELPER ---
-# Generates URL-safe random secrets for app/database credentials.
-function generate_secret() {
-    openssl rand -hex 32 | cut -c1-48
-}
-
-# --- 15. START CONFIRMATION ---
-# Starts Docker env setup.
-echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
-start_yn=$(timed_yes_no "Start the Docker ENV Setup Script?" "y")
+# --- 12. START CONFIRMATION ---
+# Starts Docker installation.
+echo -e "${YW}This script will install and configure Docker Engine, Docker CLI, containerd, Compose plugin and Buildx plugin.${CL}"
+start_yn=$(timed_yes_no "Start the Docker Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 16. USER INPUTS ---
-# Collects reusable defaults for user, paths, timezone, domain and Cloudflare values.
-DOCKER_USER=$(timed_text_input "Enter Linux username" "$DEFAULT_USER")
+# --- 13. USER OPTIONS ---
+# Lets user decide swap behaviour and optional docker-gc install.
+swap_yn=$(timed_yes_no "Disable swap in /etc/fstab?" "y")
+[[ "$swap_yn" =~ ^[Nn] ]] && DISABLE_SWAP="n" || DISABLE_SWAP="y"
 
-DEFAULT_USERDIR="/home/${DOCKER_USER}"
-DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
+gc_yn=$(timed_yes_no "Install docker-gc cleanup helper?" "n")
+[[ "$gc_yn" =~ ^[Yy] ]] && INSTALL_DOCKER_GC="y" || INSTALL_DOCKER_GC="n"
 
-USERDIR=$(timed_text_input "Enter user home directory" "$DEFAULT_USERDIR")
-DEFAULT_DOCKER_DIR="${USERDIR}/docker"
+# --- 14. SWAP HANDLING ---
+# Disables swap for Docker/database stability if selected.
+if [ "$DISABLE_SWAP" == "y" ]; then
+    msg_info "Disabling swap"
 
-DOCKER_DIR=$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")
-DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
+    $SUDO_CMD swapoff -a &>/dev/null || true
+    $SUDO_CMD sed -i '/[[:space:]]swap[[:space:]]/ s/^/#/' /etc/fstab
 
-TZ_VALUE=$(timed_text_input "Enter timezone" "$DEFAULT_TZ")
-DOMAIN_VALUE=$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")
-CF_EMAIL_VALUE=$(timed_text_input "Enter Cloudflare email" "$DEFAULT_CF_EMAIL")
-CF_ZONEID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONEID")
-
-# --- 17. USER/GROUP ID DETECTION ---
-# Detects PUID/PGID for container permissions.
-msg_info "Detecting user and group IDs"
-
-if id "$DOCKER_USER" >/dev/null 2>&1; then
-    PUID_VALUE=$(id -u "$DOCKER_USER")
-    PGID_VALUE=$(id -g "$DOCKER_USER")
-else
-    PUID_VALUE="1000"
-    PGID_VALUE="1000"
+    msg_ok "SWAP DISABLED"
 fi
 
-msg_ok "USER AND GROUP IDS DETECTED"
+# --- 15. DEPENDENCY INSTALL ---
+# Installs packages needed to add Docker's official Ubuntu repository.
+msg_info "Installing dependencies"
 
-# --- 18. SECRET GENERATION ---
-# Generates service secrets for PostgreSQL, Redis, Authentik, Postiz and Temporal.
-msg_info "Generating secrets"
+$SUDO_CMD apt-get update &>/dev/null
+$SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    ca-certificates \
+    curl \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+    acl \
+    ufw \
+    &>/dev/null
 
-POSTGRES_PASSWORD="$(generate_secret)"
-REDIS_PASSWORD="$(generate_secret)"
-AUTHENTIK_SECRET_KEY="$(generate_secret)"
-AUTHENTIK_POSTGRES_PASSWORD="$(generate_secret)"
-POSTIZ_POSTGRES_PASSWORD="$(generate_secret)"
-TEMPORAL_POSTGRES_PASSWORD="$(generate_secret)"
+msg_ok "DEPENDENCIES INSTALLED"
 
-msg_ok "SECRETS GENERATED"
+# --- 16. DOCKER REPOSITORY SETUP ---
+# Adds Docker's official GPG key and apt repository using modern keyring layout.
+msg_info "Adding Docker repository"
 
-# --- 19. DOCKER DIRECTORY CREATION ---
-# Creates project folders for compose, appdata, backups, shared files and secrets.
-msg_info "Creating Docker folder structure"
+$SUDO_CMD install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | $SUDO_CMD gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+$SUDO_CMD chmod a+r /etc/apt/keyrings/docker.gpg
 
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata"
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/compose"
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/backups"
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/shared"
-$SUDO_CMD mkdir -p "${DOCKER_SECRETS_DIR}"
+echo \
+"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+$(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+$SUDO_CMD tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
+msg_ok "DOCKER REPOSITORY ADDED"
 
-msg_ok "DOCKER FOLDERS CREATED"
+# --- 17. DOCKER INSTALL ---
+# Installs Docker Engine, CLI, containerd, Docker Compose plugin and Buildx plugin.
+msg_info "Installing Docker"
 
-# --- 20. POSTGRES INIT SCRIPT CREATION ---
-# Creates first-start PostgreSQL init script so app databases/users are created unattended.
-msg_info "Creating PostgreSQL init script"
+$SUDO_CMD apt-get update &>/dev/null
+$SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    docker-buildx-plugin \
+    docker-compose-plugin \
+    &>/dev/null
 
-$SUDO_CMD tee "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" >/dev/null <<'EOF'
+$SUDO_CMD systemctl enable --now docker &>/dev/null
+$SUDO_CMD systemctl enable --now containerd &>/dev/null
+
+msg_ok "DOCKER INSTALLED"
+
+# --- 18. DOCKER GROUP SETUP ---
+# Adds the target user to the docker group for non-root Docker CLI usage after next login.
+msg_info "Adding user ${TARGET_USER} to docker group"
+
+$SUDO_CMD usermod -aG docker "$TARGET_USER" &>/dev/null || true
+
+msg_ok "USER ADDED TO DOCKER GROUP"
+
+# --- 19. DOCKER FIREWALL MODE ---
+# Keeps Docker iptables enabled so Docker networking, NAT and published ports work correctly.
+msg_info "Configuring Docker firewall mode"
+
+$SUDO_CMD mkdir -p /etc/docker
+
+cat <<EOF | $SUDO_CMD tee /etc/docker/daemon.json >/dev/null
+{
+  "iptables": true,
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "live-restore": true
+}
+EOF
+
+$SUDO_CMD systemctl restart docker &>/dev/null
+
+msg_ok "DOCKER FIREWALL MODE CONFIGURED"
+
+# --- 20. UFW BASELINE ---
+# Allows SSH, HTTP and HTTPS on the Ubuntu VM.
+msg_info "Configuring UFW firewall"
+
+$SUDO_CMD ufw default deny incoming &>/dev/null || true
+$SUDO_CMD ufw default allow outgoing &>/dev/null || true
+$SUDO_CMD ufw allow OpenSSH &>/dev/null || true
+$SUDO_CMD ufw allow 80/tcp &>/dev/null || true
+$SUDO_CMD ufw allow 443/tcp &>/dev/null || true
+$SUDO_CMD ufw --force enable &>/dev/null || true
+
+msg_ok "UFW FIREWALL CONFIGURED"
+
+# --- 21. DOCKER-GC OPTIONAL INSTALL ---
+# Creates a simple safe Docker cleanup helper instead of aggressive automatic pruning.
+if [ "$INSTALL_DOCKER_GC" == "y" ]; then
+    msg_info "Installing docker-gc helper"
+
+    cat <<'EOF' | $SUDO_CMD tee /usr/local/sbin/docker-gc-safe >/dev/null
 #!/usr/bin/env bash
 set -euo pipefail
-
-create_user_db() {
-    local user="$1"
-    local password="$2"
-    local database="$3"
-
-    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<EOSQL
-DO
-\$\$
-BEGIN
-   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${user}') THEN
-      CREATE USER ${user} WITH PASSWORD '${password}';
-   END IF;
-END
-\$\$;
-
-SELECT 'CREATE DATABASE ${database} OWNER ${user}'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${database}')\gexec
-
-GRANT ALL PRIVILEGES ON DATABASE ${database} TO ${user};
-EOSQL
-}
-
-create_user_db "authentik" "${AUTHENTIK_POSTGRES_PASSWORD}" "authentik"
-create_user_db "postiz" "${POSTIZ_POSTGRES_PASSWORD}" "postiz"
-create_user_db "temporal" "${TEMPORAL_POSTGRES_PASSWORD}" "temporal"
+docker system prune -f
+docker image prune -f
+docker builder prune -f --filter "until=168h"
 EOF
 
-$SUDO_CMD chmod +x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+    $SUDO_CMD chmod +x /usr/local/sbin/docker-gc-safe
 
-msg_ok "POSTGRES INIT SCRIPT CREATED"
-
-# --- 21. SECRET FILE WRITING ---
-# Writes secrets to individual files so Docker Compose can consume them as file-based secrets where suitable.
-msg_info "Writing secret files"
-
-printf '%s' "$POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/postgres_password" >/dev/null
-printf '%s' "$REDIS_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/redis_password" >/dev/null
-printf '%s' "$AUTHENTIK_SECRET_KEY" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/authentik_secret_key" >/dev/null
-printf '%s' "$AUTHENTIK_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/authentik_postgres_password" >/dev/null
-printf '%s' "$POSTIZ_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/postiz_postgres_password" >/dev/null
-printf '%s' "$TEMPORAL_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/temporal_postgres_password" >/dev/null
-printf '%s' "$CF_EMAIL_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/cf_email" >/dev/null
-$SUDO_CMD touch "${DOCKER_SECRETS_DIR}/cf_token"
-$SUDO_CMD touch "${DOCKER_SECRETS_DIR}/htpasswd"
-
-msg_ok "SECRET FILES WRITTEN"
-
-# --- 22. ENV FILE CREATION ---
-# Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
-msg_info "Creating Docker .env file"
-
-$SUDO_CMD tee "${DOCKER_DIR}/.env" >/dev/null <<EOF
-# =========================================================
-#  Project: Home-Hosted Social Media SaaS
-# =========================================================
-
-# --- Core paths ---
-DOCKER_DIR="${DOCKER_DIR}"
-DOCKER_SECRETS_DIR="${DOCKER_SECRETS_DIR}"
-USERDIR="${USERDIR}"
-
-# --- Linux user/container IDs ---
-PUID="${PUID_VALUE}"
-PGID="${PGID_VALUE}"
-
-# --- Localisation ---
-TZ="${TZ_VALUE}"
-
-# --- Domain / Cloudflare ---
-DOMAIN="${DOMAIN_VALUE}"
-CF_EMAIL="${CF_EMAIL_VALUE}"
-CF_ZONEID="${CF_ZONEID_VALUE}"
-
-# --- PostgreSQL root/admin password ---
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
-
-# --- Redis ---
-REDIS_PASSWORD="${REDIS_PASSWORD}"
-
-# --- Authentik ---
-AUTHENTIK_SECRET_KEY="${AUTHENTIK_SECRET_KEY}"
-AUTHENTIK_POSTGRES_PASSWORD="${AUTHENTIK_POSTGRES_PASSWORD}"
-
-# --- Postiz ---
-POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
-
-# --- Temporal ---
-TEMPORAL_POSTGRES_PASSWORD="${TEMPORAL_POSTGRES_PASSWORD}"
-EOF
-
-msg_ok "DOCKER .ENV CREATED"
-
-# --- 23. PERMISSIONS ---
-# Sets Docker folder permissions and stricter secret permissions.
-msg_info "Setting folder permissions"
-
-if id "$DOCKER_USER" >/dev/null 2>&1; then
-    $SUDO_CMD chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
+    msg_ok "DOCKER-GC HELPER INSTALLED"
 fi
 
-$SUDO_CMD chmod -R 775 "$DOCKER_DIR"
-$SUDO_CMD chmod -R 700 "$DOCKER_SECRETS_DIR"
-$SUDO_CMD chmod -R 600 "$DOCKER_SECRETS_DIR"/* 2>/dev/null || true
+# --- 22. VERIFY INSTALL ---
+# Checks Docker and Compose versions.
+msg_info "Verifying Docker installation"
 
-msg_ok "PERMISSIONS SET"
+docker --version >/dev/null
+docker compose version >/dev/null
 
-# --- 24. COMPLETION MARKER ---
-# Creates marker showing ENV setup ran successfully.
-msg_info "Writing completion marker"
+msg_ok "DOCKER VERIFIED"
 
-$SUDO_CMD tee "$COMPLETED_MARKER" >/dev/null <<EOF
-Docker ENV Setup completed on: $(date)
-Docker dir: $DOCKER_DIR
-Domain: $DOMAIN_VALUE
-User: $DOCKER_USER
+# --- 23. COMPLETION MARKER ---
+# Creates marker showing setup completed.
+$SUDO_CMD bash -c "cat > '$COMPLETED_MARKER'" <<EOF
+Docker Setup completed on: $(date)
+Target user: $TARGET_USER
+Swap disabled: $DISABLE_SWAP
+Docker GC helper: $INSTALL_DOCKER_GC
 EOF
 
-msg_ok "COMPLETION MARKER WRITTEN"
-
-# --- 25. FINAL SECRET DISPLAY WARNING ---
-# Displays generated values once so user can save them securely.
+# --- 24. FINAL SUMMARY ---
+# Displays installed versions and logout/reboot reminder.
 echo ""
-echo -e "${RD}${CLF}SAVE THESE VALUES NOW. THEY WILL NOT BE DISPLAYED AGAIN BY THIS SCRIPT.${CL}"
-echo ""
-echo -e "${GN}POSTGRES_PASSWORD:${CL} ${POSTGRES_PASSWORD}"
-echo -e "${GN}REDIS_PASSWORD:${CL} ${REDIS_PASSWORD}"
-echo -e "${GN}AUTHENTIK_SECRET_KEY:${CL} ${AUTHENTIK_SECRET_KEY}"
-echo -e "${GN}AUTHENTIK_POSTGRES_PASSWORD:${CL} ${AUTHENTIK_POSTGRES_PASSWORD}"
-echo -e "${GN}POSTIZ_POSTGRES_PASSWORD:${CL} ${POSTIZ_POSTGRES_PASSWORD}"
-echo -e "${GN}TEMPORAL_POSTGRES_PASSWORD:${CL} ${TEMPORAL_POSTGRES_PASSWORD}"
-echo ""
-echo -e "${YW}Cloudflare token file created empty:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
-echo -e "${YW}Add your Cloudflare API token before deploying Traefik/cf-ddns/cf-companion.${CL}"
-echo ""
-
-# --- 26. FINAL SUMMARY ---
-# Shows final folder layout.
 echo -e "${GN}FINISHED!${CL}"
-echo -e "DOCKER DIR: ${GN}${DOCKER_DIR}${CL}"
-echo -e ".ENV FILE: ${GN}${DOCKER_DIR}/.env${CL}"
-echo -e "SECRETS DIR: ${GN}${DOCKER_SECRETS_DIR}${CL}"
-echo -e "POSTGRES INIT: ${GN}${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh${CL}"
+docker --version
+docker compose version
+echo ""
+echo -e "${YW}Log out and back in, or reboot, for docker group membership to apply.${CL}"
 echo ""
 
 exit 0

@@ -33,6 +33,8 @@ DEFAULT_DOMAIN="example.com"
 DEFAULT_CF_EMAIL="cloudflare-email@example.com"
 DEFAULT_CF_ZONEID=""
 
+SUDO_CMD=""
+
 DOCKER_USER=""
 USERDIR=""
 DOCKER_DIR=""
@@ -71,16 +73,29 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 5. ROOT CHECK ---
-# This script writes to /var/log, /root and system-owned paths, so it must run as root.
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RD}Please run as root: sudo bash docker-env-setup.sh${CL}"
-    exit 1
+# --- 5. ROOT / SUDO VALIDATION ---
+# Allows running as the normal Ubuntu VM user, validates sudo once, and then uses sudo for privileged writes.
+if [ "$EUID" -eq 0 ]; then
+    SUDO_CMD=""
+else
+    SUDO_CMD="sudo"
+
+    echo -e "${YW}Sudo privileges are required for Docker ENV Setup.${CL}"
+
+    if ! sudo -v; then
+        echo -e "${RD}ERROR:${CL} Sudo authentication failed."
+        exit 1
+    fi
 fi
 
 # --- 6. LOGGING & ERROR HANDLING ---
-# Logs output and reports failing line.
-exec > >(tee -a "$LOG_FILE") 2>&1
+# Logs output and reports failing line. Uses sudo tee when not running as root.
+if [ -n "$SUDO_CMD" ]; then
+    exec > >($SUDO_CMD tee -a "$LOG_FILE") 2>&1
+else
+    exec > >(tee -a "$LOG_FILE") 2>&1
+fi
+
 trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
 
 clear
@@ -350,6 +365,8 @@ CF_ZONEID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONEI
 
 # --- 17. USER/GROUP ID DETECTION ---
 # Detects PUID/PGID for container permissions.
+msg_info "Detecting user and group IDs"
+
 if id "$DOCKER_USER" >/dev/null 2>&1; then
     PUID_VALUE=$(id -u "$DOCKER_USER")
     PGID_VALUE=$(id -g "$DOCKER_USER")
@@ -357,6 +374,8 @@ else
     PUID_VALUE="1000"
     PGID_VALUE="1000"
 fi
+
+msg_ok "USER AND GROUP IDS DETECTED"
 
 # --- 18. SECRET GENERATION ---
 # Generates service secrets for PostgreSQL, Redis, Authentik, Postiz and Temporal.
@@ -375,14 +394,14 @@ msg_ok "SECRETS GENERATED"
 # Creates project folders for compose, appdata, backups, shared files and secrets.
 msg_info "Creating Docker folder structure"
 
-mkdir -p "${DOCKER_DIR}/appdata"
-mkdir -p "${DOCKER_DIR}/compose"
-mkdir -p "${DOCKER_DIR}/backups"
-mkdir -p "${DOCKER_DIR}/shared"
-mkdir -p "${DOCKER_SECRETS_DIR}"
+$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata"
+$SUDO_CMD mkdir -p "${DOCKER_DIR}/compose"
+$SUDO_CMD mkdir -p "${DOCKER_DIR}/backups"
+$SUDO_CMD mkdir -p "${DOCKER_DIR}/shared"
+$SUDO_CMD mkdir -p "${DOCKER_SECRETS_DIR}"
 
-mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
-mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
+$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
+$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
 msg_ok "DOCKER FOLDERS CREATED"
 
@@ -390,7 +409,7 @@ msg_ok "DOCKER FOLDERS CREATED"
 # Creates first-start PostgreSQL init script so app databases/users are created unattended.
 msg_info "Creating PostgreSQL init script"
 
-cat <<'EOF' > "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+$SUDO_CMD tee "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -421,7 +440,7 @@ create_user_db "postiz" "${POSTIZ_POSTGRES_PASSWORD}" "postiz"
 create_user_db "temporal" "${TEMPORAL_POSTGRES_PASSWORD}" "temporal"
 EOF
 
-chmod +x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+$SUDO_CMD chmod +x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
 msg_ok "POSTGRES INIT SCRIPT CREATED"
 
@@ -429,15 +448,15 @@ msg_ok "POSTGRES INIT SCRIPT CREATED"
 # Writes secrets to individual files so Docker Compose can consume them as file-based secrets where suitable.
 msg_info "Writing secret files"
 
-printf '%s' "$POSTGRES_PASSWORD" > "${DOCKER_SECRETS_DIR}/postgres_password"
-printf '%s' "$REDIS_PASSWORD" > "${DOCKER_SECRETS_DIR}/redis_password"
-printf '%s' "$AUTHENTIK_SECRET_KEY" > "${DOCKER_SECRETS_DIR}/authentik_secret_key"
-printf '%s' "$AUTHENTIK_POSTGRES_PASSWORD" > "${DOCKER_SECRETS_DIR}/authentik_postgres_password"
-printf '%s' "$POSTIZ_POSTGRES_PASSWORD" > "${DOCKER_SECRETS_DIR}/postiz_postgres_password"
-printf '%s' "$TEMPORAL_POSTGRES_PASSWORD" > "${DOCKER_SECRETS_DIR}/temporal_postgres_password"
-printf '%s' "$CF_EMAIL_VALUE" > "${DOCKER_SECRETS_DIR}/cf_email"
-touch "${DOCKER_SECRETS_DIR}/cf_token"
-touch "${DOCKER_SECRETS_DIR}/htpasswd"
+printf '%s' "$POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/postgres_password" >/dev/null
+printf '%s' "$REDIS_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/redis_password" >/dev/null
+printf '%s' "$AUTHENTIK_SECRET_KEY" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/authentik_secret_key" >/dev/null
+printf '%s' "$AUTHENTIK_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/authentik_postgres_password" >/dev/null
+printf '%s' "$POSTIZ_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/postiz_postgres_password" >/dev/null
+printf '%s' "$TEMPORAL_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/temporal_postgres_password" >/dev/null
+printf '%s' "$CF_EMAIL_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/cf_email" >/dev/null
+$SUDO_CMD touch "${DOCKER_SECRETS_DIR}/cf_token"
+$SUDO_CMD touch "${DOCKER_SECRETS_DIR}/htpasswd"
 
 msg_ok "SECRET FILES WRITTEN"
 
@@ -445,7 +464,7 @@ msg_ok "SECRET FILES WRITTEN"
 # Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
 msg_info "Creating Docker .env file"
 
-cat <<EOF > "${DOCKER_DIR}/.env"
+$SUDO_CMD tee "${DOCKER_DIR}/.env" >/dev/null <<EOF
 # =========================================================
 #  Project: Home-Hosted Social Media SaaS
 # =========================================================
@@ -491,23 +510,27 @@ msg_ok "DOCKER .ENV CREATED"
 msg_info "Setting folder permissions"
 
 if id "$DOCKER_USER" >/dev/null 2>&1; then
-    chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
+    $SUDO_CMD chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
 fi
 
-chmod -R 775 "$DOCKER_DIR"
-chmod -R 700 "$DOCKER_SECRETS_DIR"
-chmod -R 600 "$DOCKER_SECRETS_DIR"/* 2>/dev/null || true
+$SUDO_CMD chmod -R 775 "$DOCKER_DIR"
+$SUDO_CMD chmod -R 700 "$DOCKER_SECRETS_DIR"
+$SUDO_CMD chmod -R 600 "$DOCKER_SECRETS_DIR"/* 2>/dev/null || true
 
 msg_ok "PERMISSIONS SET"
 
 # --- 24. COMPLETION MARKER ---
 # Creates marker showing ENV setup ran successfully.
-cat <<EOF > "$COMPLETED_MARKER"
+msg_info "Writing completion marker"
+
+$SUDO_CMD tee "$COMPLETED_MARKER" >/dev/null <<EOF
 Docker ENV Setup completed on: $(date)
 Docker dir: $DOCKER_DIR
 Domain: $DOMAIN_VALUE
 User: $DOCKER_USER
 EOF
+
+msg_ok "COMPLETION MARKER WRITTEN"
 
 # --- 25. FINAL SECRET DISPLAY WARNING ---
 # Displays generated values once so user can save them securely.
