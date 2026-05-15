@@ -1,8 +1,9 @@
+# 09-cf-companion-compose.yml
 name: cf-companion
 
 secrets:
-  cf_token:
-    file: ${DOCKER_SECRETS_DIR}/cf_token
+  cf_api_token:
+    file: ${CF_API_TOKEN_FILE}
 
 services:
   cf-companion:
@@ -15,18 +16,18 @@ services:
       - t2_proxy
       - socket_proxy
     secrets:
-      - cf_token
+      - cf_api_token
     environment:
       TIMEZONE: ${TZ}
       TRAEFIK_VERSION: 2
       ENABLE_TRAEFIK_POLL: "TRUE"
       TARGET_DOMAIN: ${DOMAIN}
       DOMAIN1: ${DOMAIN}
-      DOMAIN1_ZONE_ID: ${CF_ZONEID}
+      DOMAIN1_ZONE_ID: ${CF_ZONE_ID}
       DOMAIN1_PROXIED: "true"
       DEFAULT_TTL: 1
       DOCKER_HOST: tcp://socket-proxy:2375
-      CF_TOKEN__FILE: /run/secrets/cf_token
+      CF_TOKEN__FILE: /run/secrets/cf_api_token
 
 networks:
   t2_proxy:

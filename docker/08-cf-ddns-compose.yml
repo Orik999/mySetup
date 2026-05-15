@@ -1,8 +1,9 @@
+# 08-cf-ddns-compose.yml
 name: cf-ddns
 
 secrets:
-  cf_token:
-    file: ${DOCKER_SECRETS_DIR}/cf_token
+  cf_api_token:
+    file: ${CF_API_TOKEN_FILE}
 
 services:
   cf-ddns:
@@ -14,9 +15,9 @@ services:
     networks:
       - t2_proxy
     secrets:
-      - cf_token
+      - cf_api_token
     environment:
-      API_KEY_FILE: /run/secrets/cf_token
+      API_KEY_FILE: /run/secrets/cf_api_token
       ZONE: ${DOMAIN}
       PROXIED: "true"
       RRTYPE: A

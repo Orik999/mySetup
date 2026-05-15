@@ -1,3 +1,4 @@
+# 12-docker-gc-compose.yml
 name: docker-gc
 
 services:
@@ -11,7 +12,6 @@ services:
       - socket_proxy
     environment:
       DOCKER_HOST: tcp://socket-proxy:2375
-      PRUNE_CRON: "0 4 * * 0"
     entrypoint: /bin/sh
     command: >
       -c "while true; do

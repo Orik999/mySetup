@@ -1,3 +1,4 @@
+# 07-postiz-compose.yml
 name: postiz
 
 services:
@@ -18,7 +19,7 @@ services:
       MAIN_URL: https://postiz.${DOMAIN}
       FRONTEND_URL: https://postiz.${DOMAIN}
       NEXT_PUBLIC_BACKEND_URL: https://postiz.${DOMAIN}/api
-      JWT_SECRET: ${POSTIZ_JWT_SECRET}
+      JWT_SECRET: ${AUTHENTIK_SECRET_KEY}
       DATABASE_URL: postgresql://postiz:${POSTIZ_POSTGRES_PASSWORD}@postgres:5432/postiz
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       STORAGE_PROVIDER: local
@@ -29,6 +30,7 @@ services:
       traefik.http.routers.postiz.rule: Host(`postiz.${DOMAIN}`)
       traefik.http.routers.postiz.entrypoints: https
       traefik.http.routers.postiz.tls: "true"
+      traefik.http.routers.postiz.tls.certresolver: cloudflare
       traefik.http.routers.postiz.middlewares: authentik@docker
       traefik.http.routers.postiz.service: postiz
       traefik.http.services.postiz.loadbalancer.server.port: 5000

@@ -33,6 +33,7 @@ DEFAULT_DOMAIN="example.com"
 DEFAULT_CF_API_EMAIL="cloudflare-email@example.com"
 DEFAULT_CF_ZONE_ID=""
 DEFAULT_CF_API_TOKEN=""
+DEFAULT_HTPASSWD_USER="admin"
 
 SUDO_CMD=""
 
@@ -46,6 +47,11 @@ CF_API_EMAIL_VALUE=""
 CF_ZONE_ID_VALUE=""
 CF_API_TOKEN_VALUE=""
 CF_API_TOKEN_FILE=""
+HTPASSWD_USER_VALUE=""
+HTPASSWD_PASSWORD_VALUE=""
+HTPASSWD_HASH_VALUE=""
+HTPASSWD_LINE_VALUE=""
+HTPASSWD_MODE="empty"
 PUID_VALUE=""
 PGID_VALUE=""
 
@@ -95,12 +101,23 @@ else
 fi
 
 # --- 6. LOGGING & ERROR HANDLING ---
-# Logs output and reports failing line. Uses sudo tee when not running as root.
-if [ -n "$SUDO_CMD" ]; then
-    exec > >($SUDO_CMD tee -a "$LOG_FILE") 2>&1
-else
-    exec > >(tee -a "$LOG_FILE") 2>&1
-fi
+# Logs normal output and reports failing line.
+# FD 3/4 keep the real terminal streams so sensitive sections can temporarily bypass tee logging.
+exec 3>&1 4>&2
+
+function enable_logging() {
+    if [ -n "$SUDO_CMD" ]; then
+        exec > >($SUDO_CMD tee -a "$LOG_FILE") 2>&1
+    else
+        exec > >(tee -a "$LOG_FILE") 2>&1
+    fi
+}
+
+function disable_logging() {
+    exec 1>&3 2>&4
+}
+
+enable_logging
 
 trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
 
@@ -339,34 +356,52 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 14. SECRET GENERATOR HELPER ---
+# --- 14. HIDDEN INPUT HELPER ---
+# Reads sensitive input without echoing it to terminal or writing it to the log.
+function hidden_input() {
+    local prompt="$1"
+    local answer=""
+
+    tty_print "${YW}${prompt}: ${CL}"
+
+    if [ -r /dev/tty ]; then
+        IFS= read -rs answer < /dev/tty || true
+    else
+        IFS= read -rs answer || true
+    fi
+
+    tty_println ""
+    echo "$answer"
+}
+
+# --- 15. SECRET GENERATOR HELPER ---
 # Generates URL-safe random secrets for app/database credentials.
 function generate_secret() {
     openssl rand -hex 32 | cut -c1-48
 }
 
-# --- 15. SUDO FILE EXISTS HELPER ---
+# --- 16. SUDO FILE EXISTS HELPER ---
 # Checks whether a file or folder exists, using sudo when required.
 function sudo_path_exists() {
     local path="$1"
     $SUDO_CMD test -e "$path"
 }
 
-# --- 16. SUDO FILE NOT EMPTY HELPER ---
+# --- 17. SUDO FILE NOT EMPTY HELPER ---
 # Checks whether a file exists and has content, using sudo when required.
 function sudo_file_not_empty() {
     local file="$1"
     $SUDO_CMD test -s "$file"
 }
 
-# --- 17. SUDO FILE READ HELPER ---
+# --- 18. SUDO FILE READ HELPER ---
 # Reads a root-owned or user-owned file through sudo when required.
 function sudo_read_file() {
     local file="$1"
     $SUDO_CMD cat "$file"
 }
 
-# --- 18. SECRET REUSE / GENERATION HELPER ---
+# --- 19. SECRET REUSE / GENERATION HELPER ---
 # Reuses existing secret files by default on reruns. Generates a new value only when missing or when regeneration is selected.
 function get_or_generate_secret() {
     local file="$1"
@@ -378,13 +413,13 @@ function get_or_generate_secret() {
     fi
 }
 
-# --- 19. START CONFIRMATION ---
+# --- 20. START CONFIRMATION ---
 # Starts Docker env setup.
 echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
 start_yn=$(timed_yes_no "Start the Docker ENV Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 20. USER INPUTS ---
+# --- 21. USER INPUTS ---
 # Collects reusable defaults for user, paths, timezone, domain and Cloudflare values.
 DOCKER_USER=$(timed_text_input "Enter Linux username" "$DEFAULT_USER")
 
@@ -398,7 +433,7 @@ DOCKER_DIR=$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")
 DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
 CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
 
-# --- 21. EXISTING SETUP DETECTION ---
+# --- 22. EXISTING SETUP DETECTION ---
 # Detects existing .env, secrets folder, or completion marker to prevent accidental secret rotation.
 msg_info "Checking for existing Docker ENV setup"
 
@@ -439,9 +474,53 @@ TZ_VALUE=$(timed_text_input "Enter timezone" "$DEFAULT_TZ")
 DOMAIN_VALUE=$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")
 CF_API_EMAIL_VALUE=$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")
 CF_ZONE_ID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONE_ID")
-CF_API_TOKEN_VALUE=$(timed_text_input "Enter Cloudflare API Token" "$DEFAULT_CF_API_TOKEN")
 
-# --- 22. USER/GROUP ID DETECTION ---
+disable_logging
+CF_API_TOKEN_VALUE=$(hidden_input "Enter Cloudflare API Token, or leave empty")
+enable_logging
+
+# --- 23. HTPASSWD OPTIONAL INPUT ---
+# Handles optional Traefik basic-auth credentials without logging sensitive values.
+echo ""
+echo -e "${BL}Optional Traefik basic-auth htpasswd setup.${CL}"
+echo -e "${YW}Not required if you use Authentik, Authelia, or a similar SSO/auth gateway.${CL}"
+echo -e "${YW}If a password is entered, this script will generate a SHA-512 htpasswd hash.${CL}"
+echo -e "${YW}If nothing is provided, an empty placeholder file is created or an existing one is preserved.${CL}"
+echo ""
+
+has_htpasswd_yn=$(timed_yes_no "Do you already have a hashed htpasswd line?" "n")
+
+if [[ "$has_htpasswd_yn" =~ ^[Yy] ]]; then
+    disable_logging
+    HTPASSWD_LINE_VALUE=$(hidden_input "Paste full htpasswd line username:hash")
+    enable_logging
+
+    if [ -n "$HTPASSWD_LINE_VALUE" ]; then
+        HTPASSWD_MODE="provided"
+    fi
+else
+    create_htpasswd_yn=$(timed_yes_no "Create htpasswd entry now?" "n")
+
+    if [[ "$create_htpasswd_yn" =~ ^[Yy] ]]; then
+        HTPASSWD_USER_VALUE=$(timed_text_input "Enter htpasswd username" "$DEFAULT_HTPASSWD_USER")
+
+        disable_logging
+        HTPASSWD_PASSWORD_VALUE=$(hidden_input "Enter htpasswd password")
+        enable_logging
+
+        if [ -n "$HTPASSWD_PASSWORD_VALUE" ]; then
+            HTPASSWD_HASH_VALUE="$(openssl passwd -6 "$HTPASSWD_PASSWORD_VALUE")"
+            HTPASSWD_LINE_VALUE="${HTPASSWD_USER_VALUE}:${HTPASSWD_HASH_VALUE}"
+            HTPASSWD_PASSWORD_VALUE=""
+            HTPASSWD_MODE="generated"
+        else
+            HTPASSWD_MODE="empty"
+            msg_warn "htpasswd password was empty. Empty placeholder will be used unless an existing file is present."
+        fi
+    fi
+fi
+
+# --- 24. USER/GROUP ID DETECTION ---
 # Detects PUID/PGID for container permissions.
 msg_info "Detecting user and group IDs"
 
@@ -455,7 +534,7 @@ fi
 
 msg_ok "USER AND GROUP IDS DETECTED"
 
-# --- 23. DOCKER DIRECTORY CREATION ---
+# --- 25. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
 msg_info "Creating Docker folder structure"
 
@@ -470,7 +549,7 @@ $SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
 msg_ok "DOCKER FOLDERS CREATED"
 
-# --- 24. SECRET GENERATION / REUSE ---
+# --- 26. SECRET GENERATION / REUSE ---
 # Generates service secrets on first run. On reruns, reuses existing secret files unless regeneration was explicitly selected.
 msg_info "Generating or reusing secrets"
 
@@ -487,7 +566,7 @@ else
     msg_ok "SECRETS GENERATED"
 fi
 
-# --- 25. POSTGRES INIT SCRIPT CREATION ---
+# --- 27. POSTGRES INIT SCRIPT CREATION ---
 # Creates first-start PostgreSQL init script so app databases/users are created unattended.
 msg_info "Creating PostgreSQL init script"
 
@@ -526,7 +605,7 @@ $SUDO_CMD chmod +x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.
 
 msg_ok "POSTGRES INIT SCRIPT CREATED"
 
-# --- 26. SECRET FILE WRITING ---
+# --- 28. SECRET FILE WRITING ---
 # Writes secrets to individual files so Docker Compose can consume them as file-based secrets where suitable.
 msg_info "Writing secret files"
 
@@ -546,11 +625,17 @@ else
     $SUDO_CMD touch "${CF_API_TOKEN_FILE}"
 fi
 
-$SUDO_CMD touch "${DOCKER_SECRETS_DIR}/htpasswd"
+if [ -n "$HTPASSWD_LINE_VALUE" ]; then
+    printf '%s' "$HTPASSWD_LINE_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/htpasswd" >/dev/null
+elif sudo_file_not_empty "${DOCKER_SECRETS_DIR}/htpasswd"; then
+    msg_ok "EXISTING HTPASSWD FILE PRESERVED"
+else
+    $SUDO_CMD touch "${DOCKER_SECRETS_DIR}/htpasswd"
+fi
 
 msg_ok "SECRET FILES WRITTEN"
 
-# --- 27. ENV FILE CREATION ---
+# --- 29. ENV FILE CREATION ---
 # Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
 msg_info "Creating Docker .env file"
 
@@ -596,7 +681,7 @@ EOF
 
 msg_ok "DOCKER .ENV CREATED"
 
-# --- 28. PERMISSIONS ---
+# --- 30. PERMISSIONS ---
 # Sets Docker folder permissions and stricter secret permissions.
 msg_info "Setting folder permissions"
 
@@ -610,7 +695,7 @@ $SUDO_CMD chmod -R 600 "$DOCKER_SECRETS_DIR"/* 2>/dev/null || true
 
 msg_ok "PERMISSIONS SET"
 
-# --- 29. COMPLETION MARKER ---
+# --- 31. COMPLETION MARKER ---
 # Creates marker showing ENV setup ran successfully.
 msg_info "Writing completion marker"
 
@@ -624,8 +709,10 @@ EOF
 
 msg_ok "COMPLETION MARKER WRITTEN"
 
-# --- 30. FINAL SECRET DISPLAY WARNING ---
-# Displays generated values once so user can save them securely.
+# --- 32. FINAL SECRET DISPLAY WARNING ---
+# Shows generated/reused secret values once, but bypasses tee logging so they are not written to /var/log/docker-env-setup.log.
+disable_logging
+
 echo ""
 if [ "$EXISTING_SETUP" == "yes" ] && [ "$REGENERATE_SECRETS" != "y" ]; then
     echo -e "${YW}${CLF}EXISTING SECRETS WERE REUSED WHERE PRESENT. SAVE ANY NEW/MISSING VALUES SHOWN BELOW.${CL}"
@@ -650,9 +737,24 @@ else
     echo -e "${YW}Add your Cloudflare API token before deploying Traefik/cf-ddns/cf-companion.${CL}"
 fi
 
+if [ "$HTPASSWD_MODE" == "generated" ]; then
+    echo -e "${GN}HTPASSWD_USERNAME:${CL} ${HTPASSWD_USER_VALUE}"
+    echo -e "${GN}HTPASSWD_HASH:${CL} ${HTPASSWD_HASH_VALUE}"
+    echo -e "${GN}htpasswd entry generated and saved to:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
+    echo -e "${YW}Plain htpasswd password was not displayed or logged.${CL}"
+elif [ "$HTPASSWD_MODE" == "provided" ]; then
+    echo -e "${GN}Provided htpasswd entry saved to:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
+    echo -e "${YW}Provided htpasswd hash was not displayed in final output or log.${CL}"
+elif sudo_file_not_empty "${DOCKER_SECRETS_DIR}/htpasswd"; then
+    echo -e "${GN}Existing htpasswd file preserved at:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
+else
+    echo -e "${YW}htpasswd file created empty:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
+    echo -e "${YW}This is fine when Authentik/Authelia/SSO is used instead of Traefik basic-auth.${CL}"
+fi
+
 echo ""
 
-# --- 31. FINAL SUMMARY ---
+# --- 33. FINAL SUMMARY ---
 # Shows final folder layout.
 echo -e "${GN}FINISHED!${CL}"
 echo -e "DOCKER DIR: ${GN}${DOCKER_DIR}${CL}"
@@ -660,8 +762,13 @@ echo -e ".ENV FILE: ${GN}${DOCKER_DIR}/.env${CL}"
 echo -e "SECRETS DIR: ${GN}${DOCKER_SECRETS_DIR}${CL}"
 echo -e "POSTGRES INIT: ${GN}${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh${CL}"
 echo -e "CLOUDFLARE API TOKEN FILE: ${GN}${CF_API_TOKEN_FILE}${CL}"
+echo -e "HTPASSWD FILE: ${GN}${DOCKER_SECRETS_DIR}/htpasswd${CL}"
 echo -e "EXISTING SETUP DETECTED: ${GN}${EXISTING_SETUP}${CL}"
 echo -e "SECRETS REGENERATED: ${GN}${REGENERATE_SECRETS}${CL}"
 echo ""
+echo -e "${YW}Sensitive final output above was intentionally not written to ${LOG_FILE}.${CL}"
+echo ""
+
+enable_logging
 
 exit 0
