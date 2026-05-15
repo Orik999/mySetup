@@ -101,7 +101,47 @@ function tty_println() {
     fi
 }
 
-# --- 9. YES/NO LABEL HELPER ---
+# --- 9. RAW KEY READ HELPER ---
+# Reads exactly one character from the active terminal.
+# This separates real ENTER/SPACE input from timeout, fixing double-press issues.
+function read_key_timeout() {
+    local timeout="$1"
+    local __resultvar="$2"
+    local key=""
+
+    if [ -r /dev/tty ]; then
+        if IFS= read -rsN1 -t "$timeout" key < /dev/tty; then
+            printf -v "$__resultvar" '%s' "$key"
+            return 0
+        fi
+    else
+        if IFS= read -rsN1 -t "$timeout" key; then
+            printf -v "$__resultvar" '%s' "$key"
+            return 0
+        fi
+    fi
+
+    printf -v "$__resultvar" ''
+    return 1
+}
+
+# --- 10. RAW BLOCKING KEY READ HELPER ---
+# Reads exactly one character with no timeout.
+# Used after SPACE pauses countdown prompts.
+function read_key_blocking() {
+    local __resultvar="$1"
+    local key=""
+
+    if [ -r /dev/tty ]; then
+        IFS= read -rsN1 key < /dev/tty || true
+    else
+        IFS= read -rsN1 key || true
+    fi
+
+    printf -v "$__resultvar" '%s' "$key"
+}
+
+# --- 11. YES/NO LABEL HELPER ---
 # Converts Y/N answers to visible yes/no.
 function yes_no_label() {
     local value="$1"
@@ -113,7 +153,7 @@ function yes_no_label() {
     fi
 }
 
-# --- 10. BLOCKING YES/NO HELPER ---
+# --- 12. BLOCKING YES/NO HELPER ---
 # SPACE pauses countdown and waits for Y/N/ENTER. ENTER accepts default.
 function tty_read_yes_no_blocking() {
     local prompt="$1"
@@ -127,15 +167,10 @@ function tty_read_yes_no_blocking() {
 
     while true; do
         tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
-
-        if [ -r /dev/tty ]; then
-            IFS= read -rsn1 key < /dev/tty || true
-        else
-            IFS= read -rsn1 key || true
-        fi
+        read_key_blocking key
 
         case "$key" in
-            ""|$'\n'|$'\r')
+            $'\n'|$'\r')
                 tty_print "${BFR}"
                 echo "$default"
                 return 0
@@ -149,7 +184,7 @@ function tty_read_yes_no_blocking() {
     done
 }
 
-# --- 11. TIMED YES/NO PROMPT HELPER ---
+# --- 13. TIMED YES/NO PROMPT HELPER ---
 # Uses wall-clock countdown. SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
 function timed_yes_no() {
     local prompt="$1"
@@ -179,29 +214,22 @@ function timed_yes_no() {
 
         tty_print "${BFR}${YW}${prompt} (${default_label}) [${remaining}s]${CL} "
 
-        if [ -r /dev/tty ]; then
-            IFS= read -rsn1 -t 1 key < /dev/tty || key=""
-        else
-            IFS= read -rsn1 -t 1 key || key=""
+        if read_key_timeout 1 key; then
+            case "$key" in
+                " ")
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                    ;;
+                $'\n'|$'\r')
+                    answer="$default"
+                    break
+                    ;;
+                [YyNn])
+                    answer="$key"
+                    break
+                    ;;
+            esac
         fi
-
-        case "$key" in
-            " ")
-                answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
-                break
-                ;;
-            "")
-                continue
-                ;;
-            $'\n'|$'\r')
-                answer="$default"
-                break
-                ;;
-            [YyNn])
-                answer="$key"
-                break
-                ;;
-        esac
     done
 
     [ -z "$answer" ] && answer="$default"
@@ -213,7 +241,7 @@ function timed_yes_no() {
     echo "$answer"
 }
 
-# --- 12. BLOCKING EDITABLE TEXT INPUT HELPER ---
+# --- 14. BLOCKING EDITABLE TEXT INPUT HELPER ---
 # Used when user starts typing or presses SPACE during text input.
 # The countdown disappears and the user can edit normally. ENTER accepts typed value or default.
 function tty_read_text_blocking() {
@@ -224,15 +252,10 @@ function tty_read_text_blocking() {
 
     while true; do
         tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${buffer}"
-
-        if [ -r /dev/tty ]; then
-            IFS= read -rsn1 key < /dev/tty || true
-        else
-            IFS= read -rsn1 key || true
-        fi
+        read_key_blocking key
 
         case "$key" in
-            ""|$'\n'|$'\r')
+            $'\n'|$'\r')
                 tty_print "${BFR}"
                 if [ -z "$buffer" ]; then
                     echo "$default"
@@ -251,7 +274,7 @@ function tty_read_text_blocking() {
     done
 }
 
-# --- 13. TIMED TEXT INPUT HELPER ---
+# --- 15. TIMED TEXT INPUT HELPER ---
 # Reads editable text with countdown. Typing or SPACE stops timer. Empty input or timeout uses default.
 function timed_text_input() {
     local prompt="$1"
@@ -275,29 +298,22 @@ function timed_text_input() {
 
         tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
 
-        if [ -r /dev/tty ]; then
-            IFS= read -rsn1 -t 1 key < /dev/tty || key=""
-        else
-            IFS= read -rsn1 -t 1 key || key=""
+        if read_key_timeout 1 key; then
+            case "$key" in
+                " ")
+                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
+                    break
+                    ;;
+                $'\n'|$'\r')
+                    answer="$default"
+                    break
+                    ;;
+                *)
+                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
+                    break
+                    ;;
+            esac
         fi
-
-        case "$key" in
-            " ")
-                answer="$(tty_read_text_blocking "$prompt" "$default" "")"
-                break
-                ;;
-            "")
-                continue
-                ;;
-            $'\n'|$'\r')
-                answer="$default"
-                break
-                ;;
-            *)
-                answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
-                break
-                ;;
-        esac
     done
 
     [ -z "$answer" ] && answer="$default"
@@ -308,7 +324,7 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 14. REBOOT COUNTDOWN HELPER ---
+# --- 16. REBOOT COUNTDOWN HELPER ---
 # Shows a two-line wall-clock reboot countdown without creating a new line every second.
 # ENTER/Y = reboot immediately.
 # SPACE/N = stop countdown and do not reboot.
@@ -342,44 +358,37 @@ function timed_reboot_countdown() {
 
         tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}\n${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}\n"
 
-        if [ -r /dev/tty ]; then
-            IFS= read -rsn1 -t 1 key < /dev/tty || key=""
-        else
-            IFS= read -rsn1 -t 1 key || key=""
+        if read_key_timeout 1 key; then
+            case "$key" in
+                $'\n'|$'\r'|[Yy])
+                    tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                    tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
+                    return 0
+                    ;;
+                " "|[Nn])
+                    tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                    tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
+                    return 1
+                    ;;
+            esac
         fi
-
-        case "$key" in
-            "" )
-                continue
-                ;;
-            $'\n'|$'\r'|[Yy])
-                tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
-                return 0
-                ;;
-            " "|[Nn])
-                tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
-                return 1
-                ;;
-        esac
     done
 }
 
-# --- 15. SUDO PATH EXISTS HELPER ---
+# --- 17. SUDO PATH EXISTS HELPER ---
 # Checks whether a path exists, using sudo when required.
 function sudo_path_exists() {
     local path="$1"
     $SUDO_CMD test -e "$path"
 }
 
-# --- 16. START CONFIRMATION ---
+# --- 18. START CONFIRMATION ---
 # Starts Docker installation.
 echo -e "${YW}This script will install and configure Docker Engine, Docker CLI, containerd, Compose plugin and Buildx plugin.${CL}"
 start_yn=$(timed_yes_no "Start the Docker Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 17. EXISTING SETUP DETECTION ---
+# --- 19. EXISTING SETUP DETECTION ---
 # Detects existing Docker install or completion marker before applying changes.
 msg_info "Checking for existing Docker setup"
 
@@ -404,7 +413,7 @@ else
     msg_ok "NO EXISTING DOCKER SETUP DETECTED"
 fi
 
-# --- 18. USER OPTIONS ---
+# --- 20. USER OPTIONS ---
 # Lets user confirm target user, swap behaviour and optional docker-gc install.
 TARGET_USER=$(timed_text_input "Enter Linux user to add to docker group" "$TARGET_USER")
 
@@ -414,7 +423,7 @@ swap_yn=$(timed_yes_no "Disable swap in /etc/fstab?" "y")
 gc_yn=$(timed_yes_no "Install docker-gc cleanup helper?" "n")
 [[ "$gc_yn" =~ ^[Yy] ]] && INSTALL_DOCKER_GC="y" || INSTALL_DOCKER_GC="n"
 
-# --- 19. SWAP HANDLING ---
+# --- 21. SWAP HANDLING ---
 # Disables swap for Docker/database stability if selected.
 if [ "$DISABLE_SWAP" == "y" ]; then
     msg_info "Disabling swap"
@@ -432,7 +441,7 @@ else
     msg_ok "SWAP LEFT ENABLED"
 fi
 
-# --- 20. DEPENDENCY INSTALL ---
+# --- 22. DEPENDENCY INSTALL ---
 # Installs packages needed to add Docker's official Ubuntu repository.
 msg_info "Installing dependencies"
 
@@ -454,7 +463,7 @@ msg_ok "DOCKER REPOSITORY DEPENDENCIES INSTALLED"
 
 msg_ok "DEPENDENCIES INSTALLED"
 
-# --- 21. DOCKER REPOSITORY SETUP ---
+# --- 23. DOCKER REPOSITORY SETUP ---
 # Adds Docker's official GPG key and apt repository using modern keyring layout.
 msg_info "Adding Docker repository"
 
@@ -476,7 +485,7 @@ msg_ok "DOCKER APT REPOSITORY WRITTEN"
 
 msg_ok "DOCKER REPOSITORY ADDED"
 
-# --- 22. DOCKER INSTALL ---
+# --- 24. DOCKER INSTALL ---
 # Installs Docker Engine, CLI, containerd, Docker Compose plugin and Buildx plugin.
 msg_info "Installing Docker"
 
@@ -504,7 +513,7 @@ msg_ok "CONTAINERD SERVICE ENABLED AND STARTED"
 
 msg_ok "DOCKER INSTALLED"
 
-# --- 23. DOCKER GROUP SETUP ---
+# --- 25. DOCKER GROUP SETUP ---
 # Adds the target user to the docker group for non-root Docker CLI usage after next login.
 msg_info "Adding user ${TARGET_USER} to docker group"
 
@@ -515,7 +524,7 @@ else
     msg_warn "Target user ${TARGET_USER} does not exist; docker group membership skipped"
 fi
 
-# --- 24. DOCKER FIREWALL MODE ---
+# --- 26. DOCKER FIREWALL MODE ---
 # Keeps Docker iptables enabled so Docker networking, NAT and published ports work correctly.
 msg_info "Configuring Docker firewall mode"
 
@@ -549,7 +558,7 @@ msg_ok "DOCKER SERVICE RESTARTED"
 
 msg_ok "DOCKER FIREWALL MODE CONFIGURED"
 
-# --- 25. UFW BASELINE ---
+# --- 27. UFW BASELINE ---
 # Allows SSH, HTTP and HTTPS on the Ubuntu VM.
 msg_info "Configuring UFW firewall"
 
@@ -570,7 +579,7 @@ msg_ok "UFW ENABLED"
 
 msg_ok "UFW FIREWALL CONFIGURED"
 
-# --- 26. DOCKER-GC OPTIONAL INSTALL ---
+# --- 28. DOCKER-GC OPTIONAL INSTALL ---
 # Creates a simple safe Docker cleanup helper instead of aggressive automatic pruning.
 if [ "$INSTALL_DOCKER_GC" == "y" ]; then
     msg_info "Installing docker-gc helper"
@@ -594,7 +603,7 @@ else
     msg_ok "DOCKER-GC HELPER NOT SELECTED"
 fi
 
-# --- 27. VERIFY INSTALL ---
+# --- 29. VERIFY INSTALL ---
 # Checks Docker daemon, Docker CLI and Compose plugin through sudo so verification works before docker group re-login.
 msg_info "Verifying Docker installation"
 
@@ -612,7 +621,7 @@ msg_ok "DOCKER COMPOSE VERIFIED"
 
 msg_ok "DOCKER VERIFIED"
 
-# --- 28. COMPLETION MARKER ---
+# --- 30. COMPLETION MARKER ---
 # Creates marker showing setup completed.
 msg_info "Writing completion marker"
 
@@ -627,7 +636,7 @@ EOF
 
 msg_ok "COMPLETION MARKER WRITTEN"
 
-# --- 29. FINAL SUMMARY ---
+# --- 31. FINAL SUMMARY ---
 # Displays installed versions and logout/reboot reminder.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
@@ -642,7 +651,7 @@ echo ""
 echo -e "${YW}Docker group membership usually requires logout/login or reboot before using Docker without sudo.${CL}"
 echo ""
 
-# --- 30. REBOOT OPTION ---
+# --- 32. REBOOT OPTION ---
 # Offers Ubuntu VM Setup-compatible reboot flow so Docker group membership applies cleanly.
 reboot_yn=$(timed_yes_no "Reboot Ubuntu VM now so Docker group membership applies?" "y")
 
