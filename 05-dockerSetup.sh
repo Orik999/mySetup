@@ -1,5 +1,5 @@
-#!/usr/bin/env bash -ex
-set -euo pipefail
+#!/usr/bin/env bash
+set -euxo pipefail
 shopt -s inherit_errexit nullglob
 
 # =========================================================
