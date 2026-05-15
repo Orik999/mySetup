@@ -32,6 +32,7 @@ DEFAULT_TZ="Europe/London"
 DEFAULT_DOMAIN="example.com"
 DEFAULT_CF_EMAIL="cloudflare-email@example.com"
 DEFAULT_CF_ZONEID=""
+DEFAULT_CF_TOKEN=""
 
 SUDO_CMD=""
 
@@ -43,8 +44,12 @@ TZ_VALUE=""
 DOMAIN_VALUE=""
 CF_EMAIL_VALUE=""
 CF_ZONEID_VALUE=""
+CF_TOKEN_VALUE=""
 PUID_VALUE=""
 PGID_VALUE=""
+
+EXISTING_SETUP="no"
+REGENERATE_SECRETS="n"
 
 POSTGRES_PASSWORD=""
 REDIS_PASSWORD=""
@@ -339,13 +344,46 @@ function generate_secret() {
     openssl rand -hex 32 | cut -c1-48
 }
 
-# --- 15. START CONFIRMATION ---
+# --- 15. SUDO FILE EXISTS HELPER ---
+# Checks whether a file or folder exists, using sudo when required.
+function sudo_path_exists() {
+    local path="$1"
+    $SUDO_CMD test -e "$path"
+}
+
+# --- 16. SUDO FILE NOT EMPTY HELPER ---
+# Checks whether a file exists and has content, using sudo when required.
+function sudo_file_not_empty() {
+    local file="$1"
+    $SUDO_CMD test -s "$file"
+}
+
+# --- 17. SUDO FILE READ HELPER ---
+# Reads a root-owned or user-owned file through sudo when required.
+function sudo_read_file() {
+    local file="$1"
+    $SUDO_CMD cat "$file"
+}
+
+# --- 18. SECRET REUSE / GENERATION HELPER ---
+# Reuses existing secret files by default on reruns. Generates a new value only when missing or when regeneration is selected.
+function get_or_generate_secret() {
+    local file="$1"
+
+    if [ "$REGENERATE_SECRETS" != "y" ] && sudo_file_not_empty "$file"; then
+        sudo_read_file "$file"
+    else
+        generate_secret
+    fi
+}
+
+# --- 19. START CONFIRMATION ---
 # Starts Docker env setup.
 echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
 start_yn=$(timed_yes_no "Start the Docker ENV Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 16. USER INPUTS ---
+# --- 20. USER INPUTS ---
 # Collects reusable defaults for user, paths, timezone, domain and Cloudflare values.
 DOCKER_USER=$(timed_text_input "Enter Linux username" "$DEFAULT_USER")
 
@@ -358,12 +396,50 @@ DEFAULT_DOCKER_DIR="${USERDIR}/docker"
 DOCKER_DIR=$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")
 DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
 
+# --- 21. EXISTING SETUP DETECTION ---
+# Detects existing .env, secrets folder, or completion marker to prevent accidental secret rotation.
+msg_info "Checking for existing Docker ENV setup"
+
+if sudo_path_exists "$COMPLETED_MARKER" || sudo_path_exists "${DOCKER_DIR}/.env" || sudo_path_exists "${DOCKER_SECRETS_DIR}"; then
+    EXISTING_SETUP="yes"
+fi
+
+if [ "$EXISTING_SETUP" == "yes" ]; then
+    msg_warn "Existing Docker ENV setup detected"
+    echo ""
+    echo -e "${RD}WARNING: Existing Docker ENV setup detected.${CL}"
+    echo -e "${YW}Re-running can overwrite .env and service secret files.${CL}"
+    echo -e "${YW}Safe default: continue only if you want to refresh the setup files.${CL}"
+    echo -e "${YW}Existing secrets will be reused unless you explicitly choose to regenerate them.${CL}"
+    echo ""
+
+    continue_existing_yn=$(timed_yes_no "Continue with existing Docker ENV setup?" "n")
+
+    if [[ "$continue_existing_yn" =~ ^[Nn] ]]; then
+        echo -e "${YW}Docker ENV setup cancelled. Existing files were left untouched.${CL}"
+        exit 0
+    fi
+
+    regenerate_yn=$(timed_yes_no "Regenerate all service secrets?" "n")
+
+    if [[ "$regenerate_yn" =~ ^[Yy] ]]; then
+        REGENERATE_SECRETS="y"
+        msg_warn "Secret regeneration selected. Existing deployed containers may need rebuilding."
+    else
+        REGENERATE_SECRETS="n"
+        msg_ok "EXISTING SECRETS WILL BE REUSED WHERE PRESENT"
+    fi
+else
+    msg_ok "NO EXISTING DOCKER ENV SETUP DETECTED"
+fi
+
 TZ_VALUE=$(timed_text_input "Enter timezone" "$DEFAULT_TZ")
 DOMAIN_VALUE=$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")
 CF_EMAIL_VALUE=$(timed_text_input "Enter Cloudflare email" "$DEFAULT_CF_EMAIL")
 CF_ZONEID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONEID")
+CF_TOKEN_VALUE=$(timed_text_input "Enter Cloudflare API Token" "$DEFAULT_CF_TOKEN")
 
-# --- 17. USER/GROUP ID DETECTION ---
+# --- 22. USER/GROUP ID DETECTION ---
 # Detects PUID/PGID for container permissions.
 msg_info "Detecting user and group IDs"
 
@@ -377,20 +453,7 @@ fi
 
 msg_ok "USER AND GROUP IDS DETECTED"
 
-# --- 18. SECRET GENERATION ---
-# Generates service secrets for PostgreSQL, Redis, Authentik, Postiz and Temporal.
-msg_info "Generating secrets"
-
-POSTGRES_PASSWORD="$(generate_secret)"
-REDIS_PASSWORD="$(generate_secret)"
-AUTHENTIK_SECRET_KEY="$(generate_secret)"
-AUTHENTIK_POSTGRES_PASSWORD="$(generate_secret)"
-POSTIZ_POSTGRES_PASSWORD="$(generate_secret)"
-TEMPORAL_POSTGRES_PASSWORD="$(generate_secret)"
-
-msg_ok "SECRETS GENERATED"
-
-# --- 19. DOCKER DIRECTORY CREATION ---
+# --- 23. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
 msg_info "Creating Docker folder structure"
 
@@ -405,7 +468,24 @@ $SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
 msg_ok "DOCKER FOLDERS CREATED"
 
-# --- 20. POSTGRES INIT SCRIPT CREATION ---
+# --- 24. SECRET GENERATION / REUSE ---
+# Generates service secrets on first run. On reruns, reuses existing secret files unless regeneration was explicitly selected.
+msg_info "Generating or reusing secrets"
+
+POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postgres_password")"
+REDIS_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/redis_password")"
+AUTHENTIK_SECRET_KEY="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_secret_key")"
+AUTHENTIK_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_postgres_password")"
+POSTIZ_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_postgres_password")"
+TEMPORAL_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/temporal_postgres_password")"
+
+if [ "$EXISTING_SETUP" == "yes" ] && [ "$REGENERATE_SECRETS" != "y" ]; then
+    msg_ok "SECRETS REUSED / GENERATED IF MISSING"
+else
+    msg_ok "SECRETS GENERATED"
+fi
+
+# --- 25. POSTGRES INIT SCRIPT CREATION ---
 # Creates first-start PostgreSQL init script so app databases/users are created unattended.
 msg_info "Creating PostgreSQL init script"
 
@@ -444,7 +524,7 @@ $SUDO_CMD chmod +x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.
 
 msg_ok "POSTGRES INIT SCRIPT CREATED"
 
-# --- 21. SECRET FILE WRITING ---
+# --- 26. SECRET FILE WRITING ---
 # Writes secrets to individual files so Docker Compose can consume them as file-based secrets where suitable.
 msg_info "Writing secret files"
 
@@ -455,12 +535,20 @@ printf '%s' "$AUTHENTIK_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR
 printf '%s' "$POSTIZ_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/postiz_postgres_password" >/dev/null
 printf '%s' "$TEMPORAL_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/temporal_postgres_password" >/dev/null
 printf '%s' "$CF_EMAIL_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/cf_email" >/dev/null
-$SUDO_CMD touch "${DOCKER_SECRETS_DIR}/cf_token"
+
+if [ -n "$CF_TOKEN_VALUE" ]; then
+    printf '%s' "$CF_TOKEN_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/cf_token" >/dev/null
+elif sudo_file_not_empty "${DOCKER_SECRETS_DIR}/cf_token"; then
+    msg_ok "EXISTING CLOUDFLARE TOKEN PRESERVED"
+else
+    $SUDO_CMD touch "${DOCKER_SECRETS_DIR}/cf_token"
+fi
+
 $SUDO_CMD touch "${DOCKER_SECRETS_DIR}/htpasswd"
 
 msg_ok "SECRET FILES WRITTEN"
 
-# --- 22. ENV FILE CREATION ---
+# --- 27. ENV FILE CREATION ---
 # Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
 msg_info "Creating Docker .env file"
 
@@ -505,7 +593,7 @@ EOF
 
 msg_ok "DOCKER .ENV CREATED"
 
-# --- 23. PERMISSIONS ---
+# --- 28. PERMISSIONS ---
 # Sets Docker folder permissions and stricter secret permissions.
 msg_info "Setting folder permissions"
 
@@ -519,7 +607,7 @@ $SUDO_CMD chmod -R 600 "$DOCKER_SECRETS_DIR"/* 2>/dev/null || true
 
 msg_ok "PERMISSIONS SET"
 
-# --- 24. COMPLETION MARKER ---
+# --- 29. COMPLETION MARKER ---
 # Creates marker showing ENV setup ran successfully.
 msg_info "Writing completion marker"
 
@@ -528,14 +616,19 @@ Docker ENV Setup completed on: $(date)
 Docker dir: $DOCKER_DIR
 Domain: $DOMAIN_VALUE
 User: $DOCKER_USER
+Secrets regenerated: $REGENERATE_SECRETS
 EOF
 
 msg_ok "COMPLETION MARKER WRITTEN"
 
-# --- 25. FINAL SECRET DISPLAY WARNING ---
+# --- 30. FINAL SECRET DISPLAY WARNING ---
 # Displays generated values once so user can save them securely.
 echo ""
-echo -e "${RD}${CLF}SAVE THESE VALUES NOW. THEY WILL NOT BE DISPLAYED AGAIN BY THIS SCRIPT.${CL}"
+if [ "$EXISTING_SETUP" == "yes" ] && [ "$REGENERATE_SECRETS" != "y" ]; then
+    echo -e "${YW}${CLF}EXISTING SECRETS WERE REUSED WHERE PRESENT. SAVE ANY NEW/MISSING VALUES SHOWN BELOW.${CL}"
+else
+    echo -e "${RD}${CLF}SAVE THESE VALUES NOW. THEY WILL NOT BE DISPLAYED AGAIN BY THIS SCRIPT.${CL}"
+fi
 echo ""
 echo -e "${GN}POSTGRES_PASSWORD:${CL} ${POSTGRES_PASSWORD}"
 echo -e "${GN}REDIS_PASSWORD:${CL} ${REDIS_PASSWORD}"
@@ -544,17 +637,27 @@ echo -e "${GN}AUTHENTIK_POSTGRES_PASSWORD:${CL} ${AUTHENTIK_POSTGRES_PASSWORD}"
 echo -e "${GN}POSTIZ_POSTGRES_PASSWORD:${CL} ${POSTIZ_POSTGRES_PASSWORD}"
 echo -e "${GN}TEMPORAL_POSTGRES_PASSWORD:${CL} ${TEMPORAL_POSTGRES_PASSWORD}"
 echo ""
-echo -e "${YW}Cloudflare token file created empty:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
-echo -e "${YW}Add your Cloudflare API token before deploying Traefik/cf-ddns/cf-companion.${CL}"
+
+if [ -n "$CF_TOKEN_VALUE" ]; then
+    echo -e "${GN}Cloudflare token saved to:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
+elif sudo_file_not_empty "${DOCKER_SECRETS_DIR}/cf_token"; then
+    echo -e "${GN}Existing Cloudflare token preserved at:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
+else
+    echo -e "${YW}Cloudflare token file created empty:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
+    echo -e "${YW}Add your Cloudflare API token before deploying Traefik/cf-ddns/cf-companion.${CL}"
+fi
+
 echo ""
 
-# --- 26. FINAL SUMMARY ---
+# --- 31. FINAL SUMMARY ---
 # Shows final folder layout.
 echo -e "${GN}FINISHED!${CL}"
 echo -e "DOCKER DIR: ${GN}${DOCKER_DIR}${CL}"
 echo -e ".ENV FILE: ${GN}${DOCKER_DIR}/.env${CL}"
 echo -e "SECRETS DIR: ${GN}${DOCKER_SECRETS_DIR}${CL}"
 echo -e "POSTGRES INIT: ${GN}${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh${CL}"
+echo -e "EXISTING SETUP DETECTED: ${GN}${EXISTING_SETUP}${CL}"
+echo -e "SECRETS REGENERATED: ${GN}${REGENERATE_SECRETS}${CL}"
 echo ""
 
 exit 0
