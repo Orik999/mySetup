@@ -30,9 +30,9 @@ DEFAULT_USERDIR="/home/${DEFAULT_USER}"
 DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
 DEFAULT_TZ="Europe/London"
 DEFAULT_DOMAIN="example.com"
-DEFAULT_CF_EMAIL="cloudflare-email@example.com"
-DEFAULT_CF_ZONEID=""
-DEFAULT_CF_TOKEN=""
+DEFAULT_CF_API_EMAIL="cloudflare-email@example.com"
+DEFAULT_CF_ZONE_ID=""
+DEFAULT_CF_API_TOKEN=""
 
 SUDO_CMD=""
 
@@ -42,9 +42,10 @@ DOCKER_DIR=""
 DOCKER_SECRETS_DIR=""
 TZ_VALUE=""
 DOMAIN_VALUE=""
-CF_EMAIL_VALUE=""
-CF_ZONEID_VALUE=""
-CF_TOKEN_VALUE=""
+CF_API_EMAIL_VALUE=""
+CF_ZONE_ID_VALUE=""
+CF_API_TOKEN_VALUE=""
+CF_API_TOKEN_FILE=""
 PUID_VALUE=""
 PGID_VALUE=""
 
@@ -395,6 +396,7 @@ DEFAULT_DOCKER_DIR="${USERDIR}/docker"
 
 DOCKER_DIR=$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")
 DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
+CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
 
 # --- 21. EXISTING SETUP DETECTION ---
 # Detects existing .env, secrets folder, or completion marker to prevent accidental secret rotation.
@@ -435,9 +437,9 @@ fi
 
 TZ_VALUE=$(timed_text_input "Enter timezone" "$DEFAULT_TZ")
 DOMAIN_VALUE=$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")
-CF_EMAIL_VALUE=$(timed_text_input "Enter Cloudflare email" "$DEFAULT_CF_EMAIL")
-CF_ZONEID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONEID")
-CF_TOKEN_VALUE=$(timed_text_input "Enter Cloudflare API Token" "$DEFAULT_CF_TOKEN")
+CF_API_EMAIL_VALUE=$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")
+CF_ZONE_ID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONE_ID")
+CF_API_TOKEN_VALUE=$(timed_text_input "Enter Cloudflare API Token" "$DEFAULT_CF_API_TOKEN")
 
 # --- 22. USER/GROUP ID DETECTION ---
 # Detects PUID/PGID for container permissions.
@@ -534,14 +536,14 @@ printf '%s' "$AUTHENTIK_SECRET_KEY" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/authe
 printf '%s' "$AUTHENTIK_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/authentik_postgres_password" >/dev/null
 printf '%s' "$POSTIZ_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/postiz_postgres_password" >/dev/null
 printf '%s' "$TEMPORAL_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/temporal_postgres_password" >/dev/null
-printf '%s' "$CF_EMAIL_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/cf_email" >/dev/null
+printf '%s' "$CF_API_EMAIL_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/cf_api_email" >/dev/null
 
-if [ -n "$CF_TOKEN_VALUE" ]; then
-    printf '%s' "$CF_TOKEN_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/cf_token" >/dev/null
-elif sudo_file_not_empty "${DOCKER_SECRETS_DIR}/cf_token"; then
-    msg_ok "EXISTING CLOUDFLARE TOKEN PRESERVED"
+if [ -n "$CF_API_TOKEN_VALUE" ]; then
+    printf '%s' "$CF_API_TOKEN_VALUE" | $SUDO_CMD tee "${CF_API_TOKEN_FILE}" >/dev/null
+elif sudo_file_not_empty "${CF_API_TOKEN_FILE}"; then
+    msg_ok "EXISTING CLOUDFLARE API TOKEN PRESERVED"
 else
-    $SUDO_CMD touch "${DOCKER_SECRETS_DIR}/cf_token"
+    $SUDO_CMD touch "${CF_API_TOKEN_FILE}"
 fi
 
 $SUDO_CMD touch "${DOCKER_SECRETS_DIR}/htpasswd"
@@ -571,8 +573,9 @@ TZ="${TZ_VALUE}"
 
 # --- Domain / Cloudflare ---
 DOMAIN="${DOMAIN_VALUE}"
-CF_EMAIL="${CF_EMAIL_VALUE}"
-CF_ZONEID="${CF_ZONEID_VALUE}"
+CF_API_EMAIL="${CF_API_EMAIL_VALUE}"
+CF_ZONE_ID="${CF_ZONE_ID_VALUE}"
+CF_API_TOKEN_FILE="${CF_API_TOKEN_FILE}"
 
 # --- PostgreSQL root/admin password ---
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
@@ -638,12 +641,12 @@ echo -e "${GN}POSTIZ_POSTGRES_PASSWORD:${CL} ${POSTIZ_POSTGRES_PASSWORD}"
 echo -e "${GN}TEMPORAL_POSTGRES_PASSWORD:${CL} ${TEMPORAL_POSTGRES_PASSWORD}"
 echo ""
 
-if [ -n "$CF_TOKEN_VALUE" ]; then
-    echo -e "${GN}Cloudflare token saved to:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
-elif sudo_file_not_empty "${DOCKER_SECRETS_DIR}/cf_token"; then
-    echo -e "${GN}Existing Cloudflare token preserved at:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
+if [ -n "$CF_API_TOKEN_VALUE" ]; then
+    echo -e "${GN}Cloudflare API token saved to:${CL} ${CF_API_TOKEN_FILE}"
+elif sudo_file_not_empty "${CF_API_TOKEN_FILE}"; then
+    echo -e "${GN}Existing Cloudflare API token preserved at:${CL} ${CF_API_TOKEN_FILE}"
 else
-    echo -e "${YW}Cloudflare token file created empty:${CL} ${DOCKER_SECRETS_DIR}/cf_token"
+    echo -e "${YW}Cloudflare API token file created empty:${CL} ${CF_API_TOKEN_FILE}"
     echo -e "${YW}Add your Cloudflare API token before deploying Traefik/cf-ddns/cf-companion.${CL}"
 fi
 
@@ -656,6 +659,7 @@ echo -e "DOCKER DIR: ${GN}${DOCKER_DIR}${CL}"
 echo -e ".ENV FILE: ${GN}${DOCKER_DIR}/.env${CL}"
 echo -e "SECRETS DIR: ${GN}${DOCKER_SECRETS_DIR}${CL}"
 echo -e "POSTGRES INIT: ${GN}${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh${CL}"
+echo -e "CLOUDFLARE API TOKEN FILE: ${GN}${CF_API_TOKEN_FILE}${CL}"
 echo -e "EXISTING SETUP DETECTED: ${GN}${EXISTING_SETUP}${CL}"
 echo -e "SECRETS REGENERATED: ${GN}${REGENERATE_SECRETS}${CL}"
 echo ""
