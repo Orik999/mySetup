@@ -25,12 +25,12 @@ T=15
 LOG_FILE="/var/log/docker-env-setup.log"
 COMPLETED_MARKER="/root/.docker-env-setup-completed"
 
-DEFAULT_USER="orik"
-DEFAULT_USERDIR="/home/orik"
-DEFAULT_DOCKER_DIR="/home/orik/docker"
+DEFAULT_USER="youruser"
+DEFAULT_USERDIR="/home/${DEFAULT_USER}"
+DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
 DEFAULT_TZ="Europe/London"
-DEFAULT_DOMAIN="najafov.co.uk"
-DEFAULT_CF_EMAIL="oriknj999@gmail.com"
+DEFAULT_DOMAIN="example.com"
+DEFAULT_CF_EMAIL="cloudflare-email@example.com"
 DEFAULT_CF_ZONEID=""
 
 DOCKER_USER=""
@@ -71,7 +71,14 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 5. LOGGING & ERROR HANDLING ---
+# --- 5. ROOT CHECK ---
+# This script writes to /var/log, /root and system-owned paths, so it must run as root.
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RD}Please run as root: sudo bash docker-env-setup.sh${CL}"
+    exit 1
+fi
+
+# --- 6. LOGGING & ERROR HANDLING ---
 # Logs output and reports failing line.
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
@@ -79,7 +86,7 @@ trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}
 clear
 header_info
 
-# --- 6. TTY OUTPUT HELPER ---
+# --- 7. TTY OUTPUT HELPER ---
 # Prints directly to terminal from prompt functions.
 function tty_print() {
     if [ -w /dev/tty ]; then
@@ -89,7 +96,7 @@ function tty_print() {
     fi
 }
 
-# --- 7. TTY OUTPUT WITH NEWLINE HELPER ---
+# --- 8. TTY OUTPUT WITH NEWLINE HELPER ---
 # Prints directly to terminal with newline.
 function tty_println() {
     if [ -w /dev/tty ]; then
@@ -99,10 +106,11 @@ function tty_println() {
     fi
 }
 
-# --- 8. YES/NO LABEL HELPER ---
+# --- 9. YES/NO LABEL HELPER ---
 # Converts Y/N answer into visible yes/no text.
 function yes_no_label() {
     local value="$1"
+
     if [[ "$value" =~ ^[Yy]$ ]]; then
         echo "yes"
     else
@@ -110,7 +118,7 @@ function yes_no_label() {
     fi
 }
 
-# --- 9. BLOCKING YES/NO HELPER ---
+# --- 10. BLOCKING YES/NO HELPER ---
 # Used when SPACE pauses countdown.
 function tty_read_yes_no_blocking() {
     local prompt="$1"
@@ -123,7 +131,8 @@ function tty_read_yes_no_blocking() {
     fi
 
     while true; do
-        tty_print "${BFR}${YW}${prompt} (${default_label}) [timer stopped - press Y/N or ENTER for default]${CL} "
+        tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
+
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
         else
@@ -142,7 +151,7 @@ function tty_read_yes_no_blocking() {
     done
 }
 
-# --- 10. TIMED YES/NO PROMPT HELPER ---
+# --- 11. TIMED YES/NO PROMPT HELPER ---
 # SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
 function timed_yes_no() {
     local prompt="$1"
@@ -151,13 +160,26 @@ function timed_yes_no() {
     local key=""
     local default_label="Y/n"
     local final_label=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
     if [[ "$default" =~ ^[Nn]$ ]]; then
         default_label="y/N"
     fi
 
-    for ((i=T; i>0; i--)); do
-        tty_print "${BFR}${YW}${prompt} (${default_label}) [${i}s]${CL} "
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${remaining}s]${CL} "
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
@@ -190,63 +212,143 @@ function timed_yes_no() {
 
     [ -z "$answer" ] && answer="$default"
     final_label="$(yes_no_label "$answer")"
+
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+
     echo "$answer"
 }
 
-# --- 11. TIMED TEXT INPUT HELPER ---
-# Reads text with timeout. Empty input or timeout uses default.
+# --- 12. BLOCKING EDITABLE TEXT INPUT HELPER ---
+# Used when user starts typing or presses SPACE during text input.
+# The countdown disappears and the user can edit normally. ENTER accepts typed value or default.
+function tty_read_text_blocking() {
+    local prompt="$1"
+    local default="$2"
+    local buffer="${3:-}"
+    local key=""
+
+    while true; do
+        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${buffer}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -rsn1 key < /dev/tty || true
+        else
+            IFS= read -rsn1 key || true
+        fi
+
+        case "$key" in
+            "")
+                tty_print "${BFR}"
+                if [ -z "$buffer" ]; then
+                    echo "$default"
+                else
+                    echo "$buffer"
+                fi
+                return 0
+                ;;
+            $'\177'|$'\b')
+                buffer="${buffer%?}"
+                ;;
+            *)
+                buffer+="$key"
+                ;;
+        esac
+    done
+}
+
+# --- 13. TIMED TEXT INPUT HELPER ---
+# Reads editable text with countdown. Typing or SPACE stops timer. Empty input or timeout uses default.
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    tty_print "${YW}${prompt} [default: ${default}] (${T}s): ${CL}"
+    deadline=$(( $(date +%s) + T ))
 
-    if [ -r /dev/tty ]; then
-        IFS= read -r -t "$T" answer < /dev/tty || true
-    else
-        IFS= read -r -t "$T" answer || true
-    fi
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
 
     [ -z "$answer" ] && answer="$default"
+
+    tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+
     echo "$answer"
 }
 
-# --- 12. SECRET GENERATOR HELPER ---
+# --- 14. SECRET GENERATOR HELPER ---
 # Generates URL-safe random secrets for app/database credentials.
 function generate_secret() {
-    openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48
+    openssl rand -hex 32 | cut -c1-48
 }
 
-# --- 13. ROOT / SUDO DETECTION ---
-# Uses sudo when not root.
-if [ "$EUID" -eq 0 ]; then
-    SUDO_CMD=""
-else
-    SUDO_CMD="sudo"
-fi
-
-# --- 14. START CONFIRMATION ---
+# --- 15. START CONFIRMATION ---
 # Starts Docker env setup.
 echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
 start_yn=$(timed_yes_no "Start the Docker ENV Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 15. USER INPUTS ---
+# --- 16. USER INPUTS ---
 # Collects reusable defaults for user, paths, timezone, domain and Cloudflare values.
 DOCKER_USER=$(timed_text_input "Enter Linux username" "$DEFAULT_USER")
+
+DEFAULT_USERDIR="/home/${DOCKER_USER}"
+DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
+
 USERDIR=$(timed_text_input "Enter user home directory" "$DEFAULT_USERDIR")
+DEFAULT_DOCKER_DIR="${USERDIR}/docker"
+
 DOCKER_DIR=$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")
 DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
+
 TZ_VALUE=$(timed_text_input "Enter timezone" "$DEFAULT_TZ")
 DOMAIN_VALUE=$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")
 CF_EMAIL_VALUE=$(timed_text_input "Enter Cloudflare email" "$DEFAULT_CF_EMAIL")
 CF_ZONEID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONEID")
 
-# --- 16. USER/GROUP ID DETECTION ---
+# --- 17. USER/GROUP ID DETECTION ---
 # Detects PUID/PGID for container permissions.
 if id "$DOCKER_USER" >/dev/null 2>&1; then
     PUID_VALUE=$(id -u "$DOCKER_USER")
@@ -256,7 +358,7 @@ else
     PGID_VALUE="1000"
 fi
 
-# --- 17. SECRET GENERATION ---
+# --- 18. SECRET GENERATION ---
 # Generates service secrets for PostgreSQL, Redis, Authentik, Postiz and Temporal.
 msg_info "Generating secrets"
 
@@ -269,7 +371,7 @@ TEMPORAL_POSTGRES_PASSWORD="$(generate_secret)"
 
 msg_ok "SECRETS GENERATED"
 
-# --- 18. DOCKER DIRECTORY CREATION ---
+# --- 19. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
 msg_info "Creating Docker folder structure"
 
@@ -284,7 +386,7 @@ mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
 msg_ok "DOCKER FOLDERS CREATED"
 
-# --- 19. POSTGRES INIT SCRIPT CREATION ---
+# --- 20. POSTGRES INIT SCRIPT CREATION ---
 # Creates first-start PostgreSQL init script so app databases/users are created unattended.
 msg_info "Creating PostgreSQL init script"
 
@@ -323,7 +425,7 @@ chmod +x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
 msg_ok "POSTGRES INIT SCRIPT CREATED"
 
-# --- 20. SECRET FILE WRITING ---
+# --- 21. SECRET FILE WRITING ---
 # Writes secrets to individual files so Docker Compose can consume them as file-based secrets where suitable.
 msg_info "Writing secret files"
 
@@ -339,7 +441,7 @@ touch "${DOCKER_SECRETS_DIR}/htpasswd"
 
 msg_ok "SECRET FILES WRITTEN"
 
-# --- 21. ENV FILE CREATION ---
+# --- 22. ENV FILE CREATION ---
 # Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
 msg_info "Creating Docker .env file"
 
@@ -384,12 +486,12 @@ EOF
 
 msg_ok "DOCKER .ENV CREATED"
 
-# --- 22. PERMISSIONS ---
+# --- 23. PERMISSIONS ---
 # Sets Docker folder permissions and stricter secret permissions.
 msg_info "Setting folder permissions"
 
 if id "$DOCKER_USER" >/dev/null 2>&1; then
-    $SUDO_CMD chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
+    chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
 fi
 
 chmod -R 775 "$DOCKER_DIR"
@@ -398,16 +500,16 @@ chmod -R 600 "$DOCKER_SECRETS_DIR"/* 2>/dev/null || true
 
 msg_ok "PERMISSIONS SET"
 
-# --- 23. COMPLETION MARKER ---
+# --- 24. COMPLETION MARKER ---
 # Creates marker showing ENV setup ran successfully.
-$SUDO_CMD bash -c "cat > '$COMPLETED_MARKER'" <<EOF
+cat <<EOF > "$COMPLETED_MARKER"
 Docker ENV Setup completed on: $(date)
 Docker dir: $DOCKER_DIR
 Domain: $DOMAIN_VALUE
 User: $DOCKER_USER
 EOF
 
-# --- 24. FINAL SECRET DISPLAY WARNING ---
+# --- 25. FINAL SECRET DISPLAY WARNING ---
 # Displays generated values once so user can save them securely.
 echo ""
 echo -e "${RD}${CLF}SAVE THESE VALUES NOW. THEY WILL NOT BE DISPLAYED AGAIN BY THIS SCRIPT.${CL}"
@@ -423,7 +525,7 @@ echo -e "${YW}Cloudflare token file created empty:${CL} ${DOCKER_SECRETS_DIR}/cf
 echo -e "${YW}Add your Cloudflare API token before deploying Traefik/cf-ddns/cf-companion.${CL}"
 echo ""
 
-# --- 25. FINAL SUMMARY ---
+# --- 26. FINAL SUMMARY ---
 # Shows final folder layout.
 echo -e "${GN}FINISHED!${CL}"
 echo -e "DOCKER DIR: ${GN}${DOCKER_DIR}${CL}"
