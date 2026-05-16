@@ -33,13 +33,18 @@ TARGET_VM_STATUS=""
 TARGET_VM_MAC=""
 TARGET_USERNAME=""
 TARGET_TIMEZONE=""
+
 INSTALL_ISO_PATH=""
 INSTALL_ISO_REF=""
-CUSTOM_ISO_NAME=""
-CUSTOM_ISO_PATH=""
-CUSTOM_ISO_REF=""
+
+SEED_ISO_NAME=""
+SEED_ISO_PATH=""
+SEED_ISO_REF=""
 WORK_DIR=""
+
 SSH_KEYS=""
+KEY_SOURCE=""
+
 NETWORK_MODE="dhcp"
 STATIC_IP_CIDR=""
 STATIC_GATEWAY=""
@@ -77,7 +82,7 @@ clear
 header_info
 
 # =========================================================
-#  INPUT HELPERS - COPIED FROM WORKING SCRIPT 3 LOGIC
+#  INPUT HELPERS - SCRIPT 3 STYLE
 # =========================================================
 
 # --- 7. TTY PRINT HELPER ---
@@ -467,30 +472,28 @@ fi
 # --- 19. DEPENDENCY CHECK ---
 msg_info "Checking required tools"
 
-for pkg in xorriso rsync p7zip-full; do
-    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-        msg_warn "${pkg} not found. Installing it now."
-        DEBIAN_FRONTEND=noninteractive apt-get update &>/dev/null
-        DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" &>/dev/null
-    fi
-done
+if ! command -v genisoimage >/dev/null 2>&1; then
+    msg_warn "genisoimage not found. Installing it now."
+    DEBIAN_FRONTEND=noninteractive apt-get update &>/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y genisoimage &>/dev/null
+fi
 
-command -v xorriso >/dev/null 2>&1 || msg_error "xorriso is required."
-command -v rsync >/dev/null 2>&1 || msg_error "rsync is required."
+command -v genisoimage >/dev/null 2>&1 || msg_error "genisoimage is required."
 command -v qm >/dev/null 2>&1 || msg_error "qm command not found."
 command -v openssl >/dev/null 2>&1 || msg_error "openssl command not found."
 
 msg_ok "REQUIRED TOOLS FOUND"
 
 # --- 20. START WARNING ---
-echo -e "${YW}This script creates a custom Ubuntu 26.04 autoinstall ISO with boot parameters already injected.${CL}"
+echo -e "${YW}This script creates a separate NoCloud seed ISO for Ubuntu Server 26.04 autoinstall.${CL}"
+echo -e "${YW}The original Ubuntu ISO remains untouched and bootable.${CL}"
 echo -e "${YW}Written for: ${GN}${DEFAULT_ISO_NAME}${CL}"
 echo ""
-echo -e "${RD}WARNING:${CL} Ubuntu autoinstall will erase the selected VM install disk."
+echo -e "${RD}WARNING:${CL} Ubuntu autoinstall can erase the selected VM install disk."
 echo -e "${YW}For best results, use a fresh VM created by script 3 with one OS disk.${CL}"
 echo ""
 
-start_yn=$(timed_yes_no "Start Ubuntu Auto Install ISO Creator?" "y")
+start_yn=$(timed_yes_no "Start Ubuntu Auto Install Seed Creator?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
 # --- 21. VM DETECTION AND SAFE SELECTION ---
@@ -602,7 +605,7 @@ fi
 # --- 26. UBUNTU ISO SELECTION ---
 msg_info "Finding Ubuntu install ISO"
 
-mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" | sort || true)
+mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" ! -iname "*seed*" | sort || true)
 
 if [ "${#ISOS[@]}" -eq 0 ]; then
     msg_error "No ISO files found in /var/lib/vz/template/iso."
@@ -633,14 +636,13 @@ echo -e "${YW}script 4 can attach Ubuntu Pro later, or manually use:${CL} ${GN}s
 echo ""
 
 # --- 28. WORK PATHS ---
-CUSTOM_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
-CUSTOM_ISO_PATH="/var/lib/vz/template/iso/${CUSTOM_ISO_NAME}"
-CUSTOM_ISO_REF="local:iso/${CUSTOM_ISO_NAME}"
-WORK_DIR="/tmp/ubuntu-autoinstall-vm${TARGET_VMID}"
+SEED_ISO_NAME="ubuntu-autoinstall-seed-vm${TARGET_VMID}.iso"
+SEED_ISO_PATH="/var/lib/vz/template/iso/${SEED_ISO_NAME}"
+SEED_ISO_REF="local:iso/${SEED_ISO_NAME}"
+WORK_DIR="/tmp/ubuntu-autoinstall-seed-vm${TARGET_VMID}"
 
 rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR/extract"
-mkdir -p "$WORK_DIR/nocloud"
+mkdir -p "$WORK_DIR"
 
 # --- 29. RANDOM LOCKED PASSWORD HASH ---
 RANDOM_PASSWORD_HASH="$(openssl passwd -6 "$(openssl rand -base64 48)")"
@@ -655,7 +657,7 @@ done <<< "$SSH_KEYS"
 
 # --- 31. NETWORK CONFIG CREATION ---
 if [ "$NETWORK_MODE" == "dhcp" ]; then
-cat > "${WORK_DIR}/nocloud/network-config" <<EOF
+cat > "${WORK_DIR}/network-config" <<EOF
 version: 2
 ethernets:
   vmnic0:
@@ -674,7 +676,7 @@ for dns in "${DNS_ARRAY[@]}"; do
     [ -n "$dns" ] && DNS_YAML+="        - ${dns}"$'\n'
 done
 
-cat > "${WORK_DIR}/nocloud/network-config" <<EOF
+cat > "${WORK_DIR}/network-config" <<EOF
 version: 2
 ethernets:
   vmnic0:
@@ -695,13 +697,13 @@ EOF
 fi
 
 # --- 32. META-DATA CREATION ---
-cat > "${WORK_DIR}/nocloud/meta-data" <<EOF
+cat > "${WORK_DIR}/meta-data" <<EOF
 instance-id: ubuntu-autoinstall-vm${TARGET_VMID}
 local-hostname: ${TARGET_VM_NAME}
 EOF
 
 # --- 33. USER-DATA CREATION ---
-cat > "${WORK_DIR}/nocloud/user-data" <<EOF
+cat > "${WORK_DIR}/user-data" <<EOF
 #cloud-config
 autoinstall:
   version: 1
@@ -800,81 +802,30 @@ EOS
   shutdown: reboot
 EOF
 
-# --- 34. EXTRACT SOURCE ISO ---
-msg_info "Extracting Ubuntu ISO"
+# --- 34. CREATE NOCLOUD SEED ISO ---
+msg_info "Creating NoCloud seed ISO"
 
-xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract / "$WORK_DIR/extract" &>/dev/null
-chmod -R u+w "$WORK_DIR/extract"
+rm -f "$SEED_ISO_PATH"
 
-msg_ok "UBUNTU ISO EXTRACTED"
-
-# --- 35. INJECT NOCLOUD AUTOINSTALL DATA ---
-msg_info "Injecting NoCloud autoinstall data"
-
-mkdir -p "$WORK_DIR/extract/nocloud"
-cp "$WORK_DIR/nocloud/user-data" "$WORK_DIR/extract/nocloud/user-data"
-cp "$WORK_DIR/nocloud/meta-data" "$WORK_DIR/extract/nocloud/meta-data"
-cp "$WORK_DIR/nocloud/network-config" "$WORK_DIR/extract/nocloud/network-config"
-
-msg_ok "NOCLOUD DATA INJECTED"
-
-# --- 36. PATCH BOOT PARAMETERS ---
-msg_info "Patching Ubuntu boot parameters"
-
-BOOT_PARAM='autoinstall ds=nocloud;s=/cdrom/nocloud/'
-
-if [ -f "$WORK_DIR/extract/boot/grub/grub.cfg" ]; then
-    if ! grep -q "ds=nocloud;s=/cdrom/nocloud/" "$WORK_DIR/extract/boot/grub/grub.cfg"; then
-        sed -i "s| ---| ${BOOT_PARAM} ---|g" "$WORK_DIR/extract/boot/grub/grub.cfg"
-        sed -i "s| quiet | quiet ${BOOT_PARAM} |g" "$WORK_DIR/extract/boot/grub/grub.cfg"
-    fi
-fi
-
-if [ -f "$WORK_DIR/extract/isolinux/txt.cfg" ]; then
-    if ! grep -q "ds=nocloud;s=/cdrom/nocloud/" "$WORK_DIR/extract/isolinux/txt.cfg"; then
-        sed -i "s| ---| ${BOOT_PARAM} ---|g" "$WORK_DIR/extract/isolinux/txt.cfg"
-    fi
-fi
-
-msg_ok "BOOT PARAMETERS PATCHED"
-
-# --- 37. REBUILD CUSTOM BOOTABLE ISO ---
-msg_info "Building custom autoinstall Ubuntu ISO"
-
-rm -f "$CUSTOM_ISO_PATH"
-
-xorriso \
-    -as mkisofs \
-    -r \
-    -V "UBUNTU_AUTOINSTALL" \
-    -o "$CUSTOM_ISO_PATH" \
-    -J -joliet-long \
-    -cache-inodes \
-    -isohybrid-gpt-basdat \
-    -eltorito-alt-boot \
-    -e boot/grub/efi.img \
-    -no-emul-boot \
-    "$WORK_DIR/extract" \
-    &>/dev/null || \
-xorriso \
-    -as mkisofs \
-    -r \
-    -V "UBUNTU_AUTOINSTALL" \
-    -o "$CUSTOM_ISO_PATH" \
-    -J -joliet-long \
-    -cache-inodes \
-    "$WORK_DIR/extract" \
+genisoimage \
+    -output "$SEED_ISO_PATH" \
+    -volid cidata \
+    -joliet \
+    -rock \
+    "${WORK_DIR}/user-data" \
+    "${WORK_DIR}/meta-data" \
+    "${WORK_DIR}/network-config" \
     &>/dev/null
 
-if [ ! -s "$CUSTOM_ISO_PATH" ]; then
-    msg_error "Custom autoinstall ISO was not created."
+if [ ! -s "$SEED_ISO_PATH" ]; then
+    msg_error "NoCloud seed ISO was not created."
 fi
 
-msg_ok "CUSTOM AUTOINSTALL ISO CREATED (${CUSTOM_ISO_REF})"
+msg_ok "NOCLOUD SEED ISO CREATED (${SEED_ISO_REF})"
 
-# --- 38. FINAL SUMMARY BEFORE APPLY ---
+# --- 35. FINAL SUMMARY BEFORE APPLY ---
 echo ""
-echo -e "${BL}READY TO ATTACH CUSTOM UBUNTU AUTOINSTALL ISO:${CL}"
+echo -e "${BL}READY TO ATTACH UBUNTU ISO + NOCLOUD SEED ISO:${CL}"
 echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
 echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
 echo -e "VM STATUS: ${GN}${TARGET_VM_STATUS}${CL}"
@@ -889,19 +840,19 @@ if [ "$NETWORK_MODE" == "static" ]; then
     echo -e "DNS: ${GN}${STATIC_DNS}${CL}"
 fi
 
-echo -e "SOURCE ISO: ${GN}${INSTALL_ISO_REF}${CL}"
-echo -e "CUSTOM AUTOINSTALL ISO: ${GN}${CUSTOM_ISO_REF}${CL}"
+echo -e "ORIGINAL UBUNTU ISO: ${GN}${INSTALL_ISO_REF}${CL}"
+echo -e "NOCLOUD SEED ISO: ${GN}${SEED_ISO_REF}${CL}"
 echo ""
-echo -e "${RD}WARNING:${CL} Starting this VM with autoinstall can wipe and install Ubuntu on its VM disk."
+echo -e "${RD}WARNING:${CL} Starting this VM can begin Ubuntu autoinstall and wipe its VM disk."
 echo ""
 
-attach_yn=$(timed_yes_no "Attach custom autoinstall ISO and start VM now?" "y")
+attach_yn=$(timed_yes_no "Attach ISOs and start VM now?" "y")
 [[ "$attach_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 39. VM STOP HANDLING ---
+# --- 36. VM STOP HANDLING ---
 if [ "$TARGET_VM_STATUS" == "running" ]; then
     msg_warn "VM ${TARGET_VMID} is currently running"
-    stop_yn=$(timed_yes_no "Shutdown VM before attaching autoinstall ISO?" "n")
+    stop_yn=$(timed_yes_no "Shutdown VM before attaching install media?" "n")
 
     if [[ "$stop_yn" =~ ^[Yy] ]]; then
         msg_info "Shutting down VM ${TARGET_VMID}"
@@ -912,49 +863,58 @@ if [ "$TARGET_VM_STATUS" == "running" ]; then
     fi
 fi
 
-# --- 40. ATTACH CUSTOM ISO ---
-msg_info "Attaching custom autoinstall ISO"
+# --- 37. ATTACH ORIGINAL UBUNTU ISO ---
+msg_info "Attaching original Ubuntu install ISO"
 
-qm set "$TARGET_VMID" --ide2 "${CUSTOM_ISO_REF},media=cdrom" &>/dev/null
+qm set "$TARGET_VMID" --ide2 "${INSTALL_ISO_REF},media=cdrom" &>/dev/null
 
-msg_ok "CUSTOM AUTOINSTALL ISO ATTACHED"
+msg_ok "ORIGINAL UBUNTU ISO ATTACHED"
 
-# --- 41. BOOT ORDER SETUP ---
+# --- 38. ATTACH NOCLOUD SEED ISO ---
+msg_info "Attaching NoCloud seed ISO"
+
+qm set "$TARGET_VMID" --ide3 "${SEED_ISO_REF},media=cdrom" &>/dev/null
+
+msg_ok "NOCLOUD SEED ISO ATTACHED"
+
+# --- 39. BOOT ORDER SETUP ---
 msg_info "Setting VM boot order"
 
 qm set "$TARGET_VMID" --boot "order=ide2;scsi0" &>/dev/null
 
 msg_ok "VM BOOT ORDER CONFIGURED"
 
-# --- 42. START VM ---
+# --- 40. START VM ---
 msg_info "Starting VM ${TARGET_VMID}"
 
 qm start "$TARGET_VMID" &>/dev/null
 
 msg_ok "VM STARTED"
 
-# --- 43. COMPLETION MARKER ---
+# --- 41. COMPLETION MARKER ---
 cat > "$COMPLETED_MARKER" <<EOF
-Ubuntu Auto Install ISO completed on: $(date)
+Ubuntu Auto Install Seed completed on: $(date)
 VMID: $TARGET_VMID
 VM Name: $TARGET_VM_NAME
 VM MAC: $TARGET_VM_MAC
 Username: $TARGET_USERNAME
 Timezone: $TARGET_TIMEZONE
 Network Mode: $NETWORK_MODE
-Source ISO: $INSTALL_ISO_REF
-Custom ISO: $CUSTOM_ISO_REF
+Original ISO: $INSTALL_ISO_REF
+Seed ISO: $SEED_ISO_REF
 EOF
 
-# --- 44. FINAL NOTES ---
+# --- 42. FINAL NOTES ---
 echo ""
 echo -e "${GN}FINISHED!${CL}"
 echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
 echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
 echo -e "VM MAC: ${GN}${TARGET_VM_MAC}${CL}"
-echo -e "CUSTOM AUTOINSTALL ISO: ${GN}${CUSTOM_ISO_REF}${CL}"
+echo -e "ORIGINAL UBUNTU ISO: ${GN}${INSTALL_ISO_REF}${CL}"
+echo -e "NOCLOUD SEED ISO: ${GN}${SEED_ISO_REF}${CL}"
 echo ""
-echo -e "${YW}Watch the Proxmox console now. Ubuntu should boot directly into autoinstall without manual GRUB editing.${CL}"
+echo -e "${YW}Watch the Proxmox console now.${CL}"
+echo -e "${YW}The original Ubuntu ISO is untouched. The NoCloud seed ISO is attached separately as cidata.${CL}"
 echo -e "${YW}After Ubuntu finishes and reboots, SSH in as:${CL} ${GN}${TARGET_USERNAME}${CL}"
 echo -e "${YW}Then run script 4 inside the Ubuntu VM.${CL}"
 echo ""
