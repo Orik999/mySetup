@@ -51,11 +51,15 @@ WORK_DIR=""
 
 SSH_KEYS=""
 KEY_SOURCE=""
+SSH_KEYS_YAML=""
+VERIFIER_B64=""
+RANDOM_PASSWORD_HASH=""
 
 NETWORK_MODE="dhcp"
 STATIC_IP_CIDR=""
 STATIC_GATEWAY=""
 STATIC_DNS="1.1.1.1,1.0.0.1"
+NETWORK_AUTOINSTALL_YAML=""
 
 BOOT_PARAM='autoinstall ds=nocloud\;s=/cdrom/nocloud/ subiquity.autoinstallpath=cdrom/autoinstall.yaml'
 
@@ -581,54 +585,61 @@ function patch_grub_file() {
     rm -f "$temp_file"
 }
 
-# --- 21. AUTOINSTALL DIRECT CONFIG WRITER ---
-# Writes direct Subiquity autoinstall YAML for /autoinstall.yaml on the generated ISO.
-# This file intentionally does not include #cloud-config.
-function write_direct_autoinstall_yaml() {
-    local file="$1"
+# --- 21. NETWORK AUTOINSTALL YAML BUILDER ---
+# Creates a network: YAML section for the direct autoinstall file.
+# DHCP is recommended, but static IP is supported.
+function build_network_autoinstall_yaml() {
+    if [ "$NETWORK_MODE" == "dhcp" ]; then
+        cat <<EOF
+network:
+  version: 2
+  ethernets:
+    vmnic0:
+      match:
+        macaddress: "${TARGET_VM_MAC}"
+      set-name: ens18
+      dhcp4: true
+      dhcp6: false
+EOF
+    else
+        local dns_yaml=""
+        local dns=""
+        IFS=',' read -ra DNS_ARRAY <<< "$STATIC_DNS"
 
-    cat > "$file" <<EOF
-version: 1
-refresh-installer:
-  update: false
-locale: ${TARGET_LOCALE}
-keyboard:
-  layout: ${TARGET_KEYBOARD_LAYOUT}
-  variant: "${TARGET_KEYBOARD_VARIANT}"
-timezone: ${TARGET_TIMEZONE}
-identity:
-  hostname: ${TARGET_HOSTNAME}
-  username: ${TARGET_USERNAME}
-  password: "${RANDOM_PASSWORD_HASH}"
-ssh:
-  install-server: true
-  allow-pw: false
-  authorized-keys:
-${SSH_KEYS_YAML}
-apt:
-  preserve_sources_list: false
-  primary:
-    - arches: [default]
-      uri: http://archive.ubuntu.com/ubuntu
-storage:
-  layout:
-    name: lvm
-late-commands:
-  - curtin in-target --target=/target -- usermod -aG sudo ${TARGET_USERNAME}
-  - curtin in-target --target=/target -- bash -c 'echo "${TARGET_USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-${TARGET_USERNAME}-nopasswd'
-  - curtin in-target --target=/target -- chmod 0440 /etc/sudoers.d/90-${TARGET_USERNAME}-nopasswd
-  - curtin in-target --target=/target -- bash -c 'apt-get update || true'
-  - curtin in-target --target=/target -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent curl ca-certificates || true'
-  - curtin in-target --target=/target -- systemctl enable qemu-guest-agent || true
-  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config || true'
-  - curtin in-target --target=/target -- bash -c 'grep -q "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication no" >> /etc/ssh/sshd_config'
-  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config || true'
-  - curtin in-target --target=/target -- bash -c 'grep -q "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin no" >> /etc/ssh/sshd_config'
-  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*AddressFamily.*/AddressFamily inet/" /etc/ssh/sshd_config || true'
-  - curtin in-target --target=/target -- bash -c 'grep -q "^AddressFamily" /etc/ssh/sshd_config || echo "AddressFamily inet" >> /etc/ssh/sshd_config'
-  - curtin in-target --target=/target -- bash -c 'date > /var/log/ubuntu-autoinstall-completed'
-  - |
-    cat > /target/etc/profile.d/ubuntu-autoinstall-verify-display.sh <<'EOS'
+        for dns in "${DNS_ARRAY[@]}"; do
+            dns="$(echo "$dns" | xargs)"
+            [ -n "$dns" ] && dns_yaml+="          - ${dns}"$'\n'
+        done
+
+        cat <<EOF
+network:
+  version: 2
+  ethernets:
+    vmnic0:
+      match:
+        macaddress: "${TARGET_VM_MAC}"
+      set-name: ens18
+      dhcp4: false
+      dhcp6: false
+      addresses:
+        - ${STATIC_IP_CIDR}
+      routes:
+        - to: default
+          via: ${STATIC_GATEWAY}
+      nameservers:
+        addresses:
+${dns_yaml}
+EOF
+    fi
+}
+
+# --- 22. LOGIN VERIFIER BUILDER ---
+# Builds the first-login verification helper separately and encodes it as base64.
+# This avoids embedding a large shell script directly inside YAML, which caused YAML parse errors.
+function build_verifier_base64() {
+    local verifier_file="$1"
+
+    cat > "$verifier_file" <<EOF
 #!/usr/bin/env bash
 
 VERIFY_MARKER="/home/${TARGET_USERNAME}/.ubuntu-autoinstall-verify-displayed"
@@ -680,13 +691,66 @@ echo ""
 
 touch "\$VERIFY_MARKER" 2>/dev/null || true
 rm -f /etc/profile.d/ubuntu-autoinstall-verify-display.sh 2>/dev/null || true
-EOS
-  - chmod +x /target/etc/profile.d/ubuntu-autoinstall-verify-display.sh
+EOF
+
+    base64 -w0 "$verifier_file"
+}
+
+# --- 23. AUTOINSTALL DIRECT CONFIG WRITER ---
+# Writes direct Subiquity autoinstall YAML for /autoinstall.yaml on the generated ISO.
+# This file intentionally does not include #cloud-config.
+# The login verifier is injected as base64 to avoid YAML multiline indentation errors.
+function write_direct_autoinstall_yaml() {
+    local file="$1"
+
+    cat > "$file" <<EOF
+version: 1
+refresh-installer:
+  update: false
+locale: ${TARGET_LOCALE}
+keyboard:
+  layout: ${TARGET_KEYBOARD_LAYOUT}
+  variant: "${TARGET_KEYBOARD_VARIANT}"
+timezone: ${TARGET_TIMEZONE}
+identity:
+  hostname: ${TARGET_HOSTNAME}
+  username: ${TARGET_USERNAME}
+  password: "${RANDOM_PASSWORD_HASH}"
+ssh:
+  install-server: true
+  allow-pw: false
+  authorized-keys:
+${SSH_KEYS_YAML}
+apt:
+  preserve_sources_list: false
+  primary:
+    - arches: [default]
+      uri: http://archive.ubuntu.com/ubuntu
+$(build_network_autoinstall_yaml)
+storage:
+  layout:
+    name: lvm
+late-commands:
+  - curtin in-target --target=/target -- usermod -aG sudo ${TARGET_USERNAME}
+  - curtin in-target --target=/target -- bash -c 'echo "${TARGET_USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-${TARGET_USERNAME}-nopasswd'
+  - curtin in-target --target=/target -- chmod 0440 /etc/sudoers.d/90-${TARGET_USERNAME}-nopasswd
+  - curtin in-target --target=/target -- bash -c 'apt-get update || true'
+  - curtin in-target --target=/target -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent curl ca-certificates || true'
+  - curtin in-target --target=/target -- systemctl enable qemu-guest-agent || true
+  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config || true'
+  - curtin in-target --target=/target -- bash -c 'grep -q "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication no" >> /etc/ssh/sshd_config'
+  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config || true'
+  - curtin in-target --target=/target -- bash -c 'grep -q "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin no" >> /etc/ssh/sshd_config'
+  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*AddressFamily.*/AddressFamily inet/" /etc/ssh/sshd_config || true'
+  - curtin in-target --target=/target -- bash -c 'grep -q "^AddressFamily" /etc/ssh/sshd_config || echo "AddressFamily inet" >> /etc/ssh/sshd_config'
+  - curtin in-target --target=/target -- bash -c 'date > /var/log/ubuntu-autoinstall-completed'
+  - curtin in-target --target=/target -- bash -c 'echo "${VERIFIER_B64}" | base64 -d > /etc/profile.d/ubuntu-autoinstall-verify-display.sh'
+  - curtin in-target --target=/target -- chmod +x /etc/profile.d/ubuntu-autoinstall-verify-display.sh
 shutdown: reboot
 EOF
 }
 
-# --- 22. CLOUD-CONFIG USER-DATA WRITER ---
+# --- 24. CLOUD-CONFIG USER-DATA WRITER ---
 # Wraps direct autoinstall YAML under #cloud-config/autoinstall for NoCloud datasource fallback.
 function write_cloud_config_user_data() {
     local source_file="$1"
@@ -703,7 +767,7 @@ function write_cloud_config_user_data() {
 #  PHASE 1: SAFE AUDIT + USER INPUT COLLECTION ONLY
 # =========================================================
 
-# --- 23. PROXMOX VALIDATION ---
+# --- 25. PROXMOX VALIDATION ---
 # Confirms the script is being run on Proxmox VE 9 or newer.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -715,7 +779,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 24. DEPENDENCY CHECK ---
+# --- 26. DEPENDENCY CHECK ---
 # Installs tools required to create a bootable generated ISO copy.
 msg_info "Checking required tools"
 
@@ -733,7 +797,7 @@ command -v openssl >/dev/null 2>&1 || msg_error "openssl command not found."
 
 msg_ok "REQUIRED TOOLS FOUND"
 
-# --- 25. START WARNING ---
+# --- 27. START WARNING ---
 # Explains the purpose and destructive nature of Ubuntu autoinstall.
 echo -e "${YW}This script creates a generated Ubuntu 26.04 autoinstall ISO copy.${CL}"
 echo -e "${YW}The original Ubuntu ISO remains untouched.${CL}"
@@ -746,7 +810,7 @@ echo ""
 start_yn=$(timed_yes_no "Start Ubuntu Auto Install ISO Creator?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 26. VM DETECTION AND SAFE SELECTION ---
+# --- 28. VM DETECTION AND SAFE SELECTION ---
 # Detects existing VMs and lets the user select the target VM.
 msg_info "Detecting Proxmox VMs"
 
@@ -787,7 +851,7 @@ TARGET_VM_STATUS="$(echo "${VM_LINES[$((VM_INDEX-1))]}" | cut -d'|' -f3)"
 
 qm config "$TARGET_VMID" >/dev/null 2>&1 || msg_error "Selected VM ${TARGET_VMID} does not exist."
 
-# --- 27. VM MAC DETECTION ---
+# --- 29. VM MAC DETECTION ---
 # Reads VM MAC address from net0 so DHCP router reservation can stay stable.
 msg_info "Detecting VM MAC address"
 
@@ -799,7 +863,7 @@ fi
 
 msg_ok "VM MAC DETECTED (${TARGET_VM_MAC})"
 
-# --- 28. USERNAME / TIMEZONE / LOCALE INPUTS ---
+# --- 30. USERNAME / TIMEZONE / LOCALE INPUTS ---
 # Collects Ubuntu identity and UK-friendly locale defaults.
 TARGET_USERNAME=$(timed_text_input "Enter Ubuntu admin username" "$DEFAULT_USERNAME")
 TARGET_TIMEZONE=$(timed_text_input "Enter timezone" "$DEFAULT_TIMEZONE")
@@ -827,7 +891,7 @@ esac
 
 TARGET_HOSTNAME="$(safe_hostname "$TARGET_VM_NAME")"
 
-# --- 29. SSH KEY DETECTION ---
+# --- 31. SSH KEY DETECTION ---
 # Detects SSH keys and refuses to continue if none are found.
 msg_info "Detecting SSH authorized keys"
 
@@ -862,7 +926,7 @@ fi
 
 msg_ok "SSH KEYS DETECTED (${KEY_SOURCE})"
 
-# --- 30. NETWORK MODE ---
+# --- 32. NETWORK MODE ---
 # Recommends DHCP plus router reservation by VM MAC, but supports static IP.
 echo ""
 echo -e "${BL}NETWORK CONFIGURATION:${CL}"
@@ -880,7 +944,7 @@ else
     NETWORK_MODE="dhcp"
 fi
 
-# --- 31. UBUNTU ISO SELECTION ---
+# --- 33. UBUNTU ISO SELECTION ---
 # Selects the original Ubuntu ISO. It remains untouched.
 msg_info "Finding Ubuntu install ISO"
 
@@ -907,7 +971,7 @@ ISO_INDEX=$(timed_number_input "Select Ubuntu ISO number" "$DEFAULT_ISO_INDEX" "
 INSTALL_ISO_PATH="${ISOS[$((ISO_INDEX-1))]}"
 INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
 
-# --- 32. UBUNTU PRO NOTE ---
+# --- 34. UBUNTU PRO NOTE ---
 # Keeps Ubuntu Pro handling in script 4.
 echo ""
 echo -e "${BL}UBUNTU PRO:${CL}"
@@ -915,7 +979,7 @@ echo -e "${YW}Ubuntu Pro is intentionally not attached by this script.${CL}"
 echo -e "${YW}script 4 can attach Ubuntu Pro later, or manually use:${CL} ${GN}sudo pro attach <token>${CL}"
 echo ""
 
-# --- 33. GENERATED ISO PATHS ---
+# --- 35. GENERATED ISO PATHS ---
 # Prepares paths for generated autoinstall ISO copy and temporary files.
 AUTOINSTALL_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
 AUTOINSTALL_ISO_PATH="/var/lib/vz/template/iso/${AUTOINSTALL_ISO_NAME}"
@@ -927,12 +991,12 @@ mkdir -p "$WORK_DIR/nocloud"
 mkdir -p "$WORK_DIR/grub"
 mkdir -p "$WORK_DIR/verify"
 
-# --- 34. RANDOM PASSWORD HASH ---
+# --- 36. RANDOM PASSWORD HASH ---
 # Autoinstall requires a password hash. The password is random and never displayed.
 # SSH password login is disabled. Sudo is configured as NOPASSWD for automation/script 4 compatibility.
 RANDOM_PASSWORD_HASH="$(openssl passwd -6 "$(openssl rand -base64 48)")"
 
-# --- 35. SSH KEY YAML BLOCK ---
+# --- 37. SSH KEY YAML BLOCK ---
 # Converts detected SSH public keys into YAML list entries.
 SSH_KEYS_YAML=""
 
@@ -941,8 +1005,8 @@ while IFS= read -r keyline; do
     SSH_KEYS_YAML+="      - $(yaml_quote "$keyline")"$'\n'
 done <<< "$SSH_KEYS"
 
-# --- 36. NETWORK CONFIG CREATION ---
-# Creates cloud-init network-config matching the VM MAC address.
+# --- 38. NETWORK CONFIG CREATION ---
+# Creates cloud-init network-config matching the VM MAC address for NoCloud fallback.
 if [ "$NETWORK_MODE" == "dhcp" ]; then
 cat > "${WORK_DIR}/nocloud/network-config" <<EOF
 version: 2
@@ -983,19 +1047,29 @@ ${DNS_YAML}
 EOF
 fi
 
-# --- 37. META-DATA CREATION ---
+# --- 39. META-DATA CREATION ---
 # Creates NoCloud meta-data with stable instance ID and hostname.
 cat > "${WORK_DIR}/nocloud/meta-data" <<EOF
 instance-id: ubuntu-autoinstall-vm${TARGET_VMID}
 local-hostname: ${TARGET_HOSTNAME}
 EOF
 
-# --- 38. AUTOINSTALL CONFIG CREATION ---
-# Creates direct /autoinstall.yaml and NoCloud /nocloud/user-data versions.
+# --- 40. AUTOINSTALL CONFIG CREATION ---
+# Creates verifier helper, direct /autoinstall.yaml and NoCloud /nocloud/user-data versions.
+msg_info "Creating Ubuntu autoinstall configuration"
+
+VERIFIER_B64="$(build_verifier_base64 "${WORK_DIR}/ubuntu-autoinstall-verify-display.sh")"
+
 write_direct_autoinstall_yaml "${WORK_DIR}/autoinstall.yaml"
 write_cloud_config_user_data "${WORK_DIR}/autoinstall.yaml" "${WORK_DIR}/nocloud/user-data"
 
-# --- 39. EXTRACT GRUB CONFIGS FROM ORIGINAL ISO ---
+if grep -q "^#!/usr/bin/env bash" "${WORK_DIR}/autoinstall.yaml"; then
+    msg_error "Generated autoinstall.yaml contains an unindented shell script and would fail YAML parsing."
+fi
+
+msg_ok "UBUNTU AUTOINSTALL CONFIGURATION CREATED"
+
+# --- 41. EXTRACT GRUB CONFIGS FROM ORIGINAL ISO ---
 # Extracts only boot config files. The original ISO remains untouched.
 msg_info "Extracting Ubuntu boot configuration"
 
@@ -1006,7 +1080,7 @@ xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract /boot/grub/loopback.cfg 
 
 msg_ok "UBUNTU BOOT CONFIGURATION EXTRACTED"
 
-# --- 40. PATCH BOOT PARAMETERS ---
+# --- 42. PATCH BOOT PARAMETERS ---
 # Adds autoinstall path, NoCloud path, clear menu title, and short timeout.
 msg_info "Patching Ubuntu autoinstall boot parameters"
 
@@ -1027,7 +1101,7 @@ fi
 
 msg_ok "AUTOINSTALL BOOT PARAMETERS PATCHED"
 
-# --- 41. BUILD GENERATED AUTOINSTALL ISO COPY ---
+# --- 43. BUILD GENERATED AUTOINSTALL ISO COPY ---
 # Uses xorriso replay mode to preserve the original Ubuntu ISO boot structure.
 # Maps patched GRUB files, direct /autoinstall.yaml, and /nocloud data into the generated ISO copy.
 msg_info "Building generated Ubuntu autoinstall ISO copy"
@@ -1057,7 +1131,7 @@ fi
 
 msg_ok "GENERATED AUTOINSTALL ISO CREATED (${AUTOINSTALL_ISO_REF})"
 
-# --- 42. GENERATED ISO VERIFICATION ---
+# --- 44. GENERATED ISO VERIFICATION ---
 # Verifies the generated ISO contains the patched boot line and autoinstall files before starting the VM.
 msg_info "Verifying generated autoinstall ISO"
 
@@ -1089,13 +1163,17 @@ if ! grep -q "^version: 1" "$WORK_DIR/verify/autoinstall.yaml"; then
     msg_error "Generated ISO /autoinstall.yaml is not valid direct autoinstall format."
 fi
 
+if grep -q "^#!/usr/bin/env bash" "$WORK_DIR/verify/autoinstall.yaml"; then
+    msg_error "Generated ISO /autoinstall.yaml contains unindented shell script content."
+fi
+
 if ! grep -q "^#cloud-config" "$WORK_DIR/verify/user-data"; then
     msg_error "Generated ISO /nocloud/user-data is missing #cloud-config header."
 fi
 
 msg_ok "GENERATED AUTOINSTALL ISO VERIFIED"
 
-# --- 43. FINAL SUMMARY BEFORE APPLY ---
+# --- 45. FINAL SUMMARY BEFORE APPLY ---
 # Shows all collected settings before modifying the VM.
 echo ""
 echo -e "${BL}READY TO ATTACH GENERATED UBUNTU AUTOINSTALL ISO:${CL}"
@@ -1130,7 +1208,7 @@ attach_yn=$(timed_yes_no "Attach generated autoinstall ISO and start VM now?" "y
 #  PHASE 2: APPLY ONLY AFTER FINAL CONFIRMATION
 # =========================================================
 
-# --- 44. VM STOP HANDLING ---
+# --- 46. VM STOP HANDLING ---
 # Ensures the VM is stopped before attaching boot media.
 if [ "$TARGET_VM_STATUS" == "running" ]; then
     msg_warn "VM ${TARGET_VMID} is currently running"
@@ -1145,7 +1223,7 @@ if [ "$TARGET_VM_STATUS" == "running" ]; then
     fi
 fi
 
-# --- 45. ATTACH GENERATED AUTOINSTALL ISO ---
+# --- 47. ATTACH GENERATED AUTOINSTALL ISO ---
 # Replaces the install CD-ROM with the generated autoinstall ISO copy.
 msg_info "Attaching generated Ubuntu autoinstall ISO"
 
@@ -1153,7 +1231,7 @@ qm set "$TARGET_VMID" --ide2 "${AUTOINSTALL_ISO_REF},media=cdrom" &>/dev/null
 
 msg_ok "GENERATED UBUNTU AUTOINSTALL ISO ATTACHED"
 
-# --- 46. BOOT ORDER SETUP ---
+# --- 48. BOOT ORDER SETUP ---
 # Boots the generated ISO first, then the OS disk.
 msg_info "Setting VM boot order"
 
@@ -1161,7 +1239,7 @@ qm set "$TARGET_VMID" --boot "order=ide2;scsi0" &>/dev/null
 
 msg_ok "VM BOOT ORDER CONFIGURED"
 
-# --- 47. START VM ---
+# --- 49. START VM ---
 # Starts the VM so Ubuntu autoinstall can begin.
 msg_info "Starting VM ${TARGET_VMID}"
 
@@ -1169,7 +1247,7 @@ qm start "$TARGET_VMID" &>/dev/null
 
 msg_ok "VM STARTED"
 
-# --- 48. COMPLETION MARKER ---
+# --- 50. COMPLETION MARKER ---
 # Records what this script generated and attached.
 cat > "$COMPLETED_MARKER" <<EOF
 Ubuntu Auto Install ISO completed on: $(date)
@@ -1187,7 +1265,7 @@ Source ISO: $INSTALL_ISO_REF
 Generated ISO: $AUTOINSTALL_ISO_REF
 EOF
 
-# --- 49. FINAL NOTES ---
+# --- 51. FINAL NOTES ---
 # Shows next steps.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
