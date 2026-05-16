@@ -76,27 +76,48 @@ fi
 clear
 header_info
 
-# --- 7. TTY PRINT HELPERS ---
+# =========================================================
+#  INPUT HELPERS - COPIED FROM WORKING SCRIPT 3 LOGIC
+# =========================================================
+
+# --- 7. TTY PRINT HELPER ---
 function tty_print() {
-    if [ -w /dev/tty ]; then echo -ne "$*" > /dev/tty; else echo -ne "$*" >&2; fi
+    if [ -w /dev/tty ]; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
 }
 
+# --- 8. TTY PRINTLN HELPER ---
 function tty_println() {
-    if [ -w /dev/tty ]; then echo -e "$*" > /dev/tty; else echo -e "$*" >&2; fi
+    if [ -w /dev/tty ]; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
 }
 
-# --- 8. YES/NO HELPERS ---
+# --- 9. YES/NO LABEL HELPER ---
 function yes_no_label() {
-    [[ "$1" =~ ^[Yy]$ ]] && echo "yes" || echo "no"
+    local value="$1"
+    if [[ "$value" =~ ^[Yy]$ ]]; then
+        echo "yes"
+    else
+        echo "no"
+    fi
 }
 
+# --- 10. BLOCKING YES/NO HELPER ---
 function tty_read_yes_no_blocking() {
     local prompt="$1"
     local default="$2"
     local default_label="Y/n"
     local key=""
 
-    [[ "$default" =~ ^[Nn]$ ]] && default_label="y/N"
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
+    fi
 
     while true; do
         tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
@@ -119,17 +140,22 @@ function tty_read_yes_no_blocking() {
     done
 }
 
+# --- 11. TIMED YES/NO PROMPT HELPER ---
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
     local answer=""
     local key=""
     local default_label="Y/n"
+    local final_label=""
     local deadline=""
     local now=""
     local remaining=""
 
-    [[ "$default" =~ ^[Nn]$ ]] && default_label="y/N"
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
+    fi
+
     deadline=$(( $(date +%s) + T ))
 
     while true; do
@@ -173,40 +199,27 @@ function timed_yes_no() {
     done
 
     [ -z "$answer" ] && answer="$default"
+    final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} $(yes_no_label "$answer")${CL}"
+    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
 
     echo "$answer"
 }
 
-# --- 9. TEXT / NUMBER HELPERS ---
-function timed_text_input() {
-    local prompt="$1"
-    local default="$2"
-    local answer=""
-
-    tty_print "${YW}${prompt} [default: ${default}] (${T}s): ${CL}"
-
-    if [ -r /dev/tty ]; then
-        IFS= read -r -t "$T" answer < /dev/tty || true
-    else
-        IFS= read -r -t "$T" answer || true
-    fi
-
-    [ -z "$answer" ] && answer="$default"
-
-    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    echo "$answer"
-}
-
+# --- 12. NUMERIC VALIDATION HELPER ---
 function validate_number() {
     local value="$1"
     local min_value="${2:-1}"
     local max_value="${3:-}"
 
-    [[ "$value" =~ ^[0-9]+$ ]] || return 1
-    [ "$value" -ge "$min_value" ] || return 1
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+
+    if [ "$value" -lt "$min_value" ]; then
+        return 1
+    fi
 
     if [ -n "$max_value" ] && [ "$value" -gt "$max_value" ]; then
         return 1
@@ -215,26 +228,224 @@ function validate_number() {
     return 0
 }
 
+# --- 13. NUMERIC ERROR HELPER ---
+function print_number_error() {
+    local min_value="${1:-1}"
+    local max_value="${2:-}"
+
+    if [ -n "$max_value" ]; then
+        tty_println "${RD}Invalid input. Enter numbers only between ${min_value} and ${max_value}.${CL}"
+    else
+        tty_println "${RD}Invalid input. Enter numbers only. Minimum value is ${min_value}.${CL}"
+    fi
+}
+
+# --- 14. EDITABLE INPUT LOOP HELPER ---
+function editable_input_loop() {
+    local prompt="$1"
+    local default="$2"
+    local numeric_only="${3:-no}"
+    local min_value="${4:-1}"
+    local max_value="${5:-}"
+    local initial_value="${6:-}"
+    local answer="$initial_value"
+    local key=""
+
+    while true; do
+        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -rsn1 key < /dev/tty || true
+        else
+            IFS= read -rsn1 key || true
+        fi
+
+        case "$key" in
+            "")
+                [ -z "$answer" ] && answer="$default"
+
+                if [ "$numeric_only" == "yes" ]; then
+                    if validate_number "$answer" "$min_value" "$max_value"; then
+                        tty_print "${BFR}"
+                        echo "$answer"
+                        return 0
+                    fi
+
+                    tty_print "${BFR}"
+                    print_number_error "$min_value" "$max_value"
+                    answer=""
+                else
+                    tty_print "${BFR}"
+                    echo "$answer"
+                    return 0
+                fi
+                ;;
+            $'\177'|$'\b')
+                answer="${answer%?}"
+                ;;
+            *)
+                if [ "$numeric_only" == "yes" ]; then
+                    if [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer+="$key"
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer=""
+                    fi
+                else
+                    answer+="$key"
+                fi
+                ;;
+        esac
+    done
+}
+
+# --- 15. TIMED TEXT INPUT HELPER ---
+function timed_text_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
+
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
+    [ -z "$answer" ] && answer="$default"
+
+    tty_print "${BFR}"
+    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+
+    echo "$answer"
+}
+
+# --- 16. TIMED NUMERIC INPUT HELPER ---
 function timed_number_input() {
     local prompt="$1"
     local default="$2"
     local min_value="${3:-1}"
     local max_value="${4:-}"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
     while true; do
-        answer="$(timed_text_input "$prompt" "$default")"
+        deadline=$(( $(date +%s) + T ))
+
+        while true; do
+            now=$(date +%s)
+            remaining=$(( deadline - now ))
+
+            if [ "$remaining" -le 0 ]; then
+                answer="$default"
+                break
+            fi
+
+            tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+            if [ -r /dev/tty ]; then
+                if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                    if [[ "$key" == " " ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+                        break
+                    elif [[ -z "$key" ]]; then
+                        answer="$default"
+                        break
+                    elif [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
+                        break
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer="INVALID"
+                        break
+                    fi
+                fi
+            else
+                if IFS= read -rsn1 -t 1 key; then
+                    if [[ "$key" == " " ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+                        break
+                    elif [[ -z "$key" ]]; then
+                        answer="$default"
+                        break
+                    elif [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
+                        break
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer="INVALID"
+                        break
+                    fi
+                fi
+            fi
+        done
+
+        if [ "$answer" == "INVALID" ]; then
+            continue
+        fi
 
         if validate_number "$answer" "$min_value" "$max_value"; then
+            tty_print "${BFR}"
+            tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
             echo "$answer"
             return 0
         fi
 
-        tty_println "${RD}Invalid input. Enter a valid number.${CL}"
+        tty_print "${BFR}"
+        print_number_error "$min_value" "$max_value"
     done
 }
 
-# --- 10. YAML QUOTE HELPER ---
+# =========================================================
+#  SCRIPT HELPERS
+# =========================================================
+
+# --- 17. YAML QUOTE HELPER ---
 function yaml_quote() {
     local value="$1"
     value="${value//\\/\\\\}"
@@ -242,7 +453,7 @@ function yaml_quote() {
     printf '"%s"' "$value"
 }
 
-# --- 11. PROXMOX VALIDATION ---
+# --- 18. PROXMOX VALIDATION ---
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
 fi
@@ -253,7 +464,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 12. DEPENDENCY CHECK ---
+# --- 19. DEPENDENCY CHECK ---
 msg_info "Checking required tools"
 
 for pkg in xorriso rsync p7zip-full; do
@@ -271,7 +482,7 @@ command -v openssl >/dev/null 2>&1 || msg_error "openssl command not found."
 
 msg_ok "REQUIRED TOOLS FOUND"
 
-# --- 13. START WARNING ---
+# --- 20. START WARNING ---
 echo -e "${YW}This script creates a custom Ubuntu 26.04 autoinstall ISO with boot parameters already injected.${CL}"
 echo -e "${YW}Written for: ${GN}${DEFAULT_ISO_NAME}${CL}"
 echo ""
@@ -282,7 +493,7 @@ echo ""
 start_yn=$(timed_yes_no "Start Ubuntu Auto Install ISO Creator?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 14. VM DETECTION AND SAFE SELECTION ---
+# --- 21. VM DETECTION AND SAFE SELECTION ---
 msg_info "Detecting Proxmox VMs"
 
 mapfile -t VM_LINES < <(qm list | awk 'NR>1 {print $1 "|" $2 "|" $3}')
@@ -322,7 +533,7 @@ TARGET_VM_STATUS="$(echo "${VM_LINES[$((VM_INDEX-1))]}" | cut -d'|' -f3)"
 
 qm config "$TARGET_VMID" >/dev/null 2>&1 || msg_error "Selected VM ${TARGET_VMID} does not exist."
 
-# --- 15. VM MAC DETECTION ---
+# --- 22. VM MAC DETECTION ---
 msg_info "Detecting VM MAC address"
 
 TARGET_VM_MAC="$(qm config "$TARGET_VMID" | awk -F'[=,]' '/^net0:/ {print $2; exit}' | tr '[:lower:]' '[:upper:]')"
@@ -333,11 +544,11 @@ fi
 
 msg_ok "VM MAC DETECTED (${TARGET_VM_MAC})"
 
-# --- 16. USERNAME AND TIMEZONE ---
+# --- 23. USERNAME AND TIMEZONE ---
 TARGET_USERNAME=$(timed_text_input "Enter Ubuntu admin username" "$DEFAULT_USERNAME")
 TARGET_TIMEZONE=$(timed_text_input "Enter timezone" "$DEFAULT_TIMEZONE")
 
-# --- 17. SSH KEY DETECTION ---
+# --- 24. SSH KEY DETECTION ---
 msg_info "Detecting SSH authorized keys"
 
 KEY_SOURCE=""
@@ -371,7 +582,7 @@ fi
 
 msg_ok "SSH KEYS DETECTED (${KEY_SOURCE})"
 
-# --- 18. NETWORK MODE ---
+# --- 25. NETWORK MODE ---
 echo ""
 echo -e "${BL}NETWORK CONFIGURATION:${CL}"
 echo -e "${YW}Recommended: use DHCP here and reserve static IP in your router using this MAC:${CL} ${GN}${TARGET_VM_MAC}${CL}"
@@ -388,7 +599,7 @@ else
     NETWORK_MODE="dhcp"
 fi
 
-# --- 19. UBUNTU ISO SELECTION ---
+# --- 26. UBUNTU ISO SELECTION ---
 msg_info "Finding Ubuntu install ISO"
 
 mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" | sort || true)
@@ -414,14 +625,14 @@ ISO_INDEX=$(timed_number_input "Select Ubuntu ISO number" "$DEFAULT_ISO_INDEX" "
 INSTALL_ISO_PATH="${ISOS[$((ISO_INDEX-1))]}"
 INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
 
-# --- 20. UBUNTU PRO NOTE ---
+# --- 27. UBUNTU PRO NOTE ---
 echo ""
 echo -e "${BL}UBUNTU PRO:${CL}"
 echo -e "${YW}Ubuntu Pro is intentionally not attached by this script.${CL}"
 echo -e "${YW}script 4 can attach Ubuntu Pro later, or manually use:${CL} ${GN}sudo pro attach <token>${CL}"
 echo ""
 
-# --- 21. WORK PATHS ---
+# --- 28. WORK PATHS ---
 CUSTOM_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
 CUSTOM_ISO_PATH="/var/lib/vz/template/iso/${CUSTOM_ISO_NAME}"
 CUSTOM_ISO_REF="local:iso/${CUSTOM_ISO_NAME}"
@@ -431,10 +642,10 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/extract"
 mkdir -p "$WORK_DIR/nocloud"
 
-# --- 22. RANDOM LOCKED PASSWORD HASH ---
+# --- 29. RANDOM LOCKED PASSWORD HASH ---
 RANDOM_PASSWORD_HASH="$(openssl passwd -6 "$(openssl rand -base64 48)")"
 
-# --- 23. SSH KEY YAML BLOCK ---
+# --- 30. SSH KEY YAML BLOCK ---
 SSH_KEYS_YAML=""
 
 while IFS= read -r keyline; do
@@ -442,7 +653,7 @@ while IFS= read -r keyline; do
     SSH_KEYS_YAML+="      - $(yaml_quote "$keyline")"$'\n'
 done <<< "$SSH_KEYS"
 
-# --- 24. NETWORK CONFIG CREATION ---
+# --- 31. NETWORK CONFIG CREATION ---
 if [ "$NETWORK_MODE" == "dhcp" ]; then
 cat > "${WORK_DIR}/nocloud/network-config" <<EOF
 version: 2
@@ -483,13 +694,13 @@ ${DNS_YAML}
 EOF
 fi
 
-# --- 25. META-DATA CREATION ---
+# --- 32. META-DATA CREATION ---
 cat > "${WORK_DIR}/nocloud/meta-data" <<EOF
 instance-id: ubuntu-autoinstall-vm${TARGET_VMID}
 local-hostname: ${TARGET_VM_NAME}
 EOF
 
-# --- 26. USER-DATA CREATION ---
+# --- 33. USER-DATA CREATION ---
 cat > "${WORK_DIR}/nocloud/user-data" <<EOF
 #cloud-config
 autoinstall:
@@ -589,7 +800,7 @@ EOS
   shutdown: reboot
 EOF
 
-# --- 27. EXTRACT SOURCE ISO ---
+# --- 34. EXTRACT SOURCE ISO ---
 msg_info "Extracting Ubuntu ISO"
 
 xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract / "$WORK_DIR/extract" &>/dev/null
@@ -597,7 +808,7 @@ chmod -R u+w "$WORK_DIR/extract"
 
 msg_ok "UBUNTU ISO EXTRACTED"
 
-# --- 28. INJECT NOCLOUD AUTOINSTALL DATA ---
+# --- 35. INJECT NOCLOUD AUTOINSTALL DATA ---
 msg_info "Injecting NoCloud autoinstall data"
 
 mkdir -p "$WORK_DIR/extract/nocloud"
@@ -607,7 +818,7 @@ cp "$WORK_DIR/nocloud/network-config" "$WORK_DIR/extract/nocloud/network-config"
 
 msg_ok "NOCLOUD DATA INJECTED"
 
-# --- 29. PATCH BOOT PARAMETERS ---
+# --- 36. PATCH BOOT PARAMETERS ---
 msg_info "Patching Ubuntu boot parameters"
 
 BOOT_PARAM='autoinstall ds=nocloud;s=/cdrom/nocloud/'
@@ -627,7 +838,7 @@ fi
 
 msg_ok "BOOT PARAMETERS PATCHED"
 
-# --- 30. REBUILD CUSTOM BOOTABLE ISO ---
+# --- 37. REBUILD CUSTOM BOOTABLE ISO ---
 msg_info "Building custom autoinstall Ubuntu ISO"
 
 rm -f "$CUSTOM_ISO_PATH"
@@ -661,7 +872,7 @@ fi
 
 msg_ok "CUSTOM AUTOINSTALL ISO CREATED (${CUSTOM_ISO_REF})"
 
-# --- 31. FINAL SUMMARY BEFORE APPLY ---
+# --- 38. FINAL SUMMARY BEFORE APPLY ---
 echo ""
 echo -e "${BL}READY TO ATTACH CUSTOM UBUNTU AUTOINSTALL ISO:${CL}"
 echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
@@ -687,7 +898,7 @@ echo ""
 attach_yn=$(timed_yes_no "Attach custom autoinstall ISO and start VM now?" "y")
 [[ "$attach_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 32. VM STOP HANDLING ---
+# --- 39. VM STOP HANDLING ---
 if [ "$TARGET_VM_STATUS" == "running" ]; then
     msg_warn "VM ${TARGET_VMID} is currently running"
     stop_yn=$(timed_yes_no "Shutdown VM before attaching autoinstall ISO?" "n")
@@ -701,28 +912,28 @@ if [ "$TARGET_VM_STATUS" == "running" ]; then
     fi
 fi
 
-# --- 33. ATTACH CUSTOM ISO ---
+# --- 40. ATTACH CUSTOM ISO ---
 msg_info "Attaching custom autoinstall ISO"
 
 qm set "$TARGET_VMID" --ide2 "${CUSTOM_ISO_REF},media=cdrom" &>/dev/null
 
 msg_ok "CUSTOM AUTOINSTALL ISO ATTACHED"
 
-# --- 34. BOOT ORDER SETUP ---
+# --- 41. BOOT ORDER SETUP ---
 msg_info "Setting VM boot order"
 
 qm set "$TARGET_VMID" --boot "order=ide2;scsi0" &>/dev/null
 
 msg_ok "VM BOOT ORDER CONFIGURED"
 
-# --- 35. START VM ---
+# --- 42. START VM ---
 msg_info "Starting VM ${TARGET_VMID}"
 
 qm start "$TARGET_VMID" &>/dev/null
 
 msg_ok "VM STARTED"
 
-# --- 36. COMPLETION MARKER ---
+# --- 43. COMPLETION MARKER ---
 cat > "$COMPLETED_MARKER" <<EOF
 Ubuntu Auto Install ISO completed on: $(date)
 VMID: $TARGET_VMID
@@ -735,7 +946,7 @@ Source ISO: $INSTALL_ISO_REF
 Custom ISO: $CUSTOM_ISO_REF
 EOF
 
-# --- 37. FINAL NOTES ---
+# --- 44. FINAL NOTES ---
 echo ""
 echo -e "${GN}FINISHED!${CL}"
 echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
