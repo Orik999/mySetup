@@ -9,18 +9,20 @@ shopt -s inherit_errexit nullglob
 
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
 # Keeps all colour variables available for future visual changes.
-YW=`echo "\033[33m"`
-BL=`echo "\033[36m"`
-RD=`echo "\033[01;31m"`
-BGN=`echo "\033[4;92m"`
-GN=`echo "\033[1;92m"`
-DGN=`echo "\033[32m"`
-CL=`echo "\033[m"`
-CLF=`echo "\033[5m"`
+YW="$(printf '\033[33m')"
+BL="$(printf '\033[36m')"
+RD="$(printf '\033[01;31m')"
+BGN="$(printf '\033[4;92m')"
+GN="$(printf '\033[1;92m')"
+DGN="$(printf '\033[32m')"
+CL="$(printf '\033[m')"
+CLF="$(printf '\033[5m')"
 BFR="\\r\\033[K"
 HOLD="-"
 CM="${GN}✓${CL}"
+WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
+BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -33,12 +35,15 @@ DEFAULT_VMID="100"
 DEFAULT_DISK_GB="40"
 DEFAULT_RAM_PERCENT="75"
 DEFAULT_CPU_PERCENT="50"
-DEFAULT_CUSTOM_MAC=""
 
 TOTAL_RAM_GB="0"
 TOTAL_CORES="0"
 DEFAULT_RAM_GB="1"
 DEFAULT_CORES="1"
+
+SYSTEM_TYPE="Unknown"
+CHASSIS="Unknown"
+IS_VM="no"
 
 GPU_ALL=""
 IGPU_LINES=""
@@ -46,6 +51,7 @@ DGPU_LINES=""
 IGPU_FOUND="no"
 DGPU_FOUND="no"
 DGPU_BDFS=""
+DGPU_VENDOR_IDS=""
 GPU_SUMMARY=""
 GPU_DETECTION_STATUS="ok"
 
@@ -55,6 +61,8 @@ EFI_FORMAT="raw"
 EFI_FORMAT_MODE="auto"
 ISO_PATH=""
 ENABLE_GPU="n"
+GPU_SAME_SLOT_BDFS=""
+GPU_FUNCTIONS_ATTACHED=""
 
 VMID=""
 VM_NAME=""
@@ -63,6 +71,7 @@ RAM_GB_INPUT=""
 RAM_MB=""
 DISK_GB_INPUT=""
 VM_MAC_ADDRESS=""
+SUGGESTED_MAC_ADDRESS=""
 CUSTOM_MAC_SELECTED="no"
 
 ADVANCED_SETTINGS="n"
@@ -77,6 +86,12 @@ QEMU_AGENT_VALUE="enabled=1"
 DISK_CONTROLLER="virtio-scsi-single"
 DISCARD_ENABLED="yes"
 DISCARD_VALUE="on"
+
+TEMP_FILES=()
+
+# =========================================================
+#  OUTPUT / LOGGING FUNCTIONS
+# =========================================================
 
 # --- 3. HEADER FUNCTION ---
 # Displays the one-line Proxmox VM Setup banner.
@@ -95,29 +110,19 @@ ${CL}"
 # Provides consistent status messages for display -> apply -> success flow.
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
-function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
+function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 5. LOGGING & ERROR HANDLING ---
-# Logs script output and reports the line number if a command fails.
-exec > >(tee -a "$LOG_FILE") 2>&1
-trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
+# --- 5. SECTION HEADER HELPER ---
+# Keeps output readable and avoids repeated overwritten status messages.
+function section() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${BL}$1${CL}"
+    echo -e "${BORDER}"
+}
 
-# --- 6. ROOT CHECK ---
-# Proxmox VM creation requires root privileges.
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RD}Please run as root.${CL}"
-    exit 1
-fi
-
-clear
-header_info
-
-# =========================================================
-#  PHASE 1: SAFE AUDIT + USER INPUT COLLECTION ONLY
-# =========================================================
-
-# --- 7. TTY PRINT HELPER ---
+# --- 6. TTY PRINT HELPER ---
 # Prints directly to terminal even when functions return values through stdout.
 function tty_print() {
     if [ -w /dev/tty ]; then
@@ -127,7 +132,7 @@ function tty_print() {
     fi
 }
 
-# --- 8. TTY PRINTLN HELPER ---
+# --- 7. TTY PRINTLN HELPER ---
 # Prints directly to terminal with newline.
 function tty_println() {
     if [ -w /dev/tty ]; then
@@ -137,10 +142,69 @@ function tty_println() {
     fi
 }
 
-# --- 9. YES/NO LABEL HELPER ---
+# =========================================================
+#  CLEANUP / ERROR HANDLING
+# =========================================================
+
+# --- 8. CLEANUP FUNCTION ---
+# Removes temporary files created by command runners.
+function cleanup() {
+    local exit_code="$?"
+
+    for file in "${TEMP_FILES[@]:-}"; do
+        [ -n "$file" ] && [ -f "$file" ] && rm -f "$file" 2>/dev/null || true
+    done
+
+    exit "$exit_code"
+}
+
+# --- 9. ERROR TRAP HELPER ---
+# Shows the failing line number and points to the log file.
+function on_error() {
+    local line_no="$1"
+    echo -e "${RD}ERROR:${CL} Script failed at line ${line_no}. Check ${LOG_FILE}"
+}
+
+# --- 10. PROXMOX COMMAND RUNNER ---
+# Runs qm commands while hiding normal successful output.
+# If a Proxmox command fails, it prints the real stderr so the problem can be fixed.
+function run_proxmox_cmd() {
+    local description="$1"
+    shift
+
+    local err_file=""
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    if ! "$@" > /dev/null 2> "$err_file"; then
+        echo ""
+        echo -e "${RD}Proxmox command failed during: ${description}${CL}"
+        echo -e "${YW}Command:${CL} $*"
+        echo ""
+        echo -e "${RD}Real Proxmox error:${CL}"
+        cat "$err_file"
+        rm -f "$err_file"
+
+        echo ""
+        echo -e "${YW}Troubleshooting:${CL}"
+        echo "qm list"
+        echo "qm config ${VMID} 2>/dev/null || true"
+        echo "ls -l /etc/pve/qemu-server/${VMID}.conf 2>/dev/null || true"
+        exit 1
+    fi
+
+    rm -f "$err_file"
+}
+
+# =========================================================
+#  PROMPT FUNCTIONS
+# =========================================================
+
+# --- 11. YES/NO LABEL HELPER ---
 # Converts Y/N answers to visible yes/no text.
 function yes_no_label() {
     local value="$1"
+
     if [[ "$value" =~ ^[Yy]$ ]]; then
         echo "yes"
     else
@@ -148,7 +212,7 @@ function yes_no_label() {
     fi
 }
 
-# --- 10. BLOCKING YES/NO HELPER ---
+# --- 12. BLOCKING YES/NO HELPER ---
 # Used when SPACE is pressed. SPACE pauses the timer and waits for Y/N/ENTER.
 function tty_read_yes_no_blocking() {
     local prompt="$1"
@@ -181,7 +245,7 @@ function tty_read_yes_no_blocking() {
     done
 }
 
-# --- 11. TIMED YES/NO PROMPT HELPER ---
+# --- 13. TIMED YES/NO PROMPT HELPER ---
 # Uses wall-clock countdown instead of loop-count countdown.
 # SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
 function timed_yes_no() {
@@ -250,7 +314,7 @@ function timed_yes_no() {
     echo "$answer"
 }
 
-# --- 12. NUMERIC VALIDATION HELPER ---
+# --- 14. NUMERIC VALIDATION HELPER ---
 # Validates numeric input against optional minimum and maximum values.
 function validate_number() {
     local value="$1"
@@ -272,7 +336,7 @@ function validate_number() {
     return 0
 }
 
-# --- 13. NUMERIC ERROR HELPER ---
+# --- 15. NUMERIC ERROR HELPER ---
 # Shows a clear numeric validation error.
 function print_number_error() {
     local min_value="${1:-1}"
@@ -285,7 +349,7 @@ function print_number_error() {
     fi
 }
 
-# --- 14. EDITABLE INPUT LOOP HELPER ---
+# --- 16. EDITABLE INPUT LOOP HELPER ---
 # Shared editable input system for text and numeric prompts.
 # The initial key is passed into the same editable buffer, so Backspace/Delete can delete it.
 function editable_input_loop() {
@@ -347,7 +411,7 @@ function editable_input_loop() {
     done
 }
 
-# --- 15. TIMED TEXT INPUT HELPER ---
+# --- 17. TIMED TEXT INPUT HELPER ---
 # Shows wall-clock countdown.
 # SPACE pauses with empty editable buffer.
 # Any typed character pauses with that character already inside the editable buffer.
@@ -411,7 +475,7 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 16. TIMED NUMERIC INPUT HELPER ---
+# --- 18. TIMED NUMERIC INPUT HELPER ---
 # Shows wall-clock countdown.
 # SPACE pauses with empty editable numeric buffer.
 # Any typed digit pauses with that digit already inside the editable buffer.
@@ -498,7 +562,7 @@ function timed_number_input() {
     done
 }
 
-# --- 17. MENU SELECTION HELPER ---
+# --- 19. MENU SELECTION HELPER ---
 # Shows a numbered menu directly on the terminal and returns only the selected value.
 # Important: menu text goes to /dev/tty, not stdout, so command substitution captures only the final selected option.
 function timed_menu_select() {
@@ -516,20 +580,105 @@ function timed_menu_select() {
         tty_println "$((i+1))) ${options[$i]}"
     done
 
-    idx=$(timed_number_input "Select ${title} option number" "$default_index" "1" "${#options[@]}")
+    idx="$(timed_number_input "Select ${title} option number" "$default_index" "1" "${#options[@]}")"
     selected="${options[$((idx-1))]}"
 
     echo "$selected"
 }
 
-# --- 18. PHYSICAL RAM DETECTION HELPER ---
+# =========================================================
+#  VALIDATION / GENERAL HELPERS
+# =========================================================
+
+# --- 20. DEPENDENCY VALIDATION ---
+# Ensures required commands exist before user flow starts.
+function validate_dependencies() {
+    local required_commands=(
+        awk
+        basename
+        cat
+        cut
+        date
+        find
+        grep
+        head
+        hostname
+        mktemp
+        nproc
+        openssl
+        pvesm
+        qm
+        sed
+        sort
+        tee
+        tr
+        xargs
+    )
+
+    local cmd=""
+
+    for cmd in "${required_commands[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || msg_error "Required command not found: ${cmd}"
+    done
+}
+
+# --- 21. PROXMOX VALIDATION ---
+# Confirms the script is being run on Proxmox VE 9 or newer.
+function validate_proxmox() {
+    local pve_major=""
+
+    if ! command -v pveversion >/dev/null 2>&1; then
+        msg_error "This system is not Proxmox VE. Script cancelled."
+    fi
+
+    pve_major="$(pveversion | cut -d'/' -f2 | cut -d'.' -f1)"
+
+    if ! [[ "$pve_major" =~ ^[0-9]+$ ]] || [ "$pve_major" -lt 9 ]; then
+        msg_error "Requires Proxmox VE 9+."
+    fi
+}
+
+# --- 22. PREVIOUS RUN MARKER CHECK ---
+# Warns if a previous VM setup marker exists.
+function check_previous_marker() {
+    local continue_yn=""
+
+    if [ -f "$COMPLETED_MARKER" ]; then
+        section "PREVIOUS VM SETUP MARKER DETECTED"
+
+        echo -e "${YW}A previous Proxmox VM Setup marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        echo ""
+        cat "$COMPLETED_MARKER" 2>/dev/null || true
+        echo ""
+
+        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
+
+        if [[ "$continue_yn" =~ ^[Nn] ]]; then
+            exit 0
+        fi
+    fi
+}
+
+# --- 23. VM NAME VALIDATION HELPER ---
+# Validates Proxmox-friendly and hostname-friendly VM names.
+function validate_vm_name() {
+    local value="$1"
+
+    if [[ "$value" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 24. PHYSICAL RAM DETECTION HELPER ---
 # Uses MemTotal and rounds up to physical GiB.
 # This fixes 16GB systems being detected as 15GB and defaulting to 11GB RAM.
 function detect_total_ram_gb() {
     local mem_kb=""
     local gib_kb="1048576"
 
-    mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
 
     if ! [[ "$mem_kb" =~ ^[0-9]+$ ]]; then
         echo "1"
@@ -539,7 +688,29 @@ function detect_total_ram_gb() {
     echo $(( (mem_kb + gib_kb - 1) / gib_kb ))
 }
 
-# --- 19. PCI VENDOR NAME HELPER ---
+# --- 25. SYSTEM TYPE AUDIT HELPER ---
+# Detects laptop / VM / workstation for safer GPU classification.
+function detect_system_type() {
+    SYSTEM_TYPE="PC/Workstation"
+    IS_VM="no"
+    CHASSIS="Unknown"
+
+    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet; then
+        IS_VM="yes"
+        SYSTEM_TYPE="Virtual Machine"
+        return 0
+    fi
+
+    if command -v dmidecode >/dev/null 2>&1; then
+        CHASSIS="$(dmidecode -s chassis-type 2>/dev/null || echo "Unknown")"
+    fi
+
+    if [[ "$CHASSIS" =~ (Laptop|Notebook|Portable) ]]; then
+        SYSTEM_TYPE="Laptop"
+    fi
+}
+
+# --- 26. PCI VENDOR NAME HELPER ---
 # Converts PCI vendor IDs to readable GPU vendor names without calling lspci.
 function pci_vendor_name() {
     local vendor="$1"
@@ -553,7 +724,46 @@ function pci_vendor_name() {
     esac
 }
 
-# --- 20. SYSFS GPU DETECTION HELPER ---
+# --- 27. GPU TYPE CLASSIFIER ---
+# Classifies GPUs using sysfs vendor/class/boot_vga instead of fragile lspci text matching.
+# This avoids treating AMD APUs as safe dGPU passthrough targets on laptop-style systems.
+function classify_gpu_type() {
+    local vendor="$1"
+    local class="$2"
+    local boot_vga="$3"
+    local gpu_count="$4"
+
+    if [ "$vendor" == "0x10de" ]; then
+        echo "discrete"
+        return 0
+    fi
+
+    if [ "$vendor" == "0x8086" ]; then
+        if [ "$gpu_count" -gt 1 ] && [ "$boot_vga" != "1" ] && [ "$class" != "0x030000" ]; then
+            echo "discrete"
+        else
+            echo "integrated"
+        fi
+        return 0
+    fi
+
+    if [ "$vendor" == "0x1002" ] || [ "$vendor" == "0x1022" ]; then
+        if [ "$gpu_count" -gt 1 ] && [ "$SYSTEM_TYPE" == "Laptop" ] && [ "$boot_vga" == "1" ]; then
+            echo "integrated"
+        else
+            echo "discrete"
+        fi
+        return 0
+    fi
+
+    if [ "$boot_vga" == "1" ]; then
+        echo "integrated"
+    else
+        echo "unknown"
+    fi
+}
+
+# --- 28. SYSFS GPU DETECTION HELPER ---
 # Detects GPUs through /sys/bus/pci/devices instead of lspci.
 # This avoids lspci hangs on some fresh Proxmox/laptop PCI states.
 function detect_gpus_sysfs() {
@@ -562,8 +772,12 @@ function detect_gpus_sysfs() {
     local class=""
     local vendor=""
     local device=""
+    local boot_vga=""
     local vendor_name=""
+    local gpu_type=""
     local line=""
+    local gpu_records=""
+    local gpu_count="0"
 
     GPU_ALL=""
     IGPU_LINES=""
@@ -571,6 +785,7 @@ function detect_gpus_sysfs() {
     IGPU_FOUND="no"
     DGPU_FOUND="no"
     DGPU_BDFS=""
+    DGPU_VENDOR_IDS=""
     GPU_SUMMARY=""
 
     for dev in /sys/bus/pci/devices/*; do
@@ -585,25 +800,40 @@ function detect_gpus_sysfs() {
                 bdf="$(basename "$dev")"
                 vendor="$(cat "$dev/vendor" 2>/dev/null || true)"
                 device="$(cat "$dev/device" 2>/dev/null || true)"
-                vendor_name="$(pci_vendor_name "$vendor")"
-                line="${bdf} ${vendor_name} GPU [${vendor#0x}:${device#0x}]"
+                boot_vga="0"
 
-                GPU_ALL+="${line}"$'\n'
-
-                if [ "$vendor" == "0x8086" ]; then
-                    IGPU_LINES+="${line}"$'\n'
-                    IGPU_FOUND="yes"
-                elif [ "$vendor" == "0x10de" ] || [ "$vendor" == "0x1002" ] || [ "$vendor" == "0x1022" ]; then
-                    DGPU_LINES+="${line}"$'\n'
-                    DGPU_BDFS+="${bdf} "
-                    DGPU_FOUND="yes"
+                if [ -r "$dev/boot_vga" ]; then
+                    boot_vga="$(cat "$dev/boot_vga" 2>/dev/null || echo 0)"
                 fi
+
+                gpu_records+="${bdf}|${vendor}|${device}|${class}|${boot_vga}"$'\n'
+                gpu_count=$((gpu_count + 1))
                 ;;
         esac
     done
+
+    while IFS='|' read -r bdf vendor device class boot_vga; do
+        [ -z "$bdf" ] && continue
+
+        vendor_name="$(pci_vendor_name "$vendor")"
+        gpu_type="$(classify_gpu_type "$vendor" "$class" "$boot_vga" "$gpu_count")"
+        line="${bdf} ${vendor_name} GPU [${vendor#0x}:${device#0x}] boot_vga=${boot_vga}"
+
+        GPU_ALL+="${line}"$'\n'
+
+        if [ "$gpu_type" == "integrated" ]; then
+            IGPU_LINES+="${line}"$'\n'
+            IGPU_FOUND="yes"
+        elif [ "$gpu_type" == "discrete" ]; then
+            DGPU_LINES+="${line}"$'\n'
+            DGPU_BDFS+="${bdf} "
+            DGPU_VENDOR_IDS+="${vendor} "
+            DGPU_FOUND="yes"
+        fi
+    done <<< "$gpu_records"
 }
 
-# --- 21. GPU SUMMARY HELPER ---
+# --- 29. GPU SUMMARY HELPER ---
 # Creates readable integrated/discrete GPU summary for the audit screen.
 function build_gpu_summary() {
     local out=""
@@ -625,22 +855,73 @@ function build_gpu_summary() {
     echo "${out%; }"
 }
 
-# --- 22. STORAGE LIST HELPER ---
-# Finds Proxmox storage suitable for VM images.
-# First tries content-aware pvesm status. If unsupported, safely falls back to all active storage.
-function get_storage_list() {
-    local list=""
+# --- 30. SAME-SLOT GPU FUNCTION HELPER ---
+# Returns every PCI function in the same slot as the selected GPU.
+# Example: 0000:01:00.0 -> 0000:01:00.0 0000:01:00.1 ...
+function get_same_slot_functions_for_bdf() {
+    local bdf="$1"
+    local slot=""
+    local func=""
+    local out=""
 
-    list=$(pvesm status --content images 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort || true)
+    slot="${bdf%.*}"
 
-    if [ -z "$list" ]; then
-        list=$(pvesm status 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort || true)
-    fi
+    for func in /sys/bus/pci/devices/${slot}.*; do
+        [ -e "$func" ] || continue
+        out+="$(basename "$func") "
+    done
 
-    echo "$list"
+    echo "$out" | xargs
 }
 
-# --- 23. STORAGE TYPE HELPER ---
+# --- 31. STORAGE CONTENT HELPER ---
+# Reads the content line for a storage ID from /etc/pve/storage.cfg.
+function get_storage_content() {
+    local storage="$1"
+
+    awk -v s="$storage" '
+        $0 ~ "^[a-zA-Z0-9_-]+: "s"$" {inblock=1; next}
+        inblock && /^[a-zA-Z0-9_-]+: / {exit}
+        inblock && $1=="content" {
+            for (i=2; i<=NF; i++) printf "%s", $i
+            exit
+        }
+    ' /etc/pve/storage.cfg 2>/dev/null || true
+}
+
+# --- 32. STORAGE LIST HELPER ---
+# Finds Proxmox storage suitable for VM images.
+# First tries content-aware pvesm status. If unsupported, falls back to filtered active storage.
+function get_storage_list() {
+    local list=""
+    local storage=""
+    local storage_type=""
+    local content=""
+
+    list="$(pvesm status --content images 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort || true)"
+
+    if [ -n "$list" ]; then
+        echo "$list"
+        return 0
+    fi
+
+    while read -r storage storage_type status rest; do
+        [ -z "$storage" ] && continue
+        [ "$status" != "active" ] && continue
+
+        case "$storage_type" in
+            dir|nfs|cifs|glusterfs|lvm|lvmthin|zfspool|btrfs)
+                content="$(get_storage_content "$storage")"
+
+                if [ -z "$content" ] || [[ ",${content}," == *",images,"* ]] || [[ "$content" == *"images"* ]]; then
+                    echo "$storage"
+                fi
+                ;;
+        esac
+    done < <(pvesm status 2>/dev/null | awk 'NR>1 {print $1, $2, $3}')
+}
+
+# --- 33. STORAGE TYPE HELPER ---
 # Detects selected Proxmox storage type from pvesm status.
 function get_storage_type() {
     local storage="$1"
@@ -648,7 +929,7 @@ function get_storage_type() {
     pvesm status 2>/dev/null | awk -v s="$storage" 'NR>1 && $1==s {print $2; exit}'
 }
 
-# --- 24. EFI FORMAT HELPER ---
+# --- 34. EFI FORMAT HELPER ---
 # Chooses correct EFI disk format for selected storage type.
 # File-based storage supports qcow2; block/pool storage should use raw.
 function get_efi_format_for_storage_type() {
@@ -664,7 +945,7 @@ function get_efi_format_for_storage_type() {
     esac
 }
 
-# --- 25. MAC ADDRESS VALIDATION HELPER ---
+# --- 35. MAC ADDRESS VALIDATION HELPER ---
 # Validates standard colon-separated MAC addresses.
 function validate_mac_address() {
     local mac="$1"
@@ -676,14 +957,14 @@ function validate_mac_address() {
     return 1
 }
 
-# --- 26. MAC ADDRESS NORMALISATION HELPER ---
+# --- 36. MAC ADDRESS NORMALISATION HELPER ---
 # Converts a valid MAC address to uppercase for consistent display and storage.
 function normalize_mac_address() {
     local mac="$1"
     echo "$mac" | tr '[:lower:]' '[:upper:]'
 }
 
-# --- 27. MAC ADDRESS IN-USE CHECK HELPER ---
+# --- 37. MAC ADDRESS IN-USE CHECK HELPER ---
 # Checks existing Proxmox VM config files for a MAC address to avoid duplicate network identities.
 function mac_address_in_use() {
     local mac="$1"
@@ -698,7 +979,7 @@ function mac_address_in_use() {
     return 1
 }
 
-# --- 28. PROXMOX MAC GENERATOR HELPER ---
+# --- 38. PROXMOX MAC GENERATOR HELPER ---
 # Generates a Proxmox-style locally usable MAC address using the common BC:24:11 prefix.
 # It retries if a generated MAC is already present in existing VM configs.
 function generate_proxmox_mac() {
@@ -719,7 +1000,7 @@ function generate_proxmox_mac() {
     msg_error "Could not generate a unique VM MAC address after multiple attempts."
 }
 
-# --- 29. VM MAC FROM CONFIG HELPER ---
+# --- 39. VM MAC FROM CONFIG HELPER ---
 # Reads the VM net0 MAC address from Proxmox config after VM creation.
 function get_vm_mac_from_config() {
     local vmid="$1"
@@ -727,7 +1008,7 @@ function get_vm_mac_from_config() {
     qm config "$vmid" 2>/dev/null | awk -F'[=,]' '/^net0:/ {print $2; exit}' | tr '[:lower:]' '[:upper:]'
 }
 
-# --- 30. YES/NO VALUE HELPER ---
+# --- 40. YES/NO VALUE HELPER ---
 # Converts yes/no values into Proxmox qm values.
 function apply_boolean_values() {
     if [ "$BALLOONING_ENABLED" == "yes" ]; then
@@ -750,313 +1031,398 @@ function apply_boolean_values() {
     fi
 }
 
-# --- 31. PROXMOX COMMAND RUNNER ---
-# Runs qm commands while hiding normal successful output.
-# If a Proxmox command fails, it prints the real stderr so the problem can be fixed.
-function run_proxmox_cmd() {
-    local description="$1"
-    shift
+# =========================================================
+#  INITIALIZATION
+# =========================================================
 
-    local err_file=""
-    err_file="$(mktemp)"
-
-    if ! "$@" > /dev/null 2> "$err_file"; then
-        echo ""
-        echo -e "${RD}Proxmox command failed during: ${description}${CL}"
-        echo -e "${YW}Command:${CL} $*"
-        echo ""
-        echo -e "${RD}Real Proxmox error:${CL}"
-        cat "$err_file"
-        rm -f "$err_file"
-
-        echo ""
-        echo -e "${YW}Troubleshooting:${CL}"
-        echo "qm list"
-        echo "qm config ${VMID} 2>/dev/null || true"
-        echo "ls -l /etc/pve/qemu-server/${VMID}.conf 2>/dev/null || true"
+# --- 41. SCRIPT INITIALIZATION ---
+# Starts logging, installs traps, validates root/proxmox/dependencies and shows banner.
+function init_script() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RD}Please run as root.${CL}"
         exit 1
     fi
 
-    rm -f "$err_file"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    trap 'on_error "$LINENO"' ERR
+    trap cleanup EXIT
+
+    clear
+    header_info
+
+    validate_dependencies
+    validate_proxmox
+    check_previous_marker
 }
 
-# --- 32. PROXMOX VALIDATION ---
-# Confirms the script is being run on Proxmox VE 9 or newer.
-if ! command -v pveversion >/dev/null 2>&1; then
-    msg_error "This system is not Proxmox VE. Script cancelled."
-fi
+# =========================================================
+#  PHASE 1: SAFE AUDIT + USER INPUT COLLECTION ONLY
+# =========================================================
 
-PVE_MAJOR=$(pveversion | cut -d'/' -f2 | cut -d'.' -f1)
-
-if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
-    msg_error "Requires Proxmox VE 9+."
-fi
-
-# --- 33. SYSTEM RESOURCE AUDIT ---
+# --- 42. SYSTEM RESOURCE AUDIT ---
 # Detects RAM, CPU cores and calculates adaptive default VM resources.
-msg_info "Auditing system resources"
+function audit_system_resources() {
+    section "SYSTEM RESOURCE AUDIT"
 
-TOTAL_RAM_GB=$(detect_total_ram_gb)
-TOTAL_CORES=$(nproc)
+    msg_info "Auditing system resources"
 
-DEFAULT_RAM_GB=$(( TOTAL_RAM_GB * DEFAULT_RAM_PERCENT / 100 ))
-[ "$DEFAULT_RAM_GB" -lt 1 ] && DEFAULT_RAM_GB=1
+    detect_system_type
 
-DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
-[ "$DEFAULT_CORES" -lt 1 ] && DEFAULT_CORES=1
+    TOTAL_RAM_GB="$(detect_total_ram_gb)"
+    TOTAL_CORES="$(nproc)"
 
-msg_ok "SYSTEM RESOURCES DETECTED"
+    DEFAULT_RAM_GB=$(( TOTAL_RAM_GB * DEFAULT_RAM_PERCENT / 100 ))
+    [ "$DEFAULT_RAM_GB" -lt 1 ] && DEFAULT_RAM_GB=1
 
-# --- 34. SAFE SYSFS GPU AUDIT ---
+    DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
+    [ "$DEFAULT_CORES" -lt 1 ] && DEFAULT_CORES=1
+
+    msg_ok "SYSTEM RESOURCES DETECTED"
+}
+
+# --- 43. SAFE SYSFS GPU AUDIT ---
 # Detects GPU through sysfs only, avoiding lspci because lspci can hang on some fresh Proxmox/laptop systems.
-msg_info "Detecting GPU hardware"
+function audit_gpu_hardware() {
+    section "GPU AUDIT"
 
-detect_gpus_sysfs
-GPU_SUMMARY=$(build_gpu_summary)
+    msg_info "Detecting GPU hardware"
 
-if [ -n "$GPU_ALL" ]; then
-    msg_ok "GPU DETECTION COMPLETE"
-else
-    GPU_DETECTION_STATUS="skipped"
-    msg_ok "GPU DETECTION SKIPPED"
-fi
+    detect_gpus_sysfs
+    GPU_SUMMARY="$(build_gpu_summary)"
 
-# --- 35. SYSTEM AUDIT DISPLAY ---
+    if [ -n "$GPU_ALL" ]; then
+        msg_ok "GPU DETECTION COMPLETE"
+    else
+        GPU_DETECTION_STATUS="skipped"
+        msg_ok "GPU DETECTION SKIPPED"
+    fi
+}
+
+# --- 44. SYSTEM AUDIT DISPLAY ---
 # Shows available host resources and adaptive defaults before asking user inputs.
-echo ""
-echo -e "${DGN}SYSTEM AUDIT:${CL}"
-echo -e "TOTAL RAM: ${GN}${TOTAL_RAM_GB}GB${CL}"
-echo -e "CPU CORES: ${GN}${TOTAL_CORES}${CL}"
-echo -e "DEFAULT VM RAM: ${GN}${DEFAULT_RAM_GB}GB${CL}"
-echo -e "DEFAULT VM CPU CORES: ${GN}${DEFAULT_CORES}${CL}"
+function show_system_audit() {
+    echo ""
+    echo -e "${DGN}SYSTEM AUDIT:${CL}"
+    echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
+    echo -e "TOTAL RAM: ${GN}${TOTAL_RAM_GB}GB${CL}"
+    echo -e "CPU CORES: ${GN}${TOTAL_CORES}${CL}"
+    echo -e "DEFAULT VM RAM: ${GN}${DEFAULT_RAM_GB}GB${CL}"
+    echo -e "DEFAULT VM CPU CORES: ${GN}${DEFAULT_CORES}${CL}"
 
-if [ -n "$GPU_SUMMARY" ]; then
-    echo -e "GPU: ${GN}${GPU_SUMMARY}${CL}"
-else
-    echo -e "GPU: ${YW}No passthrough target detected or GPU detection skipped${CL}"
-fi
+    if [ -n "$GPU_SUMMARY" ]; then
+        echo -e "GPU: ${GN}${GPU_SUMMARY}${CL}"
+    else
+        echo -e "GPU: ${YW}No passthrough target detected or GPU detection skipped${CL}"
+    fi
+}
 
-echo "------------------------------------------------------"
-
-# --- 36. FINAL START CONFIRMATION ---
+# --- 45. START CONFIRMATION ---
 # Starts input collection after audit. No VM changes happen yet.
-start_yn=$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")
-[[ "$start_yn" =~ ^[Nn] ]] && exit 0
+function start_confirmation() {
+    local start_yn=""
 
-# --- 37. USER VM CONFIGURATION INPUTS ---
+    echo ""
+    start_yn="$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")"
+    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+}
+
+# --- 46. USER VM CONFIGURATION INPUTS ---
 # Collects VM ID, name, CPU, RAM and OS disk size using adaptive defaults.
 # This stage still does not create or modify any VM.
-VMID=$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")
-VM_NAME=$(timed_text_input "Enter VM Name" "$DEFAULT_VM_NAME")
-CPU_INPUT=$(timed_number_input "Enter CPU CORES" "$DEFAULT_CORES" "1" "$TOTAL_CORES")
-RAM_GB_INPUT=$(timed_number_input "Enter RAM in GB" "$DEFAULT_RAM_GB" "1" "$TOTAL_RAM_GB")
-DISK_GB_INPUT=$(timed_number_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB" "8")
+function collect_vm_configuration_inputs() {
+    local valid_name="no"
 
-RAM_MB=$(( RAM_GB_INPUT * 1024 ))
+    section "VM CONFIGURATION"
 
-# --- 38. ISO SELECTION ---
+    VMID="$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")"
+
+    while [ "$valid_name" != "yes" ]; do
+        VM_NAME="$(timed_text_input "Enter VM Name" "$DEFAULT_VM_NAME")"
+
+        if validate_vm_name "$VM_NAME"; then
+            valid_name="yes"
+        else
+            msg_warn "Invalid VM name. Use letters, numbers and hyphens only. Must start with a letter or number. Max 63 characters."
+        fi
+    done
+
+    CPU_INPUT="$(timed_number_input "Enter CPU CORES" "$DEFAULT_CORES" "1" "$TOTAL_CORES")"
+    RAM_GB_INPUT="$(timed_number_input "Enter RAM in GB" "$DEFAULT_RAM_GB" "1" "$TOTAL_RAM_GB")"
+    DISK_GB_INPUT="$(timed_number_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB" "8")"
+
+    RAM_MB=$(( RAM_GB_INPUT * 1024 ))
+}
+
+# --- 47. ISO SELECTION ---
 # Lists ISO files from local storage and lets the user choose one with numeric validation.
 # Still input-only; no VM changes are made here.
-msg_info "Finding ISO images"
+function select_iso_image() {
+    section "ISO SELECTION"
 
-mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" 2>/dev/null | sort || true)
+    msg_info "Finding ISO images"
 
-if [ "${#ISOS[@]}" -eq 0 ]; then
-    msg_warn "No ISO images found in /var/lib/vz/template/iso. VM will be created without ISO."
-    ISO_PATH=""
-else
-    msg_ok "ISO IMAGES FOUND"
+    mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" 2>/dev/null | sort || true)
+
+    if [ "${#ISOS[@]}" -eq 0 ]; then
+        msg_warn "No ISO images found in /var/lib/vz/template/iso. VM will be created without ISO."
+        ISO_PATH=""
+    else
+        msg_ok "ISO IMAGES FOUND"
+        echo ""
+        echo -e "${BL}SELECT ISO:${CL}"
+
+        for i in "${!ISOS[@]}"; do
+            echo "$((i+1))) $(basename "${ISOS[$i]}")"
+        done
+
+        ISO_IDX="$(timed_number_input "Select ISO number" "1" "1" "${#ISOS[@]}")"
+        ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
+    fi
+}
+
+# --- 48. STORAGE SELECTION ---
+# Lists Proxmox storage that supports VM images and lets the user choose where to place VM disks.
+# Still input-only; no VM changes are made here.
+function select_vm_storage() {
+    local storage_name=""
+    local storage_type=""
+
+    section "STORAGE SELECTION"
+
+    msg_info "Finding Proxmox storage"
+
+    mapfile -t STORAGE_LIST < <(get_storage_list | sort)
+
+    if [ "${#STORAGE_LIST[@]}" -eq 0 ]; then
+        msg_error "No active Proxmox storage found for VM images."
+    fi
+
+    msg_ok "STORAGE FOUND"
     echo ""
-    echo -e "${BL}SELECT ISO:${CL}"
+    echo -e "${BL}SELECT VM STORAGE:${CL}"
 
-    for i in "${!ISOS[@]}"; do
-        echo "$((i+1))) $(basename "${ISOS[$i]}")"
+    for i in "${!STORAGE_LIST[@]}"; do
+        storage_name="${STORAGE_LIST[$i]}"
+        storage_type="$(get_storage_type "$storage_name")"
+        echo "$((i+1))) ${storage_name} (${storage_type:-unknown})"
     done
 
-    ISO_IDX=$(timed_number_input "Select ISO number" "1" "1" "${#ISOS[@]}")
-    ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
-fi
+    STORAGE_IDX="$(timed_number_input "Select storage number" "1" "1" "${#STORAGE_LIST[@]}")"
+    STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
+    STORAGE_TYPE="$(get_storage_type "$STORAGE_ID")"
+    EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
+}
 
-# --- 39. STORAGE SELECTION ---
-# Lists Proxmox storage that supports images and lets the user choose where to place VM disks.
-# Still input-only; no VM changes are made here.
-msg_info "Finding Proxmox storage"
-
-mapfile -t STORAGE_LIST < <(get_storage_list)
-
-if [ "${#STORAGE_LIST[@]}" -eq 0 ]; then
-    msg_error "No active Proxmox storage found for VM images."
-fi
-
-msg_ok "STORAGE FOUND"
-echo ""
-echo -e "${BL}SELECT VM STORAGE:${CL}"
-
-for i in "${!STORAGE_LIST[@]}"; do
-    storage_name="${STORAGE_LIST[$i]}"
-    storage_type="$(get_storage_type "$storage_name")"
-    echo "$((i+1))) ${storage_name} (${storage_type:-unknown})"
-done
-
-STORAGE_IDX=$(timed_number_input "Select storage number" "1" "1" "${#STORAGE_LIST[@]}")
-STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
-STORAGE_TYPE="$(get_storage_type "$STORAGE_ID")"
-EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
-
-# --- 40. GPU PASSTHROUGH OPTION ---
+# --- 49. GPU PASSTHROUGH OPTION ---
 # Offers discrete GPU passthrough only if sysfs GPU detection found a discrete GPU.
 # Default is no for first Crea Social test because Docker/Postgres/Postiz do not require GPU initially.
-if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
-    gpu_yn=$(timed_yes_no "Add DISCRETE GPU to VM?" "n")
-    [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y"
-else
-    ENABLE_GPU="n"
-fi
+function collect_gpu_passthrough_option() {
+    local gpu_yn=""
 
-# --- 41. ADVANCED SETTINGS PROMPT ---
-# Keeps Crea Social recommended defaults unless user chooses to edit advanced VM options.
-advanced_yn=$(timed_yes_no "Open Advanced VM Settings?" "n")
+    section "GPU OPTION"
 
-if [[ "$advanced_yn" =~ ^[Yy] ]]; then
-    ADVANCED_SETTINGS="y"
-
-    MACHINE_TYPE=$(timed_menu_select "Machine Type" "1" "q35" "i440fx")
-    BIOS_TYPE=$(timed_menu_select "BIOS Type" "1" "ovmf" "seabios")
-    CPU_TYPE_VM=$(timed_menu_select "CPU Type" "1" "host" "x86-64-v2-AES" "x86-64-v3" "kvm64" "max")
-
-    balloon_yn=$(timed_yes_no "Enable RAM Ballooning?" "n")
-    [[ "$balloon_yn" =~ ^[Yy] ]] && BALLOONING_ENABLED="yes" || BALLOONING_ENABLED="no"
-
-    NETWORK_MODEL=$(timed_menu_select "Network Model" "1" "virtio" "e1000" "e1000e" "vmxnet3")
-
-    agent_yn=$(timed_yes_no "Enable QEMU Guest Agent?" "y")
-    [[ "$agent_yn" =~ ^[Nn] ]] && QEMU_AGENT_ENABLED="no" || QEMU_AGENT_ENABLED="yes"
-
-    DISK_CONTROLLER=$(timed_menu_select "Disk Controller" "1" "virtio-scsi-single" "virtio-scsi-pci")
-
-    discard_yn=$(timed_yes_no "Enable Discard/TRIM?" "y")
-    [[ "$discard_yn" =~ ^[Nn] ]] && DISCARD_ENABLED="no" || DISCARD_ENABLED="yes"
-
-    EFI_FORMAT_MODE=$(timed_menu_select "EFI Format Mode" "1" "auto" "raw" "qcow2")
-
-    if [ "$EFI_FORMAT_MODE" == "raw" ] || [ "$EFI_FORMAT_MODE" == "qcow2" ]; then
-        EFI_FORMAT="$EFI_FORMAT_MODE"
+    if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
+        echo -e "${YW}Discrete GPU detected. Same-slot GPU functions will be attached together if passthrough is selected.${CL}"
+        echo -e "${YW}For Docker/Postgres/Postiz workloads, GPU passthrough is not required initially.${CL}"
+        gpu_yn="$(timed_yes_no "Add DISCRETE GPU to VM?" "n")"
+        [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y" || ENABLE_GPU="n"
+    else
+        ENABLE_GPU="n"
+        msg_ok "NO DISCRETE GPU PASSTHROUGH TARGET FOUND"
     fi
-fi
+}
 
-apply_boolean_values
+# --- 50. ADVANCED SETTINGS PROMPT ---
+# Keeps Crea Social recommended defaults unless user chooses to edit advanced VM options.
+function collect_advanced_settings() {
+    local advanced_yn=""
+    local balloon_yn=""
+    local agent_yn=""
+    local discard_yn=""
 
-# --- 42. VM MAC ADDRESS CONFIGURATION ---
+    section "ADVANCED VM SETTINGS"
+
+    advanced_yn="$(timed_yes_no "Open Advanced VM Settings?" "n")"
+
+    if [[ "$advanced_yn" =~ ^[Yy] ]]; then
+        ADVANCED_SETTINGS="y"
+
+        MACHINE_TYPE="$(timed_menu_select "Machine Type" "1" "q35" "i440fx")"
+        BIOS_TYPE="$(timed_menu_select "BIOS Type" "1" "ovmf" "seabios")"
+        CPU_TYPE_VM="$(timed_menu_select "CPU Type" "1" "host" "x86-64-v2-AES" "x86-64-v3" "kvm64" "max")"
+
+        balloon_yn="$(timed_yes_no "Enable RAM Ballooning?" "n")"
+        [[ "$balloon_yn" =~ ^[Yy] ]] && BALLOONING_ENABLED="yes" || BALLOONING_ENABLED="no"
+
+        NETWORK_MODEL="$(timed_menu_select "Network Model" "1" "virtio" "e1000" "e1000e" "vmxnet3")"
+
+        agent_yn="$(timed_yes_no "Enable QEMU Guest Agent?" "y")"
+        [[ "$agent_yn" =~ ^[Nn] ]] && QEMU_AGENT_ENABLED="no" || QEMU_AGENT_ENABLED="yes"
+
+        DISK_CONTROLLER="$(timed_menu_select "Disk Controller" "1" "virtio-scsi-single" "virtio-scsi-pci")"
+
+        discard_yn="$(timed_yes_no "Enable Discard/TRIM?" "y")"
+        [[ "$discard_yn" =~ ^[Nn] ]] && DISCARD_ENABLED="no" || DISCARD_ENABLED="yes"
+
+        EFI_FORMAT_MODE="$(timed_menu_select "EFI Format Mode" "1" "auto" "raw" "qcow2")"
+
+        if [ "$EFI_FORMAT_MODE" == "raw" ] || [ "$EFI_FORMAT_MODE" == "qcow2" ]; then
+            EFI_FORMAT="$EFI_FORMAT_MODE"
+        fi
+    else
+        ADVANCED_SETTINGS="n"
+    fi
+
+    apply_boolean_values
+}
+
+# --- 51. VM MAC ADDRESS CONFIGURATION ---
 # Generates a stable VM MAC by default and optionally accepts a custom router-reserved MAC.
 # The selected MAC is explicitly written into net0 so router DHCP reservation remains stable.
-echo ""
-echo -e "${BL}VM NETWORK / ROUTER DHCP RESERVATION:${CL}"
-echo -e "${YW}Recommended: keep DHCP inside Ubuntu and reserve a static IP in your router using the VM MAC address.${CL}"
-echo -e "${YW}This script can auto-generate a stable MAC, or you can enter a custom MAC if your router reservation already exists.${CL}"
-echo ""
+function collect_mac_configuration() {
+    local custom_mac_yn=""
+    local entered_mac=""
 
-custom_mac_yn=$(timed_yes_no "Use custom VM MAC address?" "n")
+    section "VM NETWORK / ROUTER DHCP RESERVATION"
 
-if [[ "$custom_mac_yn" =~ ^[Yy] ]]; then
-    while true; do
-        VM_MAC_ADDRESS=$(timed_text_input "Enter custom VM MAC address" "$DEFAULT_CUSTOM_MAC")
-        VM_MAC_ADDRESS="$(normalize_mac_address "$VM_MAC_ADDRESS")"
+    echo -e "${YW}Recommended: keep DHCP inside Ubuntu and reserve a static IP in your router using the VM MAC address.${CL}"
+    echo -e "${YW}This script can auto-generate a stable MAC, or you can enter a custom MAC if your router reservation already exists.${CL}"
+    echo ""
 
-        if ! validate_mac_address "$VM_MAC_ADDRESS"; then
-            msg_warn "Invalid MAC address format. Use format AA:BB:CC:DD:EE:FF."
-            continue
-        fi
+    msg_info "Generating suggested VM MAC address"
+    SUGGESTED_MAC_ADDRESS="$(generate_proxmox_mac)"
+    msg_ok "SUGGESTED VM MAC ADDRESS GENERATED (${SUGGESTED_MAC_ADDRESS})"
 
-        if mac_address_in_use "$VM_MAC_ADDRESS"; then
-            msg_warn "MAC address ${VM_MAC_ADDRESS} is already used by an existing Proxmox VM."
-            continue
-        fi
+    custom_mac_yn="$(timed_yes_no "Use custom VM MAC address?" "n")"
 
-        CUSTOM_MAC_SELECTED="yes"
-        break
-    done
-else
-    msg_info "Generating VM MAC address"
-    VM_MAC_ADDRESS="$(generate_proxmox_mac)"
-    CUSTOM_MAC_SELECTED="no"
-    msg_ok "VM MAC ADDRESS GENERATED (${VM_MAC_ADDRESS})"
-fi
+    if [[ "$custom_mac_yn" =~ ^[Yy] ]]; then
+        while true; do
+            entered_mac="$(timed_text_input "Enter custom VM MAC address" "$SUGGESTED_MAC_ADDRESS")"
+            entered_mac="$(normalize_mac_address "$entered_mac")"
 
-echo -e "${GN}VM MAC ADDRESS:${CL} ${VM_MAC_ADDRESS}"
-echo -e "${YW}Use this MAC in your router DHCP reservation if you want the VM to always receive the same IP.${CL}"
-echo ""
+            if ! validate_mac_address "$entered_mac"; then
+                msg_warn "Invalid MAC address format. Use format AA:BB:CC:DD:EE:FF."
+                continue
+            fi
 
-# --- 43. FINAL APPLY CONFIRMATION ---
+            if mac_address_in_use "$entered_mac"; then
+                msg_warn "MAC address ${entered_mac} is already used by an existing Proxmox VM."
+                continue
+            fi
+
+            VM_MAC_ADDRESS="$entered_mac"
+
+            if [ "$VM_MAC_ADDRESS" == "$SUGGESTED_MAC_ADDRESS" ]; then
+                CUSTOM_MAC_SELECTED="no"
+            else
+                CUSTOM_MAC_SELECTED="yes"
+            fi
+
+            break
+        done
+    else
+        VM_MAC_ADDRESS="$SUGGESTED_MAC_ADDRESS"
+        CUSTOM_MAC_SELECTED="no"
+    fi
+
+    echo -e "${GN}VM MAC ADDRESS:${CL} ${VM_MAC_ADDRESS}"
+    echo -e "${YW}Use this MAC in your router DHCP reservation if you want the VM to always receive the same IP.${CL}"
+}
+
+# --- 52. FINAL APPLY CONFIRMATION ---
 # Last checkpoint before any Proxmox VM changes are made.
 # Shows every setting, including safe defaults and advanced options, whether advanced mode was used or not.
-echo ""
-echo -e "${BL}READY TO CREATE VM WITH THESE SETTINGS:${CL}"
-echo -e "VM ID: ${GN}${VMID}${CL}"
-echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
-echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
-echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
-echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
-echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
-echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
-echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
-echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
-echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
-echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
-echo ""
-echo -e "${BL}VM PLATFORM SETTINGS:${CL}"
-echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
-echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
-echo -e "EFI FORMAT MODE: ${GN}${EFI_FORMAT_MODE}${CL}"
-echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
-echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
-echo -e "BALLOONING ENABLED: ${GN}${BALLOONING_ENABLED}${CL}"
-echo -e "BALLOON VALUE: ${GN}${BALLOON_VALUE}${CL}"
-echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
-echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
-echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
-echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
-echo -e "ADVANCED SETTINGS USED: ${GN}${ADVANCED_SETTINGS}${CL}"
-echo ""
+function final_apply_confirmation() {
+    local apply_yn=""
 
-apply_yn=$(timed_yes_no "Create VM now?" "y")
-[[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+    section "READY TO CREATE VM"
+
+    echo -e "VM ID: ${GN}${VMID}${CL}"
+    echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
+    echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
+    echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
+    echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
+    echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
+    echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
+    echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
+    echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
+    echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
+    echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
+    echo ""
+    echo -e "${BL}VM PLATFORM SETTINGS:${CL}"
+    echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
+    echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
+    echo -e "EFI FORMAT MODE: ${GN}${EFI_FORMAT_MODE}${CL}"
+    echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
+    echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
+    echo -e "BALLOONING ENABLED: ${GN}${BALLOONING_ENABLED}${CL}"
+    echo -e "BALLOON VALUE: ${GN}${BALLOON_VALUE}${CL}"
+    echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
+    echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
+    echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
+    echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
+    echo -e "ADVANCED SETTINGS USED: ${GN}${ADVANCED_SETTINGS}${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Create VM now?" "y")"
+    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+}
 
 # =========================================================
 #  PHASE 2: APPLY / CREATE VM ONLY AFTER ALL INPUTS
 # =========================================================
 
-# --- 44. VM ID CONFLICT CHECK ---
+# --- 53. VM ID CONFLICT CHECK ---
 # Checks conflict only after all input is collected, immediately before creation.
 # Uses qm config because it catches partial/incomplete VM configs better than qm status.
-if qm config "$VMID" >/dev/null 2>&1; then
-    msg_error "VM ID ${VMID} already exists. Remove it first or choose another VM ID."
-fi
+function check_vm_id_conflict() {
+    section "VM ID CONFLICT CHECK"
 
-# --- 45. VM CREATE ---
+    msg_info "Checking VM ID availability"
+
+    if qm config "$VMID" >/dev/null 2>&1; then
+        msg_error "VM ID ${VMID} already exists. Remove it first or choose another VM ID."
+    fi
+
+    msg_ok "VM ID ${VMID} AVAILABLE"
+}
+
+# --- 54. VM CREATE ---
 # Creates Ubuntu/Linux VM using selected standard and advanced settings.
 # Proxmox errors are captured and displayed if qm create fails.
-msg_info "Creating VM ${VMID} (${VM_NAME})"
+function create_vm() {
+    section "VM CREATION"
 
-run_proxmox_cmd "creating VM ${VMID}" \
-    qm create "$VMID" \
-    --name "$VM_NAME" \
-    --machine "$MACHINE_TYPE" \
-    --bios "$BIOS_TYPE" \
-    --vga std \
-    --ostype l26 \
-    --cpu "$CPU_TYPE_VM" \
-    --cores "$CPU_INPUT" \
-    --memory "$RAM_MB" \
-    --balloon "$BALLOON_VALUE" \
-    --net0 "${NETWORK_MODEL}=${VM_MAC_ADDRESS},bridge=vmbr0" \
-    --agent "$QEMU_AGENT_VALUE"
+    msg_info "Creating VM ${VMID} (${VM_NAME})"
 
-msg_ok "VM CREATED"
+    run_proxmox_cmd "creating VM ${VMID}" \
+        qm create "$VMID" \
+        --name "$VM_NAME" \
+        --machine "$MACHINE_TYPE" \
+        --bios "$BIOS_TYPE" \
+        --vga std \
+        --ostype l26 \
+        --cpu "$CPU_TYPE_VM" \
+        --cores "$CPU_INPUT" \
+        --memory "$RAM_MB" \
+        --balloon "$BALLOON_VALUE" \
+        --net0 "${NETWORK_MODEL}=${VM_MAC_ADDRESS},bridge=vmbr0" \
+        --agent "$QEMU_AGENT_VALUE"
 
-# --- 46. EFI DISK CONFIGURATION ---
+    msg_ok "VM CREATED"
+}
+
+# --- 55. EFI DISK CONFIGURATION ---
 # Adds OVMF EFI disk only when OVMF BIOS is selected.
 # SeaBIOS does not use an EFI disk.
-if [ "$BIOS_TYPE" == "ovmf" ]; then
+function configure_efi_disk() {
+    if [ "$BIOS_TYPE" != "ovmf" ]; then
+        return 0
+    fi
+
+    section "EFI DISK CONFIGURATION"
+
     msg_info "Configuring EFI disk"
 
     run_proxmox_cmd "configuring EFI disk" \
@@ -1064,72 +1430,126 @@ if [ "$BIOS_TYPE" == "ovmf" ]; then
         --efidisk0 "${STORAGE_ID}:0,format=${EFI_FORMAT},efitype=4m,pre-enrolled-keys=0"
 
     msg_ok "EFI DISK CONFIGURED"
-fi
+}
 
-# --- 47. MAIN VM DISK CONFIGURATION ---
+# --- 56. MAIN VM DISK CONFIGURATION ---
 # Adds main OS disk with selected disk controller, discard setting and iothread.
-msg_info "Configuring VM OS disk"
+function configure_vm_disk() {
+    section "VM OS DISK CONFIGURATION"
 
-run_proxmox_cmd "setting disk controller" \
-    qm set "$VMID" \
-    --scsihw "$DISK_CONTROLLER"
+    msg_info "Configuring VM OS disk"
 
-run_proxmox_cmd "creating VM OS disk" \
-    qm set "$VMID" \
-    --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=${DISCARD_VALUE},iothread=1"
-
-msg_ok "VM OS DISK CONFIGURED"
-
-# --- 48. ISO AND BOOT ORDER ---
-# Attaches selected ISO if available and sets VM boot order.
-msg_info "Configuring VM boot"
-
-if [ -n "$ISO_PATH" ]; then
-    run_proxmox_cmd "attaching ISO" \
+    run_proxmox_cmd "setting disk controller" \
         qm set "$VMID" \
-        --cdrom "$ISO_PATH"
-fi
+        --scsihw "$DISK_CONTROLLER"
 
-run_proxmox_cmd "setting VM boot order" \
-    qm set "$VMID" \
-    --boot "order=scsi0;ide2"
+    run_proxmox_cmd "creating VM OS disk" \
+        qm set "$VMID" \
+        --scsi0 "${STORAGE_ID}:${DISK_GB_INPUT},discard=${DISCARD_VALUE},iothread=1"
 
-msg_ok "VM BOOT CONFIGURED"
+    msg_ok "VM OS DISK CONFIGURED"
+}
 
-# --- 49. VM MAC VERIFICATION ---
-# Reads back the MAC address from Proxmox config to confirm the router-reservation identity.
-msg_info "Verifying VM MAC address"
+# --- 57. ISO AND BOOT ORDER ---
+# Attaches selected ISO if available and sets ISO-first boot order.
+# If no ISO is attached, boots from OS disk only.
+function configure_vm_boot() {
+    section "VM BOOT CONFIGURATION"
 
-CONFIGURED_MAC="$(get_vm_mac_from_config "$VMID" || true)"
+    msg_info "Configuring VM boot"
 
-if [ -n "$CONFIGURED_MAC" ]; then
-    VM_MAC_ADDRESS="$CONFIGURED_MAC"
-    msg_ok "VM MAC ADDRESS VERIFIED (${VM_MAC_ADDRESS})"
-else
-    msg_warn "Could not read VM MAC address from Proxmox config. Check with: qm config ${VMID} | grep net0"
-fi
-
-# --- 50. GPU PASSTHROUGH ATTACHMENT ---
-# Adds the first detected discrete GPU BDF to the VM after all other settings are applied.
-if [ "$ENABLE_GPU" == "y" ]; then
-    msg_info "Attaching discrete GPU to VM"
-
-    GPU_PCI_ID=$(echo "$DGPU_BDFS" | awk '{print $1}')
-
-    if [ -n "$GPU_PCI_ID" ]; then
-        run_proxmox_cmd "attaching discrete GPU ${GPU_PCI_ID}" \
+    if [ -n "$ISO_PATH" ]; then
+        run_proxmox_cmd "attaching ISO" \
             qm set "$VMID" \
-            --hostpci0 "${GPU_PCI_ID},pcie=1"
+            --cdrom "$ISO_PATH"
 
-        msg_ok "GPU PASSTHROUGH ENABLED (${GPU_PCI_ID})"
+        run_proxmox_cmd "setting VM boot order to ISO first" \
+            qm set "$VMID" \
+            --boot "order=ide2;scsi0"
     else
-        msg_warn "GPU passthrough selected but no GPU PCI ID found."
+        run_proxmox_cmd "setting VM boot order to disk first" \
+            qm set "$VMID" \
+            --boot "order=scsi0"
     fi
-fi
 
-# --- 51. COMPLETION MARKER ---
+    msg_ok "VM BOOT CONFIGURED"
+}
+
+# --- 58. VM MAC VERIFICATION ---
+# Reads back the MAC address from Proxmox config to confirm the router-reservation identity.
+function verify_vm_mac() {
+    local configured_mac=""
+
+    section "VM MAC VERIFICATION"
+
+    msg_info "Verifying VM MAC address"
+
+    configured_mac="$(get_vm_mac_from_config "$VMID" || true)"
+
+    if [ -n "$configured_mac" ]; then
+        VM_MAC_ADDRESS="$configured_mac"
+        msg_ok "VM MAC ADDRESS VERIFIED (${VM_MAC_ADDRESS})"
+    else
+        msg_warn "Could not read VM MAC address from Proxmox config. Check with: qm config ${VMID} | grep net0"
+    fi
+}
+
+# --- 59. GPU PASSTHROUGH ATTACHMENT ---
+# Adds all same-slot GPU functions to the VM if GPU passthrough is selected.
+# This handles common GPU audio / USB / USB-C side functions.
+function attach_gpu_passthrough() {
+    local gpu_pci_id=""
+    local gpu_func=""
+    local pci_index="0"
+
+    if [ "$ENABLE_GPU" != "y" ]; then
+        return 0
+    fi
+
+    section "GPU PASSTHROUGH ATTACHMENT"
+
+    msg_info "Preparing discrete GPU passthrough"
+
+    gpu_pci_id="$(echo "$DGPU_BDFS" | awk '{print $1}')"
+
+    if [ -z "$gpu_pci_id" ]; then
+        msg_warn "GPU passthrough selected but no GPU PCI ID found."
+        return 0
+    fi
+
+    GPU_SAME_SLOT_BDFS="$(get_same_slot_functions_for_bdf "$gpu_pci_id")"
+
+    if [ -z "$GPU_SAME_SLOT_BDFS" ]; then
+        GPU_SAME_SLOT_BDFS="$gpu_pci_id"
+    fi
+
+    msg_ok "GPU SAME-SLOT FUNCTIONS DETECTED (${GPU_SAME_SLOT_BDFS})"
+
+    for gpu_func in $GPU_SAME_SLOT_BDFS; do
+        msg_info "Attaching GPU function ${gpu_func} to hostpci${pci_index}"
+
+        run_proxmox_cmd "attaching GPU function ${gpu_func}" \
+            qm set "$VMID" \
+            --hostpci${pci_index} "${gpu_func},pcie=1"
+
+        GPU_FUNCTIONS_ATTACHED+="${gpu_func} "
+        msg_ok "GPU FUNCTION ATTACHED (${gpu_func} -> hostpci${pci_index})"
+
+        pci_index=$((pci_index + 1))
+    done
+
+    GPU_FUNCTIONS_ATTACHED="$(echo "$GPU_FUNCTIONS_ATTACHED" | xargs)"
+    msg_ok "GPU PASSTHROUGH ENABLED (${GPU_FUNCTIONS_ATTACHED})"
+}
+
+# --- 60. COMPLETION MARKER ---
 # Creates marker file so future checks can identify that this setup was already run.
-cat <<EOF > "$COMPLETED_MARKER"
+function write_completion_marker() {
+    section "COMPLETION MARKER"
+
+    msg_info "Writing completion marker"
+
+    cat <<EOF > "$COMPLETED_MARKER"
 Proxmox VM Setup completed on: $(date)
 VMID: $VMID
 Name: $VM_NAME
@@ -1140,6 +1560,7 @@ Storage: ${STORAGE_ID}
 Storage Type: ${STORAGE_TYPE}
 ISO: ${ISO_PATH:-none}
 GPU Passthrough: ${ENABLE_GPU}
+GPU Functions Attached: ${GPU_FUNCTIONS_ATTACHED:-none}
 VM MAC Address: ${VM_MAC_ADDRESS}
 Custom MAC Selected: ${CUSTOM_MAC_SELECTED}
 Machine Type: ${MACHINE_TYPE}
@@ -1156,35 +1577,86 @@ Discard/TRIM: ${DISCARD_ENABLED}
 Advanced Settings Used: ${ADVANCED_SETTINGS}
 EOF
 
-# --- 52. FINAL SUMMARY ---
-# Shows final VM configuration and the MAC address to reserve in the router.
-echo ""
-echo -e "${GN}FINISHED!${CL}"
-echo -e "VM ID: ${GN}${VMID}${CL}"
-echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
-echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
-echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
-echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
-echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
-echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
-echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
-echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
-echo -e "VGA DISPLAY: ${GN}std${CL}"
-echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
-echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
-echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
-echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
-echo -e "BALLOONING: ${GN}${BALLOONING_ENABLED}${CL}"
-echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
-echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
-echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
-echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
-echo ""
-echo -e "${BL}NETWORK / ROUTER DHCP RESERVATION:${CL}"
-echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
-echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
-echo -e "${YW}Recommended: reserve this MAC address in your router so the VM always receives the same IP via DHCP.${CL}"
-echo -e "${YW}Check later with: qm config ${VMID} | grep net0${CL}"
-echo ""
+    msg_ok "COMPLETION MARKER WRITTEN"
+}
 
-exit 0
+# --- 61. FINAL SUMMARY ---
+# Shows final VM configuration and the MAC address to reserve in the router.
+function show_final_summary() {
+    section "FINISHED"
+
+    echo -e "VM ID: ${GN}${VMID}${CL}"
+    echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
+    echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
+    echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
+    echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
+    echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
+    echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
+    echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
+    echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
+    echo -e "GPU FUNCTIONS ATTACHED: ${GN}${GPU_FUNCTIONS_ATTACHED:-none}${CL}"
+    echo -e "VGA DISPLAY: ${GN}std${CL}"
+    echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
+    echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
+    echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
+    echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
+    echo -e "BALLOONING: ${GN}${BALLOONING_ENABLED}${CL}"
+    echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
+    echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
+    echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
+    echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
+    echo ""
+    echo -e "${BL}NETWORK / ROUTER DHCP RESERVATION:${CL}"
+    echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
+    echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
+    echo -e "${YW}Recommended: reserve this MAC address in your router so the VM always receives the same IP via DHCP.${CL}"
+    echo -e "${YW}Check later with: qm config ${VMID} | grep net0${CL}"
+    echo ""
+    echo -e "${BL}NEXT STEP:${CL}"
+
+    if [ -n "$ISO_PATH" ]; then
+        echo -e "${YW}Manual install path:${CL} Start the VM and install Ubuntu from the Proxmox console."
+    else
+        echo -e "${YW}No ISO was attached. Attach/install media before starting the VM.${CL}"
+    fi
+
+    echo -e "${YW}Autoinstall path:${CL} Run script 3.5 next to generate and attach the Ubuntu autoinstall ISO."
+    echo ""
+}
+
+# =========================================================
+#  MAIN ORCHESTRATION
+# =========================================================
+
+# --- 62. MAIN FUNCTION ---
+# Runs the full script in validation -> audit -> input -> final confirmation -> apply order.
+function main() {
+    init_script
+
+    audit_system_resources
+    audit_gpu_hardware
+    show_system_audit
+    start_confirmation
+
+    collect_vm_configuration_inputs
+    select_iso_image
+    select_vm_storage
+    collect_gpu_passthrough_option
+    collect_advanced_settings
+    collect_mac_configuration
+    final_apply_confirmation
+
+    check_vm_id_conflict
+    create_vm
+    configure_efi_disk
+    configure_vm_disk
+    configure_vm_boot
+    verify_vm_mac
+    attach_gpu_passthrough
+    write_completion_marker
+    show_final_summary
+
+    exit 0
+}
+
+main "$@"

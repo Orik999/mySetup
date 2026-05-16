@@ -7,34 +7,75 @@ shopt -s inherit_errexit nullglob
 # =========================================================
 
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
-YW=`echo "\033[33m"`
-BL=`echo "\033[36m"`
-RD=`echo "\033[01;31m"`
-BGN=`echo "\033[4;92m"`
-GN=`echo "\033[1;92m"`
-DGN=`echo "\033[32m"`
-CL=`echo "\033[m"`
-CLF=`echo "\033[5m"`
+# Central visual theme for Docker Setup.
+YW="$(printf '\033[33m')"
+BL="$(printf '\033[36m')"
+RD="$(printf '\033[01;31m')"
+BGN="$(printf '\033[4;92m')"
+GN="$(printf '\033[1;92m')"
+DGN="$(printf '\033[32m')"
+CL="$(printf '\033[m')"
+CLF="$(printf '\033[5m')"
 BFR="\\r\\033[K"
+
 HOLD="-"
 CM="${GN}✓${CL}"
+WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
+BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 # --- 2. GLOBAL VARIABLES ---
+# Stores timer, log paths, user choices, environment state and final status values.
 T=15
 REBOOT_T=30
+
 LOG_FILE="/var/log/docker-setup.log"
+VERIFY_LOG="/var/log/docker-setup-verify.log"
 COMPLETED_MARKER="/root/.docker-setup-completed"
 
+DEFAULT_TARGET_USER="${SUDO_USER:-orik}"
+TARGET_USER="$DEFAULT_TARGET_USER"
+
 SUDO_CMD=""
-TARGET_USER="${SUDO_USER:-${USER:-orik}}"
+
+IS_CONTAINER="no"
+IS_LXC="no"
+IS_VM="no"
+VIRT_TYPE="unknown"
+
+EXISTING_SETUP="no"
+DOCKER_CLI_FOUND="no"
+DOCKER_DAEMON_CONFIG_FOUND="no"
+DOCKER_MARKER_FOUND="no"
+DOCKER_SERVICE_ACTIVE="no"
+CONTAINERD_SERVICE_ACTIVE="no"
+
 DISABLE_SWAP="y"
 INSTALL_DOCKER_GC="n"
-DOCKER_FIREWALL_MODE="enabled"
-EXISTING_SETUP="no"
+CONFIGURE_UFW="y"
+DOCKER_FIREWALL_MODE="docker-iptables-enabled"
+
+DOCKER_INSTALLED="no"
+DOCKER_SERVICE_ENABLED="no"
+CONTAINERD_SERVICE_ENABLED="no"
+DOCKER_GROUP_READY="no"
+USER_ADDED_TO_DOCKER="no"
+DAEMON_CONFIG_VALID="no"
+UFW_ENABLED="no"
+SWAP_DISABLED="no"
+DOCKER_GC_INSTALLED="no"
+
+UBUNTU_CODENAME=""
+ARCHITECTURE=""
+
+TEMP_FILES=()
+
+# =========================================================
+#  OUTPUT / LOGGING FUNCTIONS
+# =========================================================
 
 # --- 3. HEADER FUNCTION ---
-# Displays the one-line Docker Setup banner.
+# Displays the Docker Setup banner.
 function header_info {
 echo -e "${BL}
 ██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗     ███████╗███████╗████████╗██╗   ██╗██████╗ 
@@ -50,39 +91,20 @@ ${CL}"
 # Provides consistent status messages.
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
-function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
-function msg_skip() { echo -e "${BFR} ${YW}! $1${CL}"; }
+function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 5. ROOT / SUDO VALIDATION ---
-# Allows running as the normal Ubuntu VM user, validates sudo once, and then uses sudo for privileged writes.
-if [ "$EUID" -eq 0 ]; then
-    SUDO_CMD=""
-else
-    SUDO_CMD="sudo"
+# --- 5. SECTION HEADER HELPER ---
+# Keeps terminal output organized into readable stages.
+function section() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${BL}$1${CL}"
+    echo -e "${BORDER}"
+}
 
-    echo -e "${YW}Sudo privileges are required for Docker Setup.${CL}"
-
-    if ! sudo -v; then
-        echo -e "${RD}ERROR:${CL} Sudo authentication failed."
-        exit 1
-    fi
-fi
-
-# --- 6. LOGGING & ERROR HANDLING ---
-# Logs output and reports failing line. Uses sudo tee when not running as root.
-if [ -n "$SUDO_CMD" ]; then
-    exec > >($SUDO_CMD tee -a "$LOG_FILE") 2>&1
-else
-    exec > >(tee -a "$LOG_FILE") 2>&1
-fi
-
-trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
-
-clear
-header_info
-
-# --- 7. TTY OUTPUT HELPER ---
+# --- 6. TTY OUTPUT HELPER ---
 # Prints directly to terminal from prompt functions.
 function tty_print() {
     if [ -w /dev/tty ]; then
@@ -92,7 +114,7 @@ function tty_print() {
     fi
 }
 
-# --- 8. TTY OUTPUT WITH NEWLINE HELPER ---
+# --- 7. TTY OUTPUT WITH NEWLINE HELPER ---
 # Prints directly to terminal with newline.
 function tty_println() {
     if [ -w /dev/tty ]; then
@@ -102,7 +124,117 @@ function tty_println() {
     fi
 }
 
-# --- 9. INPUT BUFFER FLUSH HELPER ---
+# =========================================================
+#  CLEANUP / ERROR HANDLING
+# =========================================================
+
+# --- 8. CLEANUP FUNCTION ---
+# Removes temporary files created during repository/key/command handling.
+function cleanup() {
+    local exit_code="$?"
+
+    for file in "${TEMP_FILES[@]:-}"; do
+        [ -n "$file" ] && [ -f "$file" ] && rm -f "$file" 2>/dev/null || true
+    done
+
+    exit "$exit_code"
+}
+
+# --- 9. ERROR TRAP HELPER ---
+# Shows failing line number and points to the log file.
+function on_error() {
+    local line_no="$1"
+    echo -e "${RD}ERROR:${CL} Script failed at line ${line_no}. Check ${LOG_FILE}"
+}
+
+# --- 10. COMMAND RUNNER ---
+# Runs privileged commands quietly, but shows real stderr if they fail.
+function run_cmd() {
+    local description="$1"
+    shift
+
+    local err_file=""
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    if [ -n "$SUDO_CMD" ]; then
+        if ! "$SUDO_CMD" "$@" > /dev/null 2> "$err_file"; then
+            echo ""
+            echo -e "${RD}Command failed during:${CL} ${description}"
+            echo -e "${YW}Command:${CL} sudo $*"
+            echo ""
+            echo -e "${RD}Real error:${CL}"
+            cat "$err_file"
+            rm -f "$err_file"
+            exit 1
+        fi
+    else
+        if ! "$@" > /dev/null 2> "$err_file"; then
+            echo ""
+            echo -e "${RD}Command failed during:${CL} ${description}"
+            echo -e "${YW}Command:${CL} $*"
+            echo ""
+            echo -e "${RD}Real error:${CL}"
+            cat "$err_file"
+            rm -f "$err_file"
+            exit 1
+        fi
+    fi
+
+    rm -f "$err_file"
+}
+
+# --- 11. OPTIONAL COMMAND RUNNER ---
+# Runs non-critical privileged commands quietly and does not stop the script.
+function run_optional() {
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" "$@" >/dev/null 2>&1 || true
+    else
+        "$@" >/dev/null 2>&1 || true
+    fi
+}
+
+# --- 12. ROOT FILE WRITE HELPER ---
+# Writes stdin to a privileged path with sudo when required.
+function write_root_file() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" tee "$path" >/dev/null
+    else
+        cat > "$path"
+    fi
+}
+
+# --- 13. ROOT PATH EXISTS HELPER ---
+# Checks whether a root-owned path exists.
+function root_path_exists() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -e "$path"
+    else
+        test -e "$path"
+    fi
+}
+
+# --- 14. ROOT FILE CAT HELPER ---
+# Reads root-owned file content.
+function root_cat_file() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cat "$path"
+    else
+        cat "$path"
+    fi
+}
+
+# =========================================================
+#  PROMPT FUNCTIONS
+# =========================================================
+
+# --- 15. INPUT BUFFER FLUSH HELPER ---
 # Clears leftover buffered keyboard input between prompts.
 # This prevents ENTER/SPACE from needing to be pressed twice on Ubuntu terminal sessions.
 function flush_input_buffer() {
@@ -113,7 +245,7 @@ function flush_input_buffer() {
     fi
 }
 
-# --- 10. YES/NO LABEL HELPER ---
+# --- 16. YES/NO LABEL HELPER ---
 # Converts Y/N answers to visible yes/no.
 function yes_no_label() {
     local value="$1"
@@ -125,7 +257,7 @@ function yes_no_label() {
     fi
 }
 
-# --- 11. BLOCKING YES/NO HELPER ---
+# --- 17. BLOCKING YES/NO HELPER ---
 # Used after SPACE is pressed during a timed Y/n prompt.
 # The countdown disappears and the prompt waits for Y/N/ENTER.
 # ENTER accepts the default.
@@ -152,24 +284,23 @@ function tty_read_yes_no_blocking() {
 
         if [[ -z "$key" ]]; then
             tty_print "${BFR}"
-            flush_input_buffer
             echo "$default"
+            flush_input_buffer
             return 0
         elif [[ "$key" =~ ^[YyNn]$ ]]; then
             tty_print "${BFR}"
-            flush_input_buffer
             echo "$key"
+            flush_input_buffer
             return 0
         fi
     done
 }
 
-# --- 12. TIMED YES/NO PROMPT HELPER ---
+# --- 18. TIMED YES/NO PROMPT HELPER ---
 # Uses wall-clock countdown.
-# ENTER accepts default.
+# SPACE pauses and waits.
 # Timeout accepts default.
-# SPACE pauses countdown and waits for Y/N/ENTER.
-# Final answer remains visible.
+# Final answer stays visible.
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
@@ -238,20 +369,20 @@ function timed_yes_no() {
     echo "$answer"
 }
 
-# --- 13. BLOCKING EDITABLE TEXT INPUT HELPER ---
-# Used when user starts typing or presses SPACE during text input.
-# The countdown disappears and the user can edit normally.
-# ENTER accepts typed value or default.
-function tty_read_text_blocking() {
+# --- 19. EDITABLE INPUT LOOP HELPER ---
+# Shared editable input system for text prompts.
+# The initial key is passed into the same editable buffer, so Backspace/Delete can delete it.
+function editable_input_loop() {
     local prompt="$1"
     local default="$2"
-    local buffer="${3:-}"
+    local initial_value="${3:-}"
+    local answer="$initial_value"
     local key=""
 
     flush_input_buffer
 
     while true; do
-        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${buffer}"
+        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
 
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
@@ -261,31 +392,26 @@ function tty_read_text_blocking() {
 
         case "$key" in
             "")
+                [ -z "$answer" ] && answer="$default"
                 tty_print "${BFR}"
+                echo "$answer"
                 flush_input_buffer
-                if [ -z "$buffer" ]; then
-                    echo "$default"
-                else
-                    echo "$buffer"
-                fi
                 return 0
                 ;;
             $'\177'|$'\b')
-                buffer="${buffer%?}"
+                answer="${answer%?}"
                 ;;
             *)
-                buffer+="$key"
+                answer+="$key"
                 ;;
         esac
     done
 }
 
-# --- 14. TIMED TEXT INPUT HELPER ---
-# Uses wall-clock countdown.
-# Typing or SPACE stops timer and opens editable input mode.
-# ENTER accepts default.
-# Timeout accepts default.
-# Final answer remains visible.
+# --- 20. TIMED TEXT INPUT HELPER ---
+# Shows wall-clock countdown.
+# SPACE pauses with empty editable buffer.
+# Any typed character pauses with that character already inside the editable buffer.
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
@@ -312,26 +438,26 @@ function timed_text_input() {
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
                     break
                 else
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
                     break
                 fi
             fi
         else
             if IFS= read -rsn1 -t 1 key; then
                 if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
                     break
                 else
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
                     break
                 fi
             fi
@@ -347,10 +473,10 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 15. REBOOT COUNTDOWN HELPER ---
-# Shows a two-line wall-clock reboot countdown without creating a new line every second.
-# ENTER/Y = reboot immediately.
-# SPACE/N = stop countdown and do not reboot.
+# --- 21. REBOOT COUNTDOWN HELPER ---
+# Offers Ubuntu VM Setup-compatible reboot flow so Docker group membership applies cleanly.
+# ENTER/Y = reboot now.
+# SPACE/N = cancel reboot.
 # Timeout = reboot automatically.
 function timed_reboot_countdown() {
     local seconds="$1"
@@ -360,7 +486,6 @@ function timed_reboot_countdown() {
     local remaining=""
     local first_draw="yes"
 
-    flush_input_buffer
     deadline=$(( $(date +%s) + seconds ))
 
     while true; do
@@ -371,7 +496,6 @@ function timed_reboot_countdown() {
             if [ "$first_draw" == "no" ]; then
                 tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
             fi
-            flush_input_buffer
             return 0
         fi
 
@@ -410,7 +534,7 @@ function timed_reboot_countdown() {
                         return 0
                         ;;
                     " "|[Nn])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                        tty_print "\033[2A\033[2K\r\033[1B\033[1A"
                         tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
                         flush_input_buffer
                         return 1
@@ -421,171 +545,518 @@ function timed_reboot_countdown() {
     done
 }
 
-# --- 16. SUDO PATH EXISTS HELPER ---
-# Checks whether a path exists, using sudo when required.
-function sudo_path_exists() {
-    local path="$1"
-    $SUDO_CMD test -e "$path"
+# =========================================================
+#  VALIDATION HELPERS
+# =========================================================
+
+# --- 22. USERNAME VALIDATION HELPER ---
+# Validates Linux username format before using it in usermod/group logic.
+function validate_linux_username() {
+    local username="$1"
+
+    if [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        return 0
+    fi
+
+    return 1
 }
 
-# --- 17. START CONFIRMATION ---
-# Starts Docker installation.
-echo -e "${YW}This script will install and configure Docker Engine, Docker CLI, containerd, Compose plugin and Buildx plugin.${CL}"
-start_yn=$(timed_yes_no "Start the Docker Setup Script?" "y")
-[[ "$start_yn" =~ ^[Nn] ]] && exit 0
+# --- 23. DEPENDENCY VALIDATION ---
+# Validates base commands before system changes.
+function validate_dependencies() {
+    local required_commands=(
+        apt-get
+        awk
+        cat
+        chmod
+        cp
+        date
+        dpkg
+        grep
+        id
+        mkdir
+        mktemp
+        rm
+        sed
+        tee
+        uname
+        usermod
+        xargs
+    )
 
-# --- 18. EXISTING SETUP DETECTION ---
-# Detects existing Docker install or completion marker before applying changes.
-msg_info "Checking for existing Docker setup"
+    local cmd=""
 
-if command -v docker >/dev/null 2>&1 || sudo_path_exists "$COMPLETED_MARKER" || sudo_path_exists "/etc/docker/daemon.json"; then
-    EXISTING_SETUP="yes"
-fi
+    for cmd in "${required_commands[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || msg_error "Required command not found: ${cmd}"
+    done
 
-if [ "$EXISTING_SETUP" == "yes" ]; then
-    msg_warn "Existing Docker setup detected"
-    echo ""
-    echo -e "${RD}WARNING: Existing Docker setup detected.${CL}"
-    echo -e "${YW}The script is mostly safe to rerun, but it can update packages, rewrite Docker daemon settings, and reapply firewall rules.${CL}"
-    echo ""
-
-    continue_existing_yn=$(timed_yes_no "Continue with existing Docker setup?" "n")
-
-    if [[ "$continue_existing_yn" =~ ^[Nn] ]]; then
-        echo -e "${YW}Docker Setup cancelled. Existing files were left untouched.${CL}"
-        exit 0
+    if [ -n "$SUDO_CMD" ]; then
+        command -v sudo >/dev/null 2>&1 || msg_error "sudo is required when not running as root."
     fi
-else
-    msg_ok "NO EXISTING DOCKER SETUP DETECTED"
-fi
+}
 
-# --- 19. USER OPTIONS ---
-# Lets user confirm target user, swap behaviour and optional docker-gc install.
-TARGET_USER=$(timed_text_input "Enter Linux user to add to docker group" "$TARGET_USER")
+# --- 24. DAEMON JSON VALIDATION HELPER ---
+# Validates daemon.json before restarting Docker.
+function validate_docker_daemon_json() {
+    if command -v dockerd >/dev/null 2>&1; then
+        if dockerd --validate --config-file /etc/docker/daemon.json >/dev/null 2>&1; then
+            DAEMON_CONFIG_VALID="yes"
+            return 0
+        fi
+    fi
 
-swap_yn=$(timed_yes_no "Disable swap in /etc/fstab?" "y")
-[[ "$swap_yn" =~ ^[Nn] ]] && DISABLE_SWAP="n" || DISABLE_SWAP="y"
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -m json.tool /etc/docker/daemon.json >/dev/null 2>&1; then
+            DAEMON_CONFIG_VALID="yes"
+            return 0
+        fi
+    fi
 
-gc_yn=$(timed_yes_no "Install docker-gc cleanup helper?" "n")
-[[ "$gc_yn" =~ ^[Yy] ]] && INSTALL_DOCKER_GC="y" || INSTALL_DOCKER_GC="n"
+    DAEMON_CONFIG_VALID="no"
+    return 1
+}
 
-# --- 20. SWAP HANDLING ---
+# =========================================================
+#  INITIALIZATION
+# =========================================================
+
+# --- 25. ROOT / SUDO DETECTION ---
+# Uses sudo when not root.
+function detect_root_or_sudo() {
+    if [ "$EUID" -eq 0 ]; then
+        SUDO_CMD=""
+    else
+        SUDO_CMD="sudo"
+    fi
+}
+
+# --- 26. SUDO VALIDATION ---
+# Validates sudo once near the start so authentication failures happen before changes.
+function validate_sudo_access() {
+    if [ -n "$SUDO_CMD" ]; then
+        echo -e "${YW}Sudo privileges are required for Docker Setup.${CL}"
+
+        if ! "$SUDO_CMD" -v; then
+            echo -e "${RD}ERROR:${CL} Sudo authentication failed."
+            exit 1
+        fi
+    fi
+}
+
+# --- 27. LOGGING INITIALIZATION ---
+# Logs output and reports failing line. Uses sudo tee when not running as root.
+function init_logging() {
+    if [ -n "$SUDO_CMD" ]; then
+        exec > >("$SUDO_CMD" tee -a "$LOG_FILE") 2>&1
+    else
+        exec > >(tee -a "$LOG_FILE") 2>&1
+    fi
+}
+
+# --- 28. SCRIPT INITIALIZATION ---
+# Starts sudo, logging, traps, banner and validation.
+function init_script() {
+    detect_root_or_sudo
+    validate_sudo_access
+    init_logging
+
+    trap 'on_error "$LINENO"' ERR
+    trap cleanup EXIT
+
+    clear
+    header_info
+
+    validate_dependencies
+}
+
+# =========================================================
+#  ENVIRONMENT / RERUN SAFETY
+# =========================================================
+
+# --- 29. ENVIRONMENT DETECTION ---
+# Detects VM, LXC/container, or unknown host.
+function detect_environment() {
+    section "ENVIRONMENT CHECK"
+
+    msg_info "Detecting environment"
+
+    IS_CONTAINER="no"
+    IS_LXC="no"
+    IS_VM="no"
+    VIRT_TYPE="unknown"
+
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        VIRT_TYPE="$(systemd-detect-virt 2>/dev/null || echo "none")"
+
+        if systemd-detect-virt --container --quiet 2>/dev/null; then
+            IS_CONTAINER="yes"
+            [ "$VIRT_TYPE" == "lxc" ] && IS_LXC="yes"
+        elif systemd-detect-virt --vm --quiet 2>/dev/null; then
+            IS_VM="yes"
+        fi
+    fi
+
+    if [ "$VIRT_TYPE" == "unknown" ] || [ "$VIRT_TYPE" == "none" ]; then
+        if grep -qa container=lxc /proc/1/environ 2>/dev/null; then
+            IS_CONTAINER="yes"
+            IS_LXC="yes"
+            VIRT_TYPE="lxc"
+        elif [ -d /sys/class/dmi/id ] && grep -qiE "qemu|kvm|vmware|virtualbox|hyper-v" /sys/class/dmi/id/product_name 2>/dev/null; then
+            IS_VM="yes"
+            VIRT_TYPE="vm"
+        else
+            VIRT_TYPE="${VIRT_TYPE:-unknown}"
+        fi
+    fi
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        CONFIGURE_UFW="n"
+        DISABLE_SWAP="n"
+        msg_ok "ENVIRONMENT DETECTED (${VIRT_TYPE} container)"
+    elif [ "$IS_VM" == "yes" ]; then
+        CONFIGURE_UFW="y"
+        DISABLE_SWAP="y"
+        msg_ok "ENVIRONMENT DETECTED (${VIRT_TYPE} VM)"
+    else
+        CONFIGURE_UFW="y"
+        DISABLE_SWAP="y"
+        msg_warn "Environment is not clearly VM/LXC (${VIRT_TYPE}); continuing with VM-style defaults"
+        IS_VM="yes"
+    fi
+}
+
+# --- 30. PREVIOUS MARKER CHECK ---
+# Warns if Docker Setup was already completed previously.
+function check_previous_marker() {
+    local continue_yn=""
+
+    if root_path_exists "$COMPLETED_MARKER"; then
+        section "PREVIOUS DOCKER SETUP MARKER DETECTED"
+
+        DOCKER_MARKER_FOUND="yes"
+
+        echo -e "${YW}A previous Docker Setup marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        echo ""
+        root_cat_file "$COMPLETED_MARKER" 2>/dev/null || true
+        echo ""
+
+        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
+
+        if [[ "$continue_yn" =~ ^[Nn] ]]; then
+            exit 0
+        fi
+    fi
+}
+
+# --- 31. EXISTING SETUP DETECTION ---
+# Detects current Docker state and shows exactly what was found.
+function detect_existing_setup() {
+    local continue_existing_yn=""
+
+    section "EXISTING SETUP CHECK"
+
+    msg_info "Checking for existing Docker setup"
+
+    command -v docker >/dev/null 2>&1 && DOCKER_CLI_FOUND="yes" || DOCKER_CLI_FOUND="no"
+    root_path_exists "/etc/docker/daemon.json" && DOCKER_DAEMON_CONFIG_FOUND="yes" || DOCKER_DAEMON_CONFIG_FOUND="no"
+    root_path_exists "$COMPLETED_MARKER" && DOCKER_MARKER_FOUND="yes" || DOCKER_MARKER_FOUND="no"
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/dev/null; then
+        DOCKER_SERVICE_ACTIVE="yes"
+    else
+        DOCKER_SERVICE_ACTIVE="no"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet containerd 2>/dev/null; then
+        CONTAINERD_SERVICE_ACTIVE="yes"
+    else
+        CONTAINERD_SERVICE_ACTIVE="no"
+    fi
+
+    if [ "$DOCKER_CLI_FOUND" == "yes" ] || [ "$DOCKER_DAEMON_CONFIG_FOUND" == "yes" ] || [ "$DOCKER_MARKER_FOUND" == "yes" ]; then
+        EXISTING_SETUP="yes"
+    else
+        EXISTING_SETUP="no"
+    fi
+
+    msg_ok "EXISTING SETUP CHECK COMPLETE"
+
+    echo ""
+    echo -e "${BL}DETECTED STATE:${CL}"
+    echo -e "DOCKER CLI FOUND:        ${GN}${DOCKER_CLI_FOUND}${CL}"
+    echo -e "DAEMON CONFIG FOUND:     ${GN}${DOCKER_DAEMON_CONFIG_FOUND}${CL}"
+    echo -e "COMPLETION MARKER FOUND: ${GN}${DOCKER_MARKER_FOUND}${CL}"
+    echo -e "DOCKER SERVICE ACTIVE:   ${GN}${DOCKER_SERVICE_ACTIVE}${CL}"
+    echo -e "CONTAINERD ACTIVE:       ${GN}${CONTAINERD_SERVICE_ACTIVE}${CL}"
+    echo ""
+
+    if [ "$EXISTING_SETUP" == "yes" ]; then
+        echo -e "${RD}WARNING: Existing Docker setup detected.${CL}"
+        echo -e "${YW}The script is mostly safe to rerun, but it can update packages, rewrite Docker daemon settings, and reapply firewall rules.${CL}"
+        echo ""
+
+        continue_existing_yn="$(timed_yes_no "Continue with existing Docker setup?" "n")"
+
+        if [[ "$continue_existing_yn" =~ ^[Nn] ]]; then
+            echo -e "${YW}Docker Setup cancelled. Existing files were left untouched.${CL}"
+            exit 0
+        fi
+    fi
+}
+
+# --- 32. START CONFIRMATION ---
+# Starts Docker installation.
+function start_confirmation() {
+    section "START"
+
+    echo -e "${YW}This script will install and configure Docker Engine, Docker CLI, containerd, Compose plugin and Buildx plugin.${CL}"
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        echo ""
+        echo -e "${RD}LXC/container mode detected.${CL}"
+        echo -e "${YW}Docker inside LXC requires Proxmox host support such as nesting, cgroups and suitable container privileges.${CL}"
+        echo -e "${YW}Swap handling, UFW and reboot default to safer container settings.${CL}"
+        echo ""
+        lxc_continue_yn="$(timed_yes_no "Continue Docker install inside LXC/container?" "n")"
+        [[ "$lxc_continue_yn" =~ ^[Nn] ]] && exit 0
+    fi
+
+    start_yn="$(timed_yes_no "Start the Docker Setup Script?" "y")
+    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+}
+
+# =========================================================
+#  USER OPTIONS
+# =========================================================
+
+# --- 33. USER OPTIONS ---
+# Lets user confirm target user, swap behaviour, UFW baseline and optional docker-gc install.
+function collect_user_options() {
+    local swap_yn=""
+    local gc_yn=""
+    local ufw_yn=""
+
+    section "USER OPTIONS"
+
+    while true; do
+        TARGET_USER="$(timed_text_input "Enter Linux user to add to docker group" "$TARGET_USER")"
+
+        if validate_linux_username "$TARGET_USER"; then
+            break
+        fi
+
+        msg_warn "Invalid username. Use lowercase Linux username format, for example: orik"
+    done
+
+    if ! id "$TARGET_USER" >/dev/null 2>&1; then
+        msg_error "Target user ${TARGET_USER} does not exist. Run script 4 first or create the user."
+    fi
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        swap_yn="$(timed_yes_no "Disable swap in /etc/fstab? LXC default is no" "n")"
+    else
+        swap_yn="$(timed_yes_no "Disable swap in /etc/fstab?" "y")"
+    fi
+    [[ "$swap_yn" =~ ^[Nn] ]] && DISABLE_SWAP="n" || DISABLE_SWAP="y"
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        ufw_yn="$(timed_yes_no "Configure UFW firewall inside LXC/container?" "n")"
+    else
+        ufw_yn="$(timed_yes_no "Configure UFW firewall baseline?" "y")"
+    fi
+    [[ "$ufw_yn" =~ ^[Nn] ]] && CONFIGURE_UFW="n" || CONFIGURE_UFW="y"
+
+    gc_yn="$(timed_yes_no "Install docker-gc cleanup helper?" "n")"
+    [[ "$gc_yn" =~ ^[Yy] ]] && INSTALL_DOCKER_GC="y" || INSTALL_DOCKER_GC="n"
+}
+
+# =========================================================
+#  APPLY FUNCTIONS
+# =========================================================
+
+# --- 34. SWAP HANDLING ---
 # Disables swap for Docker/database stability if selected.
-if [ "$DISABLE_SWAP" == "y" ]; then
-    msg_info "Disabling swap"
+# Backs up /etc/fstab before editing and avoids double-commenting lines.
+function handle_swap() {
+    section "SWAP HANDLING"
+
+    if [ "$DISABLE_SWAP" != "y" ]; then
+        SWAP_DISABLED="no"
+        msg_skip "SWAP WAS NOT DISABLED BECAUSE USER CHOSE NO"
+        return 0
+    fi
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        msg_warn "Swap handling inside LXC/container may be controlled by the Proxmox host"
+    fi
+
+    msg_info "Backing up /etc/fstab"
+    run_optional cp -n /etc/fstab /etc/fstab.docker-setup.bak
+    msg_ok "FSTAB BACKUP CREATED OR ALREADY EXISTS"
 
     msg_info "Turning off active swap"
-    $SUDO_CMD swapoff -a &>/dev/null || true
-    msg_ok "ACTIVE SWAP TURNED OFF"
+    run_optional swapoff -a
+    msg_ok "ACTIVE SWAP TURNED OFF OR NOT ACTIVE"
 
     msg_info "Commenting swap entries in /etc/fstab"
-    $SUDO_CMD sed -i '/[[:space:]]swap[[:space:]]/ s/^/#/' /etc/fstab
+    run_cmd "commenting swap entries in /etc/fstab" sed -i -E '/[[:space:]]swap[[:space:]]/ s/^([^#])/#\1/' /etc/fstab
     msg_ok "FSTAB SWAP ENTRIES DISABLED"
 
+    SWAP_DISABLED="yes"
+
     msg_ok "SWAP DISABLED"
-else
-    msg_skip "SWAP WAS NOT DISABLED BECAUSE USER CHOSE NO"
-fi
+}
 
-# --- 21. DEPENDENCY INSTALL ---
+# --- 35. DOCKER REPOSITORY DEPENDENCIES ---
 # Installs packages needed to add Docker's official Ubuntu repository.
-msg_info "Installing dependencies"
+function install_repository_dependencies() {
+    section "DOCKER REPOSITORY DEPENDENCIES"
 
-msg_info "Updating APT package lists"
-$SUDO_CMD apt-get update &>/dev/null
-msg_ok "APT PACKAGE LISTS UPDATED"
+    msg_info "Updating APT package lists"
+    run_cmd "updating APT package lists" apt-get update
+    msg_ok "APT PACKAGE LISTS UPDATED"
 
-msg_info "Installing Docker repository dependencies"
-$SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    ca-certificates \
-    curl \
-    gnupg \
-    lsb-release \
-    software-properties-common \
-    acl \
-    ufw \
-    &>/dev/null
-msg_ok "DOCKER REPOSITORY DEPENDENCIES INSTALLED"
+    msg_info "Installing Docker repository dependencies"
+    run_cmd "installing Docker repository dependencies" env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg
+    msg_ok "DOCKER REPOSITORY DEPENDENCIES INSTALLED"
+}
 
-msg_ok "DEPENDENCIES INSTALLED"
+# --- 36. DOCKER APT REPOSITORY ---
+# Adds Docker's official Ubuntu apt repository using docker.sources and docker.asc keyring.
+function configure_docker_repository() {
+    local key_tmp=""
+    local sources_tmp=""
 
-# --- 22. DOCKER REPOSITORY SETUP ---
-# Adds Docker's official GPG key and apt repository using modern keyring layout.
-msg_info "Adding Docker repository"
+    section "DOCKER REPOSITORY"
 
-msg_info "Creating APT keyrings directory"
-$SUDO_CMD install -m 0755 -d /etc/apt/keyrings
-msg_ok "APT KEYRINGS DIRECTORY READY"
+    msg_info "Detecting Ubuntu codename and architecture"
 
-msg_info "Installing Docker GPG key"
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | $SUDO_CMD gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-$SUDO_CMD chmod a+r /etc/apt/keyrings/docker.gpg
-msg_ok "DOCKER GPG KEY INSTALLED"
+    if [ ! -f /etc/os-release ]; then
+        msg_error "/etc/os-release not found. Cannot configure Docker repository."
+    fi
 
-msg_info "Writing Docker APT repository"
-echo \
-"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-$(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-$SUDO_CMD tee /etc/apt/sources.list.d/docker.list >/dev/null
-msg_ok "DOCKER APT REPOSITORY WRITTEN"
+    # shellcheck disable=SC1091
+    . /etc/os-release
 
-msg_ok "DOCKER REPOSITORY ADDED"
+    UBUNTU_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+    ARCHITECTURE="$(dpkg --print-architecture)"
 
-# --- 23. DOCKER INSTALL ---
-# Installs Docker Engine, CLI, containerd, Docker Compose plugin and Buildx plugin.
-msg_info "Installing Docker"
+    if [ -z "$UBUNTU_CODENAME" ]; then
+        msg_error "Could not detect Ubuntu codename from /etc/os-release."
+    fi
 
-msg_info "Updating APT package lists after Docker repository add"
-$SUDO_CMD apt-get update &>/dev/null
-msg_ok "APT PACKAGE LISTS UPDATED"
+    msg_ok "UBUNTU REPOSITORY TARGET DETECTED (${UBUNTU_CODENAME}, ${ARCHITECTURE})"
 
-msg_info "Installing Docker Engine, CLI, containerd, Compose and Buildx"
-$SUDO_CMD DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    docker-ce \
-    docker-ce-cli \
-    containerd.io \
-    docker-buildx-plugin \
-    docker-compose-plugin \
-    &>/dev/null
-msg_ok "DOCKER PACKAGES INSTALLED"
+    msg_info "Creating Docker apt keyring directory"
+    run_cmd "creating /etc/apt/keyrings" install -m 0755 -d /etc/apt/keyrings
+    msg_ok "DOCKER APT KEYRING DIRECTORY READY"
 
-msg_info "Enabling and starting Docker service"
-$SUDO_CMD systemctl enable --now docker &>/dev/null
-msg_ok "DOCKER SERVICE ENABLED AND STARTED"
+    msg_info "Downloading Docker official GPG key"
+    key_tmp="$(mktemp)"
+    TEMP_FILES+=("$key_tmp")
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o "$key_tmp"
+    run_cmd "installing Docker official GPG key" install -m 0644 "$key_tmp" /etc/apt/keyrings/docker.asc
+    msg_ok "DOCKER OFFICIAL GPG KEY INSTALLED"
 
-msg_info "Enabling and starting containerd service"
-$SUDO_CMD systemctl enable --now containerd &>/dev/null
-msg_ok "CONTAINERD SERVICE ENABLED AND STARTED"
+    msg_info "Writing Docker apt source"
+    sources_tmp="$(mktemp)"
+    TEMP_FILES+=("$sources_tmp")
 
-msg_ok "DOCKER INSTALLED"
+    cat > "$sources_tmp" <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${UBUNTU_CODENAME}
+Components: stable
+Architectures: ${ARCHITECTURE}
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
 
-# --- 24. DOCKER GROUP SETUP ---
-# Adds the target user to the docker group for non-root Docker CLI usage after next login.
-msg_info "Adding user ${TARGET_USER} to docker group"
+    run_cmd "installing Docker apt source" install -m 0644 "$sources_tmp" /etc/apt/sources.list.d/docker.sources
+    msg_ok "DOCKER APT SOURCE WRITTEN"
 
-if id "$TARGET_USER" >/dev/null 2>&1; then
-    $SUDO_CMD usermod -aG docker "$TARGET_USER" &>/dev/null
+    msg_info "Updating APT package lists with Docker repository"
+    run_cmd "updating APT after Docker repository setup" apt-get update
+    msg_ok "APT PACKAGE LISTS UPDATED WITH DOCKER REPOSITORY"
+}
+
+# --- 37. DOCKER ENGINE INSTALL ---
+# Installs Docker CE, Docker CLI, containerd, Buildx plugin and Compose plugin.
+function install_docker_engine() {
+    section "DOCKER INSTALL"
+
+    msg_info "Installing Docker Engine and plugins"
+    run_cmd "installing Docker Engine and plugins" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin
+
+    DOCKER_INSTALLED="yes"
+
+    msg_ok "DOCKER ENGINE AND PLUGINS INSTALLED"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        msg_info "Enabling containerd service"
+
+        if systemctl list-unit-files containerd.service >/dev/null 2>&1; then
+            run_cmd "enabling containerd service" systemctl enable --now containerd
+            CONTAINERD_SERVICE_ENABLED="yes"
+            msg_ok "CONTAINERD SERVICE ENABLED"
+        else
+            CONTAINERD_SERVICE_ENABLED="not-found"
+            msg_warn "containerd systemd unit not found"
+        fi
+
+        msg_info "Enabling Docker service"
+
+        if systemctl list-unit-files docker.service >/dev/null 2>&1; then
+            run_cmd "enabling Docker service" systemctl enable --now docker
+            DOCKER_SERVICE_ENABLED="yes"
+            msg_ok "DOCKER SERVICE ENABLED"
+        else
+            DOCKER_SERVICE_ENABLED="not-found"
+            msg_warn "Docker systemd unit not found"
+        fi
+    else
+        CONTAINERD_SERVICE_ENABLED="no-systemctl"
+        DOCKER_SERVICE_ENABLED="no-systemctl"
+        msg_warn "systemctl not available; Docker services were not enabled automatically"
+    fi
+}
+
+# --- 38. DOCKER GROUP CONFIGURATION ---
+# Ensures docker group exists and adds selected user to it.
+function configure_docker_group() {
+    section "DOCKER GROUP"
+
+    msg_info "Checking docker group"
+
+    if ! getent group docker >/dev/null 2>&1; then
+        run_cmd "creating docker group" groupadd docker
+    fi
+
+    DOCKER_GROUP_READY="yes"
+    msg_ok "DOCKER GROUP READY"
+
+    msg_info "Adding ${TARGET_USER} to docker group"
+    run_cmd "adding ${TARGET_USER} to docker group" usermod -aG docker "$TARGET_USER"
+    USER_ADDED_TO_DOCKER="yes"
     msg_ok "USER ADDED TO DOCKER GROUP"
-else
-    msg_warn "Target user ${TARGET_USER} does not exist; docker group membership skipped"
-fi
+}
 
-# --- 25. DOCKER FIREWALL MODE ---
-# Keeps Docker iptables enabled so Docker networking, NAT and published ports work correctly.
-msg_info "Configuring Docker firewall mode"
+# --- 39. DOCKER DAEMON CONFIGURATION ---
+# Writes Docker daemon.json with iptables enabled, log rotation and live-restore.
+function configure_docker_daemon() {
+    section "DAEMON CONFIG"
 
-msg_info "Creating Docker config directory"
-$SUDO_CMD mkdir -p /etc/docker
-msg_ok "DOCKER CONFIG DIRECTORY READY"
+    msg_info "Creating /etc/docker directory"
+    run_cmd "creating /etc/docker directory" mkdir -p /etc/docker
+    msg_ok "DOCKER CONFIG DIRECTORY READY"
 
-if sudo_path_exists "/etc/docker/daemon.json"; then
-    msg_info "Backing up existing Docker daemon config"
-    $SUDO_CMD cp -n /etc/docker/daemon.json "/etc/docker/daemon.json.bak.$(date +%Y%m%d%H%M%S)" || true
-    msg_ok "EXISTING DOCKER DAEMON CONFIG BACKED UP"
-fi
+    msg_info "Writing Docker daemon config"
 
-msg_info "Writing Docker daemon config"
-cat <<EOF | $SUDO_CMD tee /etc/docker/daemon.json >/dev/null
+    write_root_file /etc/docker/daemon.json <<EOF
 {
   "iptables": true,
   "log-driver": "json-file",
@@ -596,118 +1067,381 @@ cat <<EOF | $SUDO_CMD tee /etc/docker/daemon.json >/dev/null
   "live-restore": true
 }
 EOF
-msg_ok "DOCKER DAEMON CONFIG WRITTEN"
 
-msg_info "Restarting Docker service"
-$SUDO_CMD systemctl restart docker &>/dev/null
-msg_ok "DOCKER SERVICE RESTARTED"
+    msg_ok "DOCKER DAEMON CONFIG WRITTEN"
 
-msg_ok "DOCKER FIREWALL MODE CONFIGURED"
+    msg_info "Validating Docker daemon config"
 
-# --- 26. UFW BASELINE ---
+    if validate_docker_daemon_json; then
+        msg_ok "DOCKER DAEMON CONFIG VALID"
+    else
+        msg_error "Docker daemon config validation failed."
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+        msg_info "Restarting Docker service"
+        run_cmd "restarting Docker service" systemctl restart docker
+        msg_ok "DOCKER SERVICE RESTARTED"
+    else
+        msg_warn "Docker service restart skipped because systemd Docker service was not detected"
+    fi
+
+    msg_ok "DOCKER FIREWALL MODE CONFIGURED (${DOCKER_FIREWALL_MODE})"
+}
+
+# --- 40. UFW BASELINE ---
 # Allows SSH, HTTP and HTTPS on the Ubuntu VM.
-msg_info "Configuring UFW firewall"
+# Warns clearly that Docker-published ports can bypass UFW through Docker-managed iptables.
+function configure_ufw_firewall() {
+    section "FIREWALL"
 
-msg_info "Setting UFW default policies"
-$SUDO_CMD ufw default deny incoming &>/dev/null || true
-$SUDO_CMD ufw default allow outgoing &>/dev/null || true
-msg_ok "UFW DEFAULT POLICIES CONFIGURED"
+    echo -e "${YW}Docker manages its own firewall/NAT rules.${CL}"
+    echo -e "${YW}UFW protects the host, but Docker-published container ports may still be reachable unless controlled later with DOCKER-USER rules.${CL}"
+    echo -e "${YW}For this project, avoid publishing random ports directly; expose public services through Traefik on 80/443.${CL}"
+    echo ""
 
-msg_info "Allowing SSH, HTTP and HTTPS"
-$SUDO_CMD ufw allow OpenSSH &>/dev/null || true
-$SUDO_CMD ufw allow 80/tcp &>/dev/null || true
-$SUDO_CMD ufw allow 443/tcp &>/dev/null || true
-msg_ok "UFW ALLOW RULES ADDED"
+    if [ "$CONFIGURE_UFW" != "y" ]; then
+        UFW_ENABLED="no"
+        msg_skip "UFW FIREWALL WAS NOT CONFIGURED BECAUSE USER CHOSE NO"
+        return 0
+    fi
 
-msg_info "Enabling UFW"
-$SUDO_CMD ufw --force enable &>/dev/null || true
-msg_ok "UFW ENABLED"
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        msg_warn "LXC/container mode detected. UFW may fail without container netfilter permissions."
+    fi
 
-msg_ok "UFW FIREWALL CONFIGURED"
+    msg_info "Installing UFW"
+    run_cmd "installing UFW" env DEBIAN_FRONTEND=noninteractive apt-get install -y ufw
+    msg_ok "UFW INSTALLED"
 
-# --- 27. DOCKER-GC OPTIONAL INSTALL ---
+    msg_info "Setting UFW default policies"
+    run_optional ufw default deny incoming
+    run_optional ufw default allow outgoing
+    msg_ok "UFW DEFAULT POLICIES CONFIGURED"
+
+    msg_info "Allowing SSH, HTTP and HTTPS"
+    run_optional ufw allow OpenSSH
+    run_optional ufw allow 80/tcp
+    run_optional ufw allow 443/tcp
+    msg_ok "UFW ALLOW RULES ADDED"
+
+    msg_info "Enabling UFW"
+
+    if [ -n "$SUDO_CMD" ]; then
+        if "$SUDO_CMD" ufw --force enable >/dev/null 2>&1; then
+            UFW_ENABLED="yes"
+            msg_ok "UFW ENABLED"
+        else
+            UFW_ENABLED="failed"
+            msg_warn "UFW failed to enable. This can happen inside restricted LXC containers."
+        fi
+    else
+        if ufw --force enable >/dev/null 2>&1; then
+            UFW_ENABLED="yes"
+            msg_ok "UFW ENABLED"
+        else
+            UFW_ENABLED="failed"
+            msg_warn "UFW failed to enable. This can happen inside restricted LXC containers."
+        fi
+    fi
+
+    msg_ok "UFW FIREWALL CONFIGURED"
+}
+
+# --- 41. DOCKER-GC OPTIONAL INSTALL ---
 # Creates a simple safe Docker cleanup helper instead of aggressive automatic pruning.
-if [ "$INSTALL_DOCKER_GC" == "y" ]; then
-    msg_info "Installing docker-gc helper"
+function install_docker_gc_helper() {
+    section "DOCKER-GC HELPER"
+
+    if [ "$INSTALL_DOCKER_GC" != "y" ]; then
+        DOCKER_GC_INSTALLED="no"
+        msg_skip "DOCKER-GC CLEANUP HELPER WAS NOT INSTALLED BECAUSE USER CHOSE NO"
+        return 0
+    fi
 
     msg_info "Writing safe Docker cleanup helper"
-    cat <<'EOF' | $SUDO_CMD tee /usr/local/sbin/docker-gc-safe >/dev/null
+
+    write_root_file /usr/local/sbin/docker-gc-safe <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
+echo "Docker cleanup helper"
+echo "This removes unused containers, networks, dangling images, and old build cache."
+echo ""
+
 docker system prune -f
 docker image prune -f
 docker builder prune -f --filter "until=168h"
 EOF
+
     msg_ok "DOCKER-GC HELPER WRITTEN"
 
     msg_info "Making docker-gc helper executable"
-    $SUDO_CMD chmod +x /usr/local/sbin/docker-gc-safe
+    run_cmd "making docker-gc helper executable" chmod +x /usr/local/sbin/docker-gc-safe
     msg_ok "DOCKER-GC HELPER MADE EXECUTABLE"
 
+    DOCKER_GC_INSTALLED="yes"
+
     msg_ok "DOCKER-GC HELPER INSTALLED"
-else
-    msg_skip "DOCKER-GC CLEANUP HELPER WAS NOT INSTALLED BECAUSE USER CHOSE NO"
-fi
+}
 
-# --- 28. VERIFY INSTALL ---
+# =========================================================
+#  VERIFICATION / MARKER / SUMMARY
+# =========================================================
+
+# --- 42. DOCKER VERIFICATION ---
 # Checks Docker daemon, Docker CLI and Compose plugin through sudo so verification works before docker group re-login.
-msg_info "Verifying Docker installation"
+function verify_docker_installation() {
+    section "VERIFICATION"
 
-msg_info "Checking Docker CLI"
-$SUDO_CMD docker --version >/dev/null
-msg_ok "DOCKER CLI VERIFIED"
+    msg_info "Checking Docker CLI"
+    run_cmd "checking Docker CLI" docker --version
+    msg_ok "DOCKER CLI VERIFIED"
 
-msg_info "Checking Docker daemon"
-$SUDO_CMD docker info >/dev/null
-msg_ok "DOCKER DAEMON VERIFIED"
+    msg_info "Checking Docker daemon"
+    run_cmd "checking Docker daemon" docker info
+    msg_ok "DOCKER DAEMON VERIFIED"
 
-msg_info "Checking Docker Compose plugin"
-$SUDO_CMD docker compose version >/dev/null
-msg_ok "DOCKER COMPOSE VERIFIED"
+    msg_info "Checking Docker Compose plugin"
+    run_cmd "checking Docker Compose plugin" docker compose version
+    msg_ok "DOCKER COMPOSE VERIFIED"
 
-msg_ok "DOCKER VERIFIED"
+    msg_ok "DOCKER VERIFIED"
+}
 
-# --- 29. COMPLETION MARKER ---
+# --- 43. VERIFICATION REPORT ---
+# Writes a detailed Docker verification report to /var/log/docker-setup-verify.log.
+function create_verification_report() {
+    section "VERIFICATION REPORT"
+
+    msg_info "Writing Docker verification report"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<EOF
+--- DOCKER SETUP VERIFICATION REPORT ---
+Date: $(date)
+Target user: $TARGET_USER
+Virt Type: $VIRT_TYPE
+Container: $IS_CONTAINER
+LXC: $IS_LXC
+VM: $IS_VM
+
+Results:
+EOF
+    else
+        cat > "$VERIFY_LOG" <<EOF
+--- DOCKER SETUP VERIFICATION REPORT ---
+Date: $(date)
+Target user: $TARGET_USER
+Virt Type: $VIRT_TYPE
+Container: $IS_CONTAINER
+LXC: $IS_LXC
+VM: $IS_VM
+
+Results:
+EOF
+    fi
+
+    {
+        if command -v docker >/dev/null 2>&1; then echo "✓ PASS - Docker CLI exists"; else echo "✗ FAIL - Docker CLI missing"; fi
+        if docker --version >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker --version >/dev/null 2>&1; }; then echo "✓ PASS - docker --version works"; else echo "✗ FAIL - docker --version failed"; fi
+        if docker compose version >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version >/dev/null 2>&1; }; then echo "✓ PASS - Docker Compose plugin works"; else echo "✗ FAIL - Docker Compose plugin failed"; fi
+        if docker info >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker info >/dev/null 2>&1; }; then echo "✓ PASS - Docker daemon reachable"; else echo "✗ FAIL - Docker daemon not reachable"; fi
+
+        if command -v systemctl >/dev/null 2>&1; then
+            if systemctl is-active --quiet docker 2>/dev/null; then echo "✓ PASS - Docker service active"; else echo "! WARN - Docker service not active or unavailable"; fi
+            if systemctl is-active --quiet containerd 2>/dev/null; then echo "✓ PASS - containerd service active"; else echo "! WARN - containerd service not active or unavailable"; fi
+        else
+            echo "! INFO - systemctl unavailable"
+        fi
+
+        if [ -f /etc/docker/daemon.json ]; then echo "✓ PASS - daemon.json exists"; else echo "✗ FAIL - daemon.json missing"; fi
+        if validate_docker_daemon_json; then echo "✓ PASS - daemon.json valid"; else echo "✗ FAIL - daemon.json validation failed"; fi
+
+        if getent group docker >/dev/null 2>&1; then echo "✓ PASS - docker group exists"; else echo "✗ FAIL - docker group missing"; fi
+        if id -nG "$TARGET_USER" 2>/dev/null | grep -qw docker; then echo "✓ PASS - target user is in docker group"; else echo "! WARN - target user docker group membership not confirmed"; fi
+
+        if [ "$DISABLE_SWAP" == "y" ]; then
+            if swapon --show 2>/dev/null | grep -q .; then echo "! WARN - active swap still detected"; else echo "✓ PASS - no active swap detected"; fi
+        else
+            echo "! INFO - swap disable not selected"
+        fi
+
+        if [ "$CONFIGURE_UFW" == "y" ]; then
+            if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then echo "✓ PASS - UFW active"; else echo "! WARN - UFW not active or not available"; fi
+        else
+            echo "! INFO - UFW setup not selected"
+        fi
+
+        if [ -f "$COMPLETED_MARKER" ]; then echo "✓ PASS - completion marker exists"; else echo "! WARN - completion marker not present yet at verification time"; fi
+
+        echo ""
+        echo "Docker versions:"
+        docker --version 2>/dev/null || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker --version 2>/dev/null; } || true
+        docker compose version 2>/dev/null || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version 2>/dev/null; } || true
+    } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
+
+    msg_ok "DOCKER VERIFICATION REPORT WRITTEN"
+}
+
+# --- 44. COMPLETION MARKER ---
 # Creates marker showing setup completed.
-msg_info "Writing completion marker"
+function write_completion_marker() {
+    section "COMPLETION MARKER"
 
-$SUDO_CMD tee "$COMPLETED_MARKER" >/dev/null <<EOF
+    msg_info "Writing completion marker"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" bash -c "cat > '$COMPLETED_MARKER'" <<EOF
 Docker Setup completed on: $(date)
 Target user: $TARGET_USER
-Swap disabled: $DISABLE_SWAP
-Docker GC helper: $INSTALL_DOCKER_GC
+Virt Type: $VIRT_TYPE
+Container: $IS_CONTAINER
+LXC: $IS_LXC
+VM: $IS_VM
+Swap disabled selected: $DISABLE_SWAP
+Swap disabled result: $SWAP_DISABLED
+Docker installed: $DOCKER_INSTALLED
+Docker service enabled: $DOCKER_SERVICE_ENABLED
+containerd service enabled: $CONTAINERD_SERVICE_ENABLED
+Docker group ready: $DOCKER_GROUP_READY
+User added to docker group: $USER_ADDED_TO_DOCKER
+Docker GC helper: $DOCKER_GC_INSTALLED
 Docker firewall mode: $DOCKER_FIREWALL_MODE
+UFW configured selected: $CONFIGURE_UFW
+UFW result: $UFW_ENABLED
+Daemon config valid: $DAEMON_CONFIG_VALID
 Existing setup detected: $EXISTING_SETUP
+Verify log: $VERIFY_LOG
 EOF
-
-msg_ok "COMPLETION MARKER WRITTEN"
-
-# --- 30. FINAL SUMMARY ---
-# Displays installed versions and logout/reboot reminder.
-echo ""
-echo -e "${GN}FINISHED!${CL}"
-$SUDO_CMD docker --version
-$SUDO_CMD docker compose version
-echo ""
-echo -e "TARGET USER: ${GN}${TARGET_USER}${CL}"
-echo -e "SWAP DISABLED: ${GN}${DISABLE_SWAP}${CL}"
-echo -e "DOCKER-GC HELPER: ${GN}${INSTALL_DOCKER_GC}${CL}"
-echo -e "EXISTING SETUP DETECTED: ${GN}${EXISTING_SETUP}${CL}"
-echo ""
-echo -e "${YW}Docker group membership usually requires logout/login or reboot before using Docker without sudo.${CL}"
-echo ""
-
-# --- 31. REBOOT OPTION ---
-# Offers Ubuntu VM Setup-compatible reboot flow so Docker group membership applies cleanly.
-reboot_yn=$(timed_yes_no "Reboot Ubuntu VM now so Docker group membership applies?" "y")
-
-if [[ "$reboot_yn" =~ ^[Yy] ]]; then
-    if timed_reboot_countdown "$REBOOT_T"; then
-        $SUDO_CMD reboot
+    else
+        cat > "$COMPLETED_MARKER" <<EOF
+Docker Setup completed on: $(date)
+Target user: $TARGET_USER
+Virt Type: $VIRT_TYPE
+Container: $IS_CONTAINER
+LXC: $IS_LXC
+VM: $IS_VM
+Swap disabled selected: $DISABLE_SWAP
+Swap disabled result: $SWAP_DISABLED
+Docker installed: $DOCKER_INSTALLED
+Docker service enabled: $DOCKER_SERVICE_ENABLED
+containerd service enabled: $CONTAINERD_SERVICE_ENABLED
+Docker group ready: $DOCKER_GROUP_READY
+User added to docker group: $USER_ADDED_TO_DOCKER
+Docker GC helper: $DOCKER_GC_INSTALLED
+Docker firewall mode: $DOCKER_FIREWALL_MODE
+UFW configured selected: $CONFIGURE_UFW
+UFW result: $UFW_ENABLED
+Daemon config valid: $DAEMON_CONFIG_VALID
+Existing setup detected: $EXISTING_SETUP
+Verify log: $VERIFY_LOG
+EOF
     fi
-else
-    msg_skip "REBOOT WAS NOT STARTED BECAUSE USER CHOSE NO"
-    echo -e "${YW}Log out and back in before using Docker without sudo.${CL}"
-fi
 
-exit 0
+    msg_ok "COMPLETION MARKER WRITTEN"
+}
+
+# --- 45. FINAL SUMMARY ---
+# Displays installed versions and logout/reboot reminder.
+function show_final_summary() {
+    section "FINISHED"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" docker --version || true
+        "$SUDO_CMD" docker compose version || true
+    else
+        docker --version || true
+        docker compose version || true
+    fi
+
+    echo ""
+    echo -e "TARGET USER:             ${GN}${TARGET_USER}${CL}"
+    echo -e "ENVIRONMENT:             ${GN}$([ "$IS_CONTAINER" == "yes" ] && echo "LXC/Container (${VIRT_TYPE})" || echo "VM (${VIRT_TYPE})")${CL}"
+    echo -e "SWAP DISABLED:           ${GN}${SWAP_DISABLED}${CL}"
+    echo -e "DOCKER INSTALLED:        ${GN}${DOCKER_INSTALLED}${CL}"
+    echo -e "DOCKER SERVICE:          ${GN}${DOCKER_SERVICE_ENABLED}${CL}"
+    echo -e "CONTAINERD SERVICE:      ${GN}${CONTAINERD_SERVICE_ENABLED}${CL}"
+    echo -e "DOCKER GROUP READY:      ${GN}${DOCKER_GROUP_READY}${CL}"
+    echo -e "USER ADDED TO DOCKER:    ${GN}${USER_ADDED_TO_DOCKER}${CL}"
+    echo -e "DOCKER-GC HELPER:        ${GN}${DOCKER_GC_INSTALLED}${CL}"
+    echo -e "UFW FIREWALL:            ${GN}${UFW_ENABLED}${CL}"
+    echo -e "DAEMON CONFIG VALID:     ${GN}${DAEMON_CONFIG_VALID}${CL}"
+    echo -e "EXISTING SETUP DETECTED: ${GN}${EXISTING_SETUP}${CL}"
+    echo -e "VERIFY LOG:              ${GN}${VERIFY_LOG}${CL}"
+    echo ""
+    echo -e "${YW}Docker group membership usually requires logout/login or reboot before using Docker without sudo.${CL}"
+    echo ""
+    echo -e "${BL}SECURITY NOTE:${CL}"
+    echo -e "${YW}Docker can publish container ports using Docker-managed firewall rules. Keep public exposure limited to Traefik/80/443 unless intentionally needed.${CL}"
+    echo -e "${YW}We will revisit DOCKER-USER firewall hardening after the compose stack is fully deployed and stable.${CL}"
+    echo ""
+    echo -e "${BL}NEXT STEP:${CL}"
+    echo -e "${YW}After reboot and SSH reconnect, run script 6-dockerENVsetup-crea.sh.${CL}"
+    echo ""
+}
+
+# --- 46. REBOOT OPTION ---
+# Offers reboot flow so Docker group membership applies cleanly.
+# LXC/container defaults to no because restart may be host-controlled.
+function reboot_prompt() {
+    local reboot_yn=""
+    local default_reboot="y"
+
+    section "REBOOT"
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        default_reboot="n"
+        echo -e "${YW}Container mode detected. Restart may be controlled from the Proxmox host.${CL}"
+    fi
+
+    reboot_yn="$(timed_yes_no "Reboot Ubuntu system now so Docker group membership applies?" "$default_reboot")"
+
+    if [[ "$reboot_yn" =~ ^[Yy] ]]; then
+        if timed_reboot_countdown "$REBOOT_T"; then
+            if [ -n "$SUDO_CMD" ]; then
+                "$SUDO_CMD" reboot
+            else
+                reboot
+            fi
+        fi
+    else
+        msg_skip "REBOOT WAS NOT STARTED BECAUSE USER CHOSE NO"
+        echo -e "${YW}Log out and back in before using Docker without sudo.${CL}"
+    fi
+}
+
+# =========================================================
+#  MAIN ORCHESTRATION
+# =========================================================
+
+# --- 47. MAIN FUNCTION ---
+# Runs the full setup in validation -> option collection -> install -> verify order.
+function main() {
+    init_script
+
+    detect_environment
+    check_previous_marker
+    detect_existing_setup
+    start_confirmation
+    collect_user_options
+
+    handle_swap
+    install_repository_dependencies
+    configure_docker_repository
+    install_docker_engine
+    configure_docker_group
+    configure_docker_daemon
+    configure_ufw_firewall
+    install_docker_gc_helper
+
+    verify_docker_installation
+    write_completion_marker
+    create_verification_report
+    show_final_summary
+    reboot_prompt
+
+    exit 0
+}
+
+main "$@"

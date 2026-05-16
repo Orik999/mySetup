@@ -3,60 +3,64 @@ set -euo pipefail
 shopt -s inherit_errexit nullglob
 
 # =========================================================
-#  Docker ENV Setup
+#  Docker ENV Setup Crea
 # =========================================================
 
 # --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
-YW=`echo "\033[33m"`
-BL=`echo "\033[36m"`
-RD=`echo "\033[01;31m"`
-BGN=`echo "\033[4;92m"`
-GN=`echo "\033[1;92m"`
-DGN=`echo "\033[32m"`
-CL=`echo "\033[m"`
-CLF=`echo "\033[5m"`
+# Central visual theme for Docker ENV Setup.
+YW="$(printf '\033[33m')"
+BL="$(printf '\033[36m')"
+RD="$(printf '\033[01;31m')"
+BGN="$(printf '\033[4;92m')"
+GN="$(printf '\033[1;92m')"
+DGN="$(printf '\033[32m')"
+CL="$(printf '\033[m')"
+CLF="$(printf '\033[5m')"
 BFR="\\r\\033[K"
+
 HOLD="-"
 CM="${GN}✓${CL}"
+WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
+BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 # --- 2. GLOBAL VARIABLES ---
+# Stores timers, defaults, paths, secret values, state flags and final result values.
 T=15
+
 LOG_FILE="/var/log/docker-env-setup.log"
+VERIFY_LOG="/var/log/docker-env-setup-verify.log"
 COMPLETED_MARKER="/root/.docker-env-setup-completed"
 
-DEFAULT_USER="youruser"
-DEFAULT_USERDIR="/home/${DEFAULT_USER}"
-DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
+DEFAULT_USER="orik"
 DEFAULT_TZ="Europe/London"
-DEFAULT_DOMAIN="example.com"
-DEFAULT_CF_API_EMAIL="cloudflare-email@example.com"
+DEFAULT_DOMAIN="najafov.co.uk"
+DEFAULT_CF_API_EMAIL="oriknj999@gmail.com"
 DEFAULT_CF_ZONE_ID=""
-DEFAULT_CF_API_TOKEN=""
 DEFAULT_HTPASSWD_USER="admin"
 
 SUDO_CMD=""
+LOGGING_ENABLED="no"
 
 DOCKER_USER=""
 USERDIR=""
 DOCKER_DIR=""
 DOCKER_SECRETS_DIR=""
+CF_API_TOKEN_FILE=""
+
+PUID_VALUE=""
+PGID_VALUE=""
 TZ_VALUE=""
 DOMAIN_VALUE=""
 CF_API_EMAIL_VALUE=""
 CF_ZONE_ID_VALUE=""
 CF_API_TOKEN_VALUE=""
-CF_API_TOKEN_FILE=""
-HTPASSWD_USER_VALUE=""
-HTPASSWD_PASSWORD_VALUE=""
-HTPASSWD_HASH_VALUE=""
-HTPASSWD_LINE_VALUE=""
-HTPASSWD_MODE="empty"
-PUID_VALUE=""
-PGID_VALUE=""
 
 EXISTING_SETUP="no"
 REGENERATE_SECRETS="n"
+DOCKER_READY="unknown"
+DOCKER_COMPOSE_READY="unknown"
+DOCKER_USER_IN_DOCKER_GROUP="unknown"
 
 POSTGRES_PASSWORD=""
 REDIS_PASSWORD=""
@@ -65,8 +69,23 @@ AUTHENTIK_POSTGRES_PASSWORD=""
 POSTIZ_POSTGRES_PASSWORD=""
 TEMPORAL_POSTGRES_PASSWORD=""
 
+HTPASSWD_MODE="empty"
+HTPASSWD_USER_VALUE=""
+HTPASSWD_PASSWORD_VALUE=""
+HTPASSWD_HASH_VALUE=""
+HTPASSWD_LINE_VALUE=""
+
+SECRET_DISPLAY_WAS_SHOWN="no"
+SECRET_SCREEN_CLEARED="no"
+
+TEMP_FILES=()
+
+# =========================================================
+#  OUTPUT / LOGGING FUNCTIONS
+# =========================================================
+
 # --- 3. HEADER FUNCTION ---
-# Displays one-line Docker ENV Setup banner.
+# Displays the Docker ENV Setup banner.
 function header_info {
 echo -e "${BL}
 ██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗     ███████╗███╗   ██╗██╗   ██╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
@@ -79,53 +98,24 @@ ${CL}"
 }
 
 # --- 4. MESSAGE HELPER FUNCTIONS ---
-# Provides consistent status messages.
+# Provides consistent display -> apply -> success output style.
 function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
-function msg_warn() { echo -e "${BFR} ${YW}! $1${CL}"; }
+function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
-# --- 5. ROOT / SUDO VALIDATION ---
-# Allows running as the normal Ubuntu VM user, validates sudo once, and then uses sudo for privileged writes.
-if [ "$EUID" -eq 0 ]; then
-    SUDO_CMD=""
-else
-    SUDO_CMD="sudo"
-
-    echo -e "${YW}Sudo privileges are required for Docker ENV Setup.${CL}"
-
-    if ! sudo -v; then
-        echo -e "${RD}ERROR:${CL} Sudo authentication failed."
-        exit 1
-    fi
-fi
-
-# --- 6. LOGGING & ERROR HANDLING ---
-# Logs normal output and reports failing line.
-# FD 3/4 keep the real terminal streams so sensitive sections can temporarily bypass tee logging.
-exec 3>&1 4>&2
-
-function enable_logging() {
-    if [ -n "$SUDO_CMD" ]; then
-        exec > >($SUDO_CMD tee -a "$LOG_FILE") 2>&1
-    else
-        exec > >(tee -a "$LOG_FILE") 2>&1
-    fi
+# --- 5. SECTION HEADER HELPER ---
+# Keeps terminal output clean and grouped by stage.
+function section() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${BL}$1${CL}"
+    echo -e "${BORDER}"
 }
 
-function disable_logging() {
-    exec 1>&3 2>&4
-}
-
-enable_logging
-
-trap 'echo -e "${RD}ERROR:${CL} Script failed at line $LINENO. Check ${LOG_FILE}"' ERR
-
-clear
-header_info
-
-# --- 7. TTY OUTPUT HELPER ---
-# Prints directly to terminal from prompt functions.
+# --- 6. TTY PRINT HELPER ---
+# Prints directly to terminal even when functions return values through stdout.
 function tty_print() {
     if [ -w /dev/tty ]; then
         echo -ne "$*" > /dev/tty
@@ -134,7 +124,7 @@ function tty_print() {
     fi
 }
 
-# --- 8. TTY OUTPUT WITH NEWLINE HELPER ---
+# --- 7. TTY PRINTLN HELPER ---
 # Prints directly to terminal with newline.
 function tty_println() {
     if [ -w /dev/tty ]; then
@@ -144,8 +134,225 @@ function tty_println() {
     fi
 }
 
-# --- 9. YES/NO LABEL HELPER ---
-# Converts Y/N answer into visible yes/no text.
+# =========================================================
+#  CLEANUP / ERROR HANDLING
+# =========================================================
+
+# --- 8. CLEANUP FUNCTION ---
+# Removes temporary files created during execution.
+function cleanup() {
+    local exit_code="$?"
+
+    for file in "${TEMP_FILES[@]:-}"; do
+        [ -n "$file" ] && [ -f "$file" ] && rm -f "$file" 2>/dev/null || true
+    done
+
+    exit "$exit_code"
+}
+
+# --- 9. ERROR TRAP HELPER ---
+# Shows failing line number and points to the log file.
+function on_error() {
+    local line_no="$1"
+    echo -e "${RD}ERROR:${CL} Script failed at line ${line_no}. Check ${LOG_FILE}"
+}
+
+# --- 10. COMMAND RUNNER ---
+# Runs privileged commands quietly, but shows real stderr if they fail.
+# Do not use this to print secret values.
+function run_cmd() {
+    local description="$1"
+    shift
+
+    local err_file=""
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    if [ -n "$SUDO_CMD" ]; then
+        if ! "$SUDO_CMD" "$@" > /dev/null 2> "$err_file"; then
+            echo ""
+            echo -e "${RD}Command failed during:${CL} ${description}"
+            echo -e "${YW}Command:${CL} sudo $*"
+            echo ""
+            echo -e "${RD}Real error:${CL}"
+            cat "$err_file"
+            rm -f "$err_file"
+            exit 1
+        fi
+    else
+        if ! "$@" > /dev/null 2> "$err_file"; then
+            echo ""
+            echo -e "${RD}Command failed during:${CL} ${description}"
+            echo -e "${YW}Command:${CL} $*"
+            echo ""
+            echo -e "${RD}Real error:${CL}"
+            cat "$err_file"
+            rm -f "$err_file"
+            exit 1
+        fi
+    fi
+
+    rm -f "$err_file"
+}
+
+# --- 11. OPTIONAL COMMAND RUNNER ---
+# Runs non-critical privileged commands quietly and does not stop the script.
+function run_optional() {
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" "$@" >/dev/null 2>&1 || true
+    else
+        "$@" >/dev/null 2>&1 || true
+    fi
+}
+
+# --- 12. ROOT FILE WRITE HELPER ---
+# Writes stdin to a privileged path with sudo when required.
+# Heredoc content is not echoed to terminal, so this is safe for .env secret writing.
+function write_root_file() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" tee "$path" >/dev/null
+    else
+        cat > "$path"
+    fi
+}
+
+# --- 13. ROOT PATH EXISTS HELPER ---
+# Checks whether a root-owned path exists.
+function root_path_exists() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -e "$path"
+    else
+        test -e "$path"
+    fi
+}
+
+# --- 14. ROOT FILE NOT EMPTY HELPER ---
+# Checks whether a root-owned file exists and has content.
+function root_file_not_empty() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -s "$path"
+    else
+        test -s "$path"
+    fi
+}
+
+# --- 15. ROOT FILE READ HELPER ---
+# Reads root-owned file content for secret reuse.
+# Do not call this unless assigning output into a variable.
+function root_read_file() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cat "$path"
+    else
+        cat "$path"
+    fi
+}
+
+# --- 16. ROOT STAT MODE HELPER ---
+# Returns octal file mode for verification.
+function root_stat_mode() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" stat -c '%a' "$path" 2>/dev/null || true
+    else
+        stat -c '%a' "$path" 2>/dev/null || true
+    fi
+}
+
+# =========================================================
+#  LOGGING CONTROL
+# =========================================================
+
+# --- 17. ROOT / SUDO DETECTION ---
+# Uses sudo when not root.
+function detect_root_or_sudo() {
+    if [ "$EUID" -eq 0 ]; then
+        SUDO_CMD=""
+    else
+        SUDO_CMD="sudo"
+    fi
+}
+
+# --- 18. SUDO VALIDATION ---
+# Validates sudo once near the start so authentication failures happen before changes.
+function validate_sudo_access() {
+    if [ -n "$SUDO_CMD" ]; then
+        echo -e "${YW}Sudo privileges are required for Docker ENV Setup.${CL}"
+
+        if ! "$SUDO_CMD" -v; then
+            echo -e "${RD}ERROR:${CL} Sudo authentication failed."
+            exit 1
+        fi
+    fi
+}
+
+# --- 19. LOGGING INITIALIZATION ---
+# Starts tee logging while keeping original terminal descriptors available.
+function init_logging() {
+    exec 3>&1
+    exec 4>&2
+
+    if [ -n "$SUDO_CMD" ]; then
+        exec > >("$SUDO_CMD" tee -a "$LOG_FILE") 2>&1
+    else
+        exec > >(tee -a "$LOG_FILE") 2>&1
+    fi
+
+    LOGGING_ENABLED="yes"
+}
+
+# --- 20. DISABLE LOGGING HELPER ---
+# Sends output directly to the terminal, bypassing tee logging.
+# Used for hidden inputs and final secret display.
+function disable_logging() {
+    if [ -w /dev/tty ]; then
+        exec > /dev/tty 2> /dev/tty
+    else
+        exec >&3 2>&4
+    fi
+
+    LOGGING_ENABLED="no"
+}
+
+# --- 21. ENABLE LOGGING HELPER ---
+# Re-enables tee logging after sensitive terminal-only sections are complete.
+function enable_logging() {
+    if [ -n "$SUDO_CMD" ]; then
+        exec > >("$SUDO_CMD" tee -a "$LOG_FILE") 2>&1
+    else
+        exec > >(tee -a "$LOG_FILE") 2>&1
+    fi
+
+    LOGGING_ENABLED="yes"
+}
+
+# --- 22. CLEAR TERMINAL AND SCROLLBACK HELPER ---
+# Clears visible terminal and scrollback where supported.
+# This reduces the chance that displayed secrets remain visible after the user saves them.
+function clear_terminal_scrollback() {
+    if [ -w /dev/tty ]; then
+        printf '\033[2J\033[3J\033[H' > /dev/tty
+    else
+        printf '\033[2J\033[3J\033[H'
+    fi
+
+    SECRET_SCREEN_CLEARED="yes"
+}
+
+# =========================================================
+#  PROMPT FUNCTIONS
+# =========================================================
+
+# --- 23. YES/NO LABEL HELPER ---
+# Converts Y/N answers to readable yes/no output.
 function yes_no_label() {
     local value="$1"
 
@@ -156,8 +363,8 @@ function yes_no_label() {
     fi
 }
 
-# --- 10. BLOCKING YES/NO HELPER ---
-# Used when SPACE pauses countdown.
+# --- 24. BLOCKING YES/NO HELPER ---
+# Used when SPACE pauses a countdown and waits for Y/N/ENTER.
 function tty_read_yes_no_blocking() {
     local prompt="$1"
     local default="$2"
@@ -189,8 +396,11 @@ function tty_read_yes_no_blocking() {
     done
 }
 
-# --- 11. TIMED YES/NO PROMPT HELPER ---
-# SPACE pauses and waits. Timeout accepts default. Final answer stays visible.
+# --- 25. TIMED YES/NO PROMPT HELPER ---
+# Uses wall-clock countdown.
+# SPACE pauses and waits.
+# Timeout accepts default.
+# Final answer stays visible.
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
@@ -257,17 +467,17 @@ function timed_yes_no() {
     echo "$answer"
 }
 
-# --- 12. BLOCKING EDITABLE TEXT INPUT HELPER ---
-# Used when user starts typing or presses SPACE during text input.
-# The countdown disappears and the user can edit normally. ENTER accepts typed value or default.
-function tty_read_text_blocking() {
+# --- 26. EDITABLE INPUT LOOP HELPER ---
+# Shared editable input system for text prompts.
+function editable_input_loop() {
     local prompt="$1"
     local default="$2"
-    local buffer="${3:-}"
+    local initial_value="${3:-}"
+    local answer="$initial_value"
     local key=""
 
     while true; do
-        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${buffer}"
+        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
 
         if [ -r /dev/tty ]; then
             IFS= read -rsn1 key < /dev/tty || true
@@ -277,26 +487,25 @@ function tty_read_text_blocking() {
 
         case "$key" in
             "")
+                [ -z "$answer" ] && answer="$default"
                 tty_print "${BFR}"
-                if [ -z "$buffer" ]; then
-                    echo "$default"
-                else
-                    echo "$buffer"
-                fi
+                echo "$answer"
                 return 0
                 ;;
             $'\177'|$'\b')
-                buffer="${buffer%?}"
+                answer="${answer%?}"
                 ;;
             *)
-                buffer+="$key"
+                answer+="$key"
                 ;;
         esac
     done
 }
 
-# --- 13. TIMED TEXT INPUT HELPER ---
-# Reads editable text with countdown. Typing or SPACE stops timer. Empty input or timeout uses default.
+# --- 27. TIMED TEXT INPUT HELPER ---
+# Shows wall-clock countdown.
+# SPACE pauses with empty editable buffer.
+# Any typed character pauses with that character already inside the editable buffer.
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
@@ -322,26 +531,26 @@ function timed_text_input() {
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
                     break
                 else
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
                     break
                 fi
             fi
         else
             if IFS= read -rsn1 -t 1 key; then
                 if [[ "$key" == " " ]]; then
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "")"
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
                     break
                 else
-                    answer="$(tty_read_text_blocking "$prompt" "$default" "$key")"
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
                     break
                 fi
             fi
@@ -356,8 +565,9 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 14. HIDDEN INPUT HELPER ---
-# Reads sensitive input without echoing it to terminal or writing it to the log.
+# --- 28. HIDDEN INPUT HELPER ---
+# Reads sensitive input without echoing it to terminal.
+# Call this while logging is disabled.
 function hidden_input() {
     local prompt="$1"
     local answer=""
@@ -371,275 +581,624 @@ function hidden_input() {
     fi
 
     tty_println ""
+
     echo "$answer"
 }
 
-# --- 15. SECRET GENERATOR HELPER ---
-# Generates URL-safe random secrets for app/database credentials.
+# --- 29. SECRET SAVE CONFIRMATION HELPER ---
+# Waits until the user confirms they saved displayed secrets, then clears terminal/scrollback.
+function wait_then_clear_secret_display() {
+    echo ""
+    echo -e "${RD}${CLF}Save the secrets above now.${CL}"
+    echo -e "${YW}After pressing ENTER, this screen and terminal scrollback will be cleared where supported.${CL}"
+    echo ""
+
+    if [ -r /dev/tty ]; then
+        read -r -p "Press ENTER after you have saved the secrets securely..." _ < /dev/tty || true
+    else
+        read -r -p "Press ENTER after you have saved the secrets securely..." _ || true
+    fi
+
+    clear_terminal_scrollback
+}
+
+# =========================================================
+#  VALIDATION HELPERS
+# =========================================================
+
+# --- 30. USERNAME VALIDATION HELPER ---
+# Validates Linux username format.
+function validate_linux_username() {
+    local username="$1"
+
+    if [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 31. ABSOLUTE PATH VALIDATION HELPER ---
+# Validates an absolute path and blocks unsafe top-level paths.
+function validate_absolute_path() {
+    local path="$1"
+
+    if [[ "$path" != /* ]]; then
+        return 1
+    fi
+
+    case "$path" in
+        "/"|"/root"|"/etc"|"/usr"|"/var"|"/home")
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+# --- 32. DOMAIN VALIDATION HELPER ---
+# Validates domain-style value without protocol or slash.
+function validate_domain() {
+    local domain="$1"
+
+    if [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 33. EMAIL VALIDATION HELPER ---
+# Simple email format validation for Cloudflare email.
+function validate_email() {
+    local email="$1"
+
+    if [[ "$email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 34. CLOUDFLARE ZONE ID VALIDATION HELPER ---
+# Allows empty value, otherwise expects a hex-like Cloudflare zone ID.
+function validate_cf_zone_id() {
+    local zone_id="$1"
+
+    if [ -z "$zone_id" ]; then
+        return 0
+    fi
+
+    if [[ "$zone_id" =~ ^[A-Fa-f0-9]{16,64}$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 35. HTPASSWD LINE VALIDATION HELPER ---
+# Validates that provided htpasswd line looks like username:hash.
+function validate_htpasswd_line() {
+    local line="$1"
+
+    if [[ "$line" =~ ^[^:[:space:]]+:.+ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 36. DEPENDENCY VALIDATION ---
+# Validates required commands early so failures happen before partial file creation.
+function validate_dependencies() {
+    local required_commands=(
+        awk
+        cat
+        chmod
+        chown
+        command
+        cut
+        date
+        grep
+        id
+        mkdir
+        mktemp
+        openssl
+        rm
+        sed
+        stat
+        tee
+        test
+        touch
+        xargs
+    )
+
+    local cmd=""
+
+    for cmd in "${required_commands[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || msg_error "Required command not found: ${cmd}"
+    done
+
+    if [ -n "$SUDO_CMD" ]; then
+        command -v sudo >/dev/null 2>&1 || msg_error "sudo is required when not running as root."
+    fi
+}
+
+# =========================================================
+#  SECRET HELPERS
+# =========================================================
+
+# --- 37. SECRET GENERATOR HELPER ---
+# Generates hex-only secrets. Hex avoids shell/YAML/SQL quoting problems.
 function generate_secret() {
     openssl rand -hex 32 | cut -c1-48
 }
 
-# --- 16. SUDO FILE EXISTS HELPER ---
-# Checks whether a file or folder exists, using sudo when required.
-function sudo_path_exists() {
-    local path="$1"
-    $SUDO_CMD test -e "$path"
-}
-
-# --- 17. SUDO FILE NOT EMPTY HELPER ---
-# Checks whether a file exists and has content, using sudo when required.
-function sudo_file_not_empty() {
-    local file="$1"
-    $SUDO_CMD test -s "$file"
-}
-
-# --- 18. SUDO FILE READ HELPER ---
-# Reads a root-owned or user-owned file through sudo when required.
-function sudo_read_file() {
-    local file="$1"
-    $SUDO_CMD cat "$file"
-}
-
-# --- 19. SECRET REUSE / GENERATION HELPER ---
-# Reuses existing secret files by default on reruns. Generates a new value only when missing or when regeneration is selected.
+# --- 38. SECRET REUSE / GENERATION HELPER ---
+# Reuses existing secret files by default on reruns.
+# Generates a new value only when missing or when regeneration is selected.
 function get_or_generate_secret() {
     local file="$1"
 
-    if [ "$REGENERATE_SECRETS" != "y" ] && sudo_file_not_empty "$file"; then
-        sudo_read_file "$file"
+    if [ "$REGENERATE_SECRETS" != "y" ] && root_file_not_empty "$file"; then
+        root_read_file "$file"
     else
         generate_secret
     fi
 }
 
-# --- 20. START CONFIRMATION ---
-# Starts Docker env setup.
-echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
-start_yn=$(timed_yes_no "Start the Docker ENV Setup Script?" "y")
-[[ "$start_yn" =~ ^[Nn] ]] && exit 0
+# --- 39. NO-NEWLINE SECRET WRITE HELPER ---
+# Writes secret files without trailing newline.
+# This is intentional for file-based secrets.
+function write_secret_file_no_newline() {
+    local path="$1"
+    local value="$2"
 
-# --- 21. USER INPUTS ---
-# Collects reusable defaults for user, paths, timezone, domain and Cloudflare values.
-DOCKER_USER=$(timed_text_input "Enter Linux username" "$DEFAULT_USER")
-
-DEFAULT_USERDIR="/home/${DOCKER_USER}"
-DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
-
-USERDIR=$(timed_text_input "Enter user home directory" "$DEFAULT_USERDIR")
-DEFAULT_DOCKER_DIR="${USERDIR}/docker"
-
-DOCKER_DIR=$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")
-DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
-CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
-
-# --- 22. EXISTING SETUP DETECTION ---
-# Detects existing .env, secrets folder, or completion marker to prevent accidental secret rotation.
-msg_info "Checking for existing Docker ENV setup"
-
-if sudo_path_exists "$COMPLETED_MARKER" || sudo_path_exists "${DOCKER_DIR}/.env" || sudo_path_exists "${DOCKER_SECRETS_DIR}"; then
-    EXISTING_SETUP="yes"
-fi
-
-if [ "$EXISTING_SETUP" == "yes" ]; then
-    msg_warn "Existing Docker ENV setup detected"
-    echo ""
-    echo -e "${RD}WARNING: Existing Docker ENV setup detected.${CL}"
-    echo -e "${YW}Re-running can overwrite .env and service secret files.${CL}"
-    echo -e "${YW}Safe default: continue only if you want to refresh the setup files.${CL}"
-    echo -e "${YW}Existing secrets will be reused unless you explicitly choose to regenerate them.${CL}"
-    echo ""
-
-    continue_existing_yn=$(timed_yes_no "Continue with existing Docker ENV setup?" "n")
-
-    if [[ "$continue_existing_yn" =~ ^[Nn] ]]; then
-        echo -e "${YW}Docker ENV setup cancelled. Existing files were left untouched.${CL}"
-        exit 0
-    fi
-
-    regenerate_yn=$(timed_yes_no "Regenerate all service secrets?" "n")
-
-    if [[ "$regenerate_yn" =~ ^[Yy] ]]; then
-        REGENERATE_SECRETS="y"
-        msg_warn "Secret regeneration selected. Existing deployed containers may need rebuilding."
+    if [ -n "$SUDO_CMD" ]; then
+        printf '%s' "$value" | "$SUDO_CMD" tee "$path" >/dev/null
     else
-        REGENERATE_SECRETS="n"
-        msg_ok "EXISTING SECRETS WILL BE REUSED WHERE PRESENT"
+        printf '%s' "$value" > "$path"
     fi
-else
-    msg_ok "NO EXISTING DOCKER ENV SETUP DETECTED"
-fi
+}
 
-TZ_VALUE=$(timed_text_input "Enter timezone" "$DEFAULT_TZ")
-DOMAIN_VALUE=$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")
-CF_API_EMAIL_VALUE=$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")
-CF_ZONE_ID_VALUE=$(timed_text_input "Enter Cloudflare Zone ID" "$DEFAULT_CF_ZONE_ID")
+# =========================================================
+#  INITIALIZATION
+# =========================================================
 
-disable_logging
-CF_API_TOKEN_VALUE=$(hidden_input "Enter Cloudflare API Token, or leave empty")
-enable_logging
+# --- 40. SCRIPT INITIALIZATION ---
+# Detects sudo, validates access, starts logging, installs traps, shows banner and validates dependencies.
+function init_script() {
+    detect_root_or_sudo
+    validate_sudo_access
+    init_logging
 
-# --- 23. HTPASSWD OPTIONAL INPUT ---
-# Handles optional Traefik basic-auth credentials without logging sensitive values.
-echo ""
-echo -e "${BL}Optional Traefik basic-auth htpasswd setup.${CL}"
-echo -e "${YW}Not required if you use Authentik, Authelia, or a similar SSO/auth gateway.${CL}"
-echo -e "${YW}If a password is entered, this script will generate a SHA-512 htpasswd hash.${CL}"
-echo -e "${YW}If nothing is provided, an empty placeholder file is created or an existing one is preserved.${CL}"
-echo ""
+    trap 'on_error "$LINENO"' ERR
+    trap cleanup EXIT
 
-has_htpasswd_yn=$(timed_yes_no "Do you already have a hashed htpasswd line?" "n")
+    clear
+    header_info
 
-if [[ "$has_htpasswd_yn" =~ ^[Yy] ]]; then
-    disable_logging
-    HTPASSWD_LINE_VALUE=$(hidden_input "Paste full htpasswd line username:hash")
-    enable_logging
+    validate_dependencies
+}
 
-    if [ -n "$HTPASSWD_LINE_VALUE" ]; then
-        HTPASSWD_MODE="provided"
-    fi
-else
-    create_htpasswd_yn=$(timed_yes_no "Create htpasswd entry now?" "n")
+# --- 41. PREVIOUS MARKER CHECK ---
+# Warns if Docker ENV setup was already completed before.
+function check_previous_marker() {
+    local continue_yn=""
 
-    if [[ "$create_htpasswd_yn" =~ ^[Yy] ]]; then
-        HTPASSWD_USER_VALUE=$(timed_text_input "Enter htpasswd username" "$DEFAULT_HTPASSWD_USER")
+    if root_path_exists "$COMPLETED_MARKER"; then
+        section "PREVIOUS DOCKER ENV SETUP MARKER DETECTED"
 
-        disable_logging
-        HTPASSWD_PASSWORD_VALUE=$(hidden_input "Enter htpasswd password")
-        enable_logging
+        echo -e "${YW}A previous Docker ENV Setup marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        echo ""
+        root_read_file "$COMPLETED_MARKER" 2>/dev/null || true
+        echo ""
 
-        if [ -n "$HTPASSWD_PASSWORD_VALUE" ]; then
-            HTPASSWD_HASH_VALUE="$(openssl passwd -6 "$HTPASSWD_PASSWORD_VALUE")"
-            HTPASSWD_LINE_VALUE="${HTPASSWD_USER_VALUE}:${HTPASSWD_HASH_VALUE}"
-            HTPASSWD_PASSWORD_VALUE=""
-            HTPASSWD_MODE="generated"
-        else
-            HTPASSWD_MODE="empty"
-            msg_warn "htpasswd password was empty. Empty placeholder will be used unless an existing file is present."
+        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
+
+        if [[ "$continue_yn" =~ ^[Nn] ]]; then
+            exit 0
         fi
     fi
-fi
+}
 
-# --- 24. USER/GROUP ID DETECTION ---
-# Detects PUID/PGID for container permissions.
-msg_info "Detecting user and group IDs"
+# =========================================================
+#  INPUT COLLECTION
+# =========================================================
 
-if id "$DOCKER_USER" >/dev/null 2>&1; then
-    PUID_VALUE=$(id -u "$DOCKER_USER")
-    PGID_VALUE=$(id -g "$DOCKER_USER")
-else
-    PUID_VALUE="1000"
-    PGID_VALUE="1000"
-fi
+# --- 42. START CONFIRMATION ---
+# Starts Docker ENV setup after showing a clear description.
+function start_confirmation() {
+    section "START"
 
-msg_ok "USER AND GROUP IDS DETECTED"
+    echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
+    echo -e "${YW}Secrets are written to .env and ${DEFAULT_USER}'s Docker secrets folder.${CL}"
+    echo -e "${YW}Sensitive input and final secret display bypass tee logging.${CL}"
+    echo ""
 
-# --- 25. DOCKER DIRECTORY CREATION ---
+    start_yn="$(timed_yes_no "Start the Docker ENV Setup Script?" "y")"
+    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+}
+
+# --- 43. DOCKER READINESS CHECK ---
+# Checks that script 5 likely ran successfully before this script.
+function check_docker_readiness() {
+    section "DOCKER READINESS CHECK"
+
+    msg_info "Checking Docker readiness"
+
+    if command -v docker >/dev/null 2>&1 && docker --version >/dev/null 2>&1; then
+        DOCKER_READY="yes"
+    elif command -v docker >/dev/null 2>&1 && [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker --version >/dev/null 2>&1; then
+        DOCKER_READY="yes"
+    else
+        DOCKER_READY="no"
+    fi
+
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE_READY="yes"
+    elif command -v docker >/dev/null 2>&1 && [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE_READY="yes"
+    else
+        DOCKER_COMPOSE_READY="no"
+    fi
+
+    msg_ok "DOCKER READINESS CHECK COMPLETE"
+
+    echo ""
+    echo -e "DOCKER CLI: ${GN}${DOCKER_READY}${CL}"
+    echo -e "DOCKER COMPOSE: ${GN}${DOCKER_COMPOSE_READY}${CL}"
+
+    if [ "$DOCKER_READY" != "yes" ] || [ "$DOCKER_COMPOSE_READY" != "yes" ]; then
+        msg_warn "Docker or Docker Compose was not detected. Script 5 should normally run before this script."
+    fi
+}
+
+# --- 44. USER AND PATH INPUTS ---
+# Collects and validates Docker user, user home path and Docker project path.
+function collect_user_and_path_inputs() {
+    section "USER / PATH CONFIGURATION"
+
+    while true; do
+        DOCKER_USER="$(timed_text_input "Enter Linux username" "$DEFAULT_USER")"
+
+        if validate_linux_username "$DOCKER_USER"; then
+            break
+        fi
+
+        msg_warn "Invalid username. Use lowercase Linux username format, for example: orik"
+    done
+
+    if ! id "$DOCKER_USER" >/dev/null 2>&1; then
+        msg_error "Linux user ${DOCKER_USER} does not exist. Run script 4 first or create the user."
+    fi
+
+    DEFAULT_USERDIR="/home/${DOCKER_USER}"
+    DEFAULT_DOCKER_DIR="${DEFAULT_USERDIR}/docker"
+
+    while true; do
+        USERDIR="$(timed_text_input "Enter user home directory" "$DEFAULT_USERDIR")"
+
+        if validate_absolute_path "$USERDIR"; then
+            break
+        fi
+
+        msg_warn "Invalid user directory. Use a safe absolute path such as /home/${DOCKER_USER}"
+    done
+
+    DEFAULT_DOCKER_DIR="${USERDIR}/docker"
+
+    while true; do
+        DOCKER_DIR="$(timed_text_input "Enter Docker directory" "$DEFAULT_DOCKER_DIR")"
+
+        if validate_absolute_path "$DOCKER_DIR"; then
+            break
+        fi
+
+        msg_warn "Invalid Docker directory. Use a safe absolute path such as /home/${DOCKER_USER}/docker"
+    done
+
+    DOCKER_SECRETS_DIR="${DOCKER_DIR}/secrets"
+    CF_API_TOKEN_FILE="${DOCKER_SECRETS_DIR}/cf_api_token"
+
+    PUID_VALUE="$(id -u "$DOCKER_USER")"
+    PGID_VALUE="$(id -g "$DOCKER_USER")"
+
+    if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then
+        DOCKER_USER_IN_DOCKER_GROUP="yes"
+    else
+        DOCKER_USER_IN_DOCKER_GROUP="no"
+        msg_warn "User ${DOCKER_USER} is not currently in docker group. Script 5 should add it; reboot/login may be needed."
+    fi
+}
+
+# --- 45. EXISTING SETUP DETECTION ---
+# Detects existing .env, secrets folder or marker to prevent accidental secret rotation.
+function detect_existing_setup() {
+    section "EXISTING SETUP CHECK"
+
+    msg_info "Checking for existing Docker ENV setup"
+
+    if root_path_exists "$COMPLETED_MARKER" || root_path_exists "${DOCKER_DIR}/.env" || root_path_exists "${DOCKER_SECRETS_DIR}"; then
+        EXISTING_SETUP="yes"
+    else
+        EXISTING_SETUP="no"
+    fi
+
+    if [ "$EXISTING_SETUP" == "yes" ]; then
+        msg_warn "Existing Docker ENV setup detected"
+        echo ""
+        echo -e "${RD}WARNING: Existing Docker ENV setup detected.${CL}"
+        echo -e "${YW}Re-running can overwrite .env and service secret files.${CL}"
+        echo -e "${YW}Existing secrets will be reused unless you explicitly choose to regenerate them.${CL}"
+        echo ""
+
+        continue_existing_yn="$(timed_yes_no "Continue with existing Docker ENV setup?" "n")"
+
+        if [[ "$continue_existing_yn" =~ ^[Nn] ]]; then
+            echo -e "${YW}Docker ENV setup cancelled. Existing files were left untouched.${CL}"
+            exit 0
+        fi
+
+        regenerate_yn="$(timed_yes_no "Regenerate all service secrets?" "n")"
+
+        if [[ "$regenerate_yn" =~ ^[Yy] ]]; then
+            REGENERATE_SECRETS="y"
+            msg_warn "Secret regeneration selected. Existing deployed containers may need rebuilding."
+        else
+            REGENERATE_SECRETS="n"
+            msg_ok "EXISTING SECRETS WILL BE REUSED WHERE PRESENT"
+        fi
+    else
+        REGENERATE_SECRETS="n"
+        msg_ok "NO EXISTING DOCKER ENV SETUP DETECTED"
+    fi
+}
+
+# --- 46. DOMAIN / CLOUDFLARE INPUTS ---
+# Collects and validates timezone, domain, Cloudflare email/zone ID and token.
+function collect_domain_cloudflare_inputs() {
+    section "DOMAIN / CLOUDFLARE"
+
+    TZ_VALUE="$(timed_text_input "Enter timezone" "$DEFAULT_TZ")"
+
+    while true; do
+        DOMAIN_VALUE="$(timed_text_input "Enter domain" "$DEFAULT_DOMAIN")"
+
+        if validate_domain "$DOMAIN_VALUE"; then
+            break
+        fi
+
+        msg_warn "Invalid domain. Use a bare domain such as najafov.co.uk, without https:// or slashes."
+    done
+
+    while true; do
+        CF_API_EMAIL_VALUE="$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")"
+
+        if validate_email "$CF_API_EMAIL_VALUE"; then
+            break
+        fi
+
+        msg_warn "Invalid email format."
+    done
+
+    while true; do
+        CF_ZONE_ID_VALUE="$(timed_text_input "Enter Cloudflare Zone ID or leave empty" "$DEFAULT_CF_ZONE_ID")"
+
+        if validate_cf_zone_id "$CF_ZONE_ID_VALUE"; then
+            break
+        fi
+
+        msg_warn "Invalid Cloudflare Zone ID. Leave empty or enter the hex zone ID."
+    done
+
+    disable_logging
+    CF_API_TOKEN_VALUE="$(hidden_input "Enter Cloudflare API Token, or leave empty")"
+    enable_logging
+
+    if [ -z "$CF_API_TOKEN_VALUE" ] && root_file_not_empty "$CF_API_TOKEN_FILE"; then
+        CF_API_TOKEN_VALUE="$(root_read_file "$CF_API_TOKEN_FILE")"
+        msg_ok "EXISTING CLOUDFLARE API TOKEN WILL BE REUSED"
+    elif [ -z "$CF_API_TOKEN_VALUE" ]; then
+        msg_warn "Cloudflare API token left empty. Traefik DNS challenge, cf-ddns, and cf-companion will need this later."
+    else
+        msg_ok "CLOUDFLARE API TOKEN CAPTURED"
+    fi
+}
+
+# --- 47. HTPASSWD OPTIONAL INPUT ---
+# Handles optional Traefik basic-auth credentials without logging sensitive values.
+# If username/password is entered, final output shows only the generated hashed htpasswd line.
+# If full htpasswd line is provided, final output does not show the provided hash.
+function collect_htpasswd_inputs() {
+    local has_htpasswd_yn=""
+    local create_htpasswd_yn=""
+
+    section "OPTIONAL HTPASSWD"
+
+    echo -e "${BL}Optional Traefik basic-auth htpasswd setup.${CL}"
+    echo -e "${YW}Not required if you use Authentik, Authelia, or a similar SSO/auth gateway.${CL}"
+    echo -e "${YW}If a password is entered, this script will generate a SHA-512 htpasswd hash.${CL}"
+    echo -e "${YW}If a full htpasswd line is provided, it will be saved but not displayed in final output.${CL}"
+    echo ""
+
+    has_htpasswd_yn="$(timed_yes_no "Do you already have a hashed htpasswd line?" "n")"
+
+    if [[ "$has_htpasswd_yn" =~ ^[Yy] ]]; then
+        disable_logging
+        HTPASSWD_LINE_VALUE="$(hidden_input "Paste full htpasswd line username:hash")"
+        enable_logging
+
+        if [ -n "$HTPASSWD_LINE_VALUE" ]; then
+            if validate_htpasswd_line "$HTPASSWD_LINE_VALUE"; then
+                HTPASSWD_MODE="provided"
+            else
+                HTPASSWD_LINE_VALUE=""
+                HTPASSWD_MODE="empty"
+                msg_warn "Provided htpasswd line did not look valid. Empty placeholder will be used unless an existing file is present."
+            fi
+        fi
+    else
+        create_htpasswd_yn="$(timed_yes_no "Create htpasswd entry now?" "n")"
+
+        if [[ "$create_htpasswd_yn" =~ ^[Yy] ]]; then
+            HTPASSWD_USER_VALUE="$(timed_text_input "Enter htpasswd username" "$DEFAULT_HTPASSWD_USER")"
+
+            disable_logging
+            HTPASSWD_PASSWORD_VALUE="$(hidden_input "Enter htpasswd password")"
+            enable_logging
+
+            if [ -n "$HTPASSWD_PASSWORD_VALUE" ]; then
+                HTPASSWD_HASH_VALUE="$(openssl passwd -6 "$HTPASSWD_PASSWORD_VALUE")"
+                HTPASSWD_LINE_VALUE="${HTPASSWD_USER_VALUE}:${HTPASSWD_HASH_VALUE}"
+                HTPASSWD_PASSWORD_VALUE=""
+                HTPASSWD_MODE="generated"
+            else
+                HTPASSWD_MODE="empty"
+                msg_warn "htpasswd password was empty. Empty placeholder will be used unless an existing file is present."
+            fi
+        else
+            HTPASSWD_MODE="empty"
+        fi
+    fi
+}
+
+# =========================================================
+#  FILE / SECRET CREATION
+# =========================================================
+
+# --- 48. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
-msg_info "Creating Docker folder structure"
+function create_docker_directories() {
+    section "DOCKER FOLDER STRUCTURE"
 
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata"
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/compose"
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/backups"
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/shared"
-$SUDO_CMD mkdir -p "${DOCKER_SECRETS_DIR}"
+    msg_info "Creating Docker folder structure"
 
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
-$SUDO_CMD mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
+    run_cmd "creating Docker appdata directory" mkdir -p "${DOCKER_DIR}/appdata"
+    run_cmd "creating Docker compose directory" mkdir -p "${DOCKER_DIR}/compose"
+    run_cmd "creating Docker backups directory" mkdir -p "${DOCKER_DIR}/backups"
+    run_cmd "creating Docker shared directory" mkdir -p "${DOCKER_DIR}/shared"
+    run_cmd "creating Docker secrets directory" mkdir -p "${DOCKER_SECRETS_DIR}"
 
-msg_ok "DOCKER FOLDERS CREATED"
+    run_cmd "creating PostgreSQL data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
-# --- 26. SECRET GENERATION / REUSE ---
+    msg_ok "DOCKER FOLDERS CREATED"
+}
+
+# --- 49. SECRET GENERATION / REUSE ---
 # Generates service secrets on first run. On reruns, reuses existing secret files unless regeneration was explicitly selected.
-msg_info "Generating or reusing secrets"
+function generate_or_reuse_secrets() {
+    section "SECRET GENERATION / REUSE"
 
-POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postgres_password")"
-REDIS_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/redis_password")"
-AUTHENTIK_SECRET_KEY="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_secret_key")"
-AUTHENTIK_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_postgres_password")"
-POSTIZ_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_postgres_password")"
-TEMPORAL_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/temporal_postgres_password")"
+    msg_info "Generating or reusing secrets"
 
-if [ "$EXISTING_SETUP" == "yes" ] && [ "$REGENERATE_SECRETS" != "y" ]; then
-    msg_ok "SECRETS REUSED / GENERATED IF MISSING"
-else
-    msg_ok "SECRETS GENERATED"
-fi
+    POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postgres_password")"
+    REDIS_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/redis_password")"
+    AUTHENTIK_SECRET_KEY="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_secret_key")"
+    AUTHENTIK_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_postgres_password")"
+    POSTIZ_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_postgres_password")"
+    TEMPORAL_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/temporal_postgres_password")"
 
-# --- 27. POSTGRES INIT SCRIPT CREATION ---
-# Creates first-start PostgreSQL init script so app databases/users are created unattended.
-msg_info "Creating PostgreSQL init script"
+    msg_ok "SECRETS GENERATED / REUSED"
+}
 
-$SUDO_CMD tee "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" >/dev/null <<'EOF'
+# --- 50. POSTGRES INIT SCRIPT CREATION ---
+# Creates unattended PostgreSQL init script for app databases on first PostgreSQL container startup.
+function create_postgres_init_script() {
+    section "POSTGRES INIT SCRIPT"
+
+    msg_info "Writing PostgreSQL unattended app database init script"
+
+    write_root_file "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-create_user_db() {
-    local user="$1"
-    local password="$2"
-    local database="$3"
+create_user_and_db() {
+    local app_user="$1"
+    local app_db="$2"
+    local app_password="$3"
 
-    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<EOSQL
-DO
-\$\$
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<SQL
+DO \$\$
 BEGIN
-   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${user}') THEN
-      CREATE USER ${user} WITH PASSWORD '${password}';
-   END IF;
+    IF NOT EXISTS (
+        SELECT FROM pg_catalog.pg_roles
+        WHERE rolname = '${app_user}'
+    ) THEN
+        CREATE USER ${app_user} WITH PASSWORD '${app_password}';
+    ELSE
+        ALTER USER ${app_user} WITH PASSWORD '${app_password}';
+    END IF;
 END
 \$\$;
 
-SELECT 'CREATE DATABASE ${database} OWNER ${user}'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${database}')\gexec
+SELECT 'CREATE DATABASE ${app_db} OWNER ${app_user}'
+WHERE NOT EXISTS (
+    SELECT FROM pg_database
+    WHERE datname = '${app_db}'
+)\gexec
 
-GRANT ALL PRIVILEGES ON DATABASE ${database} TO ${user};
-EOSQL
+GRANT ALL PRIVILEGES ON DATABASE ${app_db} TO ${app_user};
+SQL
 }
 
-create_user_db "authentik" "${AUTHENTIK_POSTGRES_PASSWORD}" "authentik"
-create_user_db "postiz" "${POSTIZ_POSTGRES_PASSWORD}" "postiz"
-create_user_db "temporal" "${TEMPORAL_POSTGRES_PASSWORD}" "temporal"
+: "${AUTHENTIK_POSTGRES_PASSWORD:?AUTHENTIK_POSTGRES_PASSWORD is required}"
+: "${POSTIZ_POSTGRES_PASSWORD:?POSTIZ_POSTGRES_PASSWORD is required}"
+: "${TEMPORAL_POSTGRES_PASSWORD:?TEMPORAL_POSTGRES_PASSWORD is required}"
+
+create_user_and_db "authentik" "authentik" "$AUTHENTIK_POSTGRES_PASSWORD"
+create_user_and_db "postiz" "postiz" "$POSTIZ_POSTGRES_PASSWORD"
+create_user_and_db "temporal" "temporal" "$TEMPORAL_POSTGRES_PASSWORD"
 EOF
 
-$SUDO_CMD chmod +x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+    run_cmd "making PostgreSQL init script executable" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
-msg_ok "POSTGRES INIT SCRIPT CREATED"
+    msg_ok "POSTGRES INIT SCRIPT CREATED"
+}
 
-# --- 28. SECRET FILE WRITING ---
-# Writes secrets to individual files so Docker Compose can consume them as file-based secrets where suitable.
-msg_info "Writing secret files"
+# --- 51. SECRET FILE CREATION ---
+# Writes generated/reused secrets to individual secret files.
+function write_secret_files() {
+    section "SECRET FILES"
 
-printf '%s' "$POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/postgres_password" >/dev/null
-printf '%s' "$REDIS_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/redis_password" >/dev/null
-printf '%s' "$AUTHENTIK_SECRET_KEY" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/authentik_secret_key" >/dev/null
-printf '%s' "$AUTHENTIK_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/authentik_postgres_password" >/dev/null
-printf '%s' "$POSTIZ_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/postiz_postgres_password" >/dev/null
-printf '%s' "$TEMPORAL_POSTGRES_PASSWORD" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/temporal_postgres_password" >/dev/null
-printf '%s' "$CF_API_EMAIL_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/cf_api_email" >/dev/null
+    msg_info "Writing secret files"
 
-if [ -n "$CF_API_TOKEN_VALUE" ]; then
-    printf '%s' "$CF_API_TOKEN_VALUE" | $SUDO_CMD tee "${CF_API_TOKEN_FILE}" >/dev/null
-elif sudo_file_not_empty "${CF_API_TOKEN_FILE}"; then
-    msg_ok "EXISTING CLOUDFLARE API TOKEN PRESERVED"
-else
-    $SUDO_CMD touch "${CF_API_TOKEN_FILE}"
-fi
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postgres_password" "$POSTGRES_PASSWORD"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/redis_password" "$REDIS_PASSWORD"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/authentik_secret_key" "$AUTHENTIK_SECRET_KEY"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/authentik_postgres_password" "$AUTHENTIK_POSTGRES_PASSWORD"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postiz_postgres_password" "$POSTIZ_POSTGRES_PASSWORD"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/temporal_postgres_password" "$TEMPORAL_POSTGRES_PASSWORD"
 
-if [ -n "$HTPASSWD_LINE_VALUE" ]; then
-    printf '%s' "$HTPASSWD_LINE_VALUE" | $SUDO_CMD tee "${DOCKER_SECRETS_DIR}/htpasswd" >/dev/null
-elif sudo_file_not_empty "${DOCKER_SECRETS_DIR}/htpasswd"; then
-    msg_ok "EXISTING HTPASSWD FILE PRESERVED"
-else
-    $SUDO_CMD touch "${DOCKER_SECRETS_DIR}/htpasswd"
-fi
+    if [ -n "$CF_API_TOKEN_VALUE" ]; then
+        write_secret_file_no_newline "$CF_API_TOKEN_FILE" "$CF_API_TOKEN_VALUE"
+    elif root_file_not_empty "$CF_API_TOKEN_FILE"; then
+        msg_ok "EXISTING CLOUDFLARE TOKEN FILE PRESERVED"
+    else
+        run_cmd "creating empty Cloudflare API token placeholder" touch "$CF_API_TOKEN_FILE"
+    fi
 
-msg_ok "SECRET FILES WRITTEN"
+    if [ -n "$HTPASSWD_LINE_VALUE" ]; then
+        write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/htpasswd" "$HTPASSWD_LINE_VALUE"
+    elif root_file_not_empty "${DOCKER_SECRETS_DIR}/htpasswd"; then
+        msg_ok "EXISTING HTPASSWD FILE PRESERVED"
+    else
+        run_cmd "creating empty htpasswd placeholder" touch "${DOCKER_SECRETS_DIR}/htpasswd"
+    fi
 
-# --- 29. ENV FILE CREATION ---
+    msg_ok "SECRET FILES WRITTEN"
+}
+
+# --- 52. ENV FILE CREATION ---
 # Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
-msg_info "Creating Docker .env file"
+# This file contains secrets and is locked down to 600 later.
+function write_env_file() {
+    section "DOCKER .ENV"
 
-$SUDO_CMD tee "${DOCKER_DIR}/.env" >/dev/null <<EOF
+    msg_info "Creating Docker .env file"
+
+    write_root_file "${DOCKER_DIR}/.env" <<EOF
 # =========================================================
 #  Project: Home-Hosted Social Media SaaS
 # =========================================================
@@ -679,96 +1238,308 @@ POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
 TEMPORAL_POSTGRES_PASSWORD="${TEMPORAL_POSTGRES_PASSWORD}"
 EOF
 
-msg_ok "DOCKER .ENV CREATED"
+    msg_ok "DOCKER .ENV CREATED"
+}
 
-# --- 30. PERMISSIONS ---
-# Sets Docker folder permissions and stricter secret permissions.
-msg_info "Setting folder permissions"
+# --- 53. PERMISSIONS ---
+# Applies secure permissions without breaking PostgreSQL init script readability.
+# .env and secret files are treated as high-value secret material.
+function apply_permissions() {
+    section "PERMISSIONS"
 
-if id "$DOCKER_USER" >/dev/null 2>&1; then
-    $SUDO_CMD chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
-fi
+    msg_info "Setting Docker folder ownership"
 
-$SUDO_CMD chmod -R 775 "$DOCKER_DIR"
-$SUDO_CMD chmod -R 700 "$DOCKER_SECRETS_DIR"
-$SUDO_CMD chmod -R 600 "$DOCKER_SECRETS_DIR"/* 2>/dev/null || true
+    run_cmd "setting Docker folder ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
 
-msg_ok "PERMISSIONS SET"
+    msg_ok "DOCKER FOLDER OWNERSHIP SET"
 
-# --- 31. COMPLETION MARKER ---
-# Creates marker showing ENV setup ran successfully.
-msg_info "Writing completion marker"
+    msg_info "Applying Docker folder permissions"
 
-$SUDO_CMD tee "$COMPLETED_MARKER" >/dev/null <<EOF
+    run_cmd "setting Docker root directory permissions" chmod 750 "$DOCKER_DIR"
+    run_cmd "setting appdata permissions" chmod 750 "${DOCKER_DIR}/appdata"
+    run_cmd "setting compose permissions" chmod 750 "${DOCKER_DIR}/compose"
+    run_cmd "setting backups permissions" chmod 750 "${DOCKER_DIR}/backups"
+    run_cmd "setting shared permissions" chmod 750 "${DOCKER_DIR}/shared"
+    run_cmd "setting PostgreSQL appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/postgres"
+    run_cmd "setting PostgreSQL data permissions" chmod 750 "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "setting PostgreSQL init directory permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
+    run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+
+    run_cmd "setting .env permissions" chmod 600 "${DOCKER_DIR}/.env"
+    run_cmd "setting secrets directory permissions" chmod 700 "$DOCKER_SECRETS_DIR"
+
+    if compgen -G "${DOCKER_SECRETS_DIR}/*" > /dev/null; then
+        run_cmd "setting secret file permissions" chmod 600 "${DOCKER_SECRETS_DIR}"/*
+    fi
+
+    msg_ok "PERMISSIONS SET"
+}
+
+# =========================================================
+#  VERIFICATION / MARKER / SUMMARY
+# =========================================================
+
+# --- 54. VERIFICATION REPORT ---
+# Creates a verification report without printing secret values.
+function create_verification_report() {
+    section "VERIFICATION"
+
+    msg_info "Creating Docker ENV verification report"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<EOF
+--- DOCKER ENV SETUP VERIFICATION REPORT ---
+Date: $(date)
+Docker user: $DOCKER_USER
+Docker dir: $DOCKER_DIR
+Secrets dir: $DOCKER_SECRETS_DIR
+Domain: $DOMAIN_VALUE
+
+Results:
+EOF
+    else
+        cat > "$VERIFY_LOG" <<EOF
+--- DOCKER ENV SETUP VERIFICATION REPORT ---
+Date: $(date)
+Docker user: $DOCKER_USER
+Docker dir: $DOCKER_DIR
+Secrets dir: $DOCKER_SECRETS_DIR
+Domain: $DOMAIN_VALUE
+
+Results:
+EOF
+    fi
+
+    {
+        if id "$DOCKER_USER" >/dev/null 2>&1; then echo "✓ PASS - Docker user exists"; else echo "✗ FAIL - Docker user missing"; fi
+        if [ -d "$DOCKER_DIR" ]; then echo "✓ PASS - Docker directory exists"; else echo "✗ FAIL - Docker directory missing"; fi
+        if [ -f "${DOCKER_DIR}/.env" ]; then echo "✓ PASS - .env exists"; else echo "✗ FAIL - .env missing"; fi
+        if [ "$(root_stat_mode "${DOCKER_DIR}/.env")" == "600" ]; then echo "✓ PASS - .env mode is 600"; else echo "! WARN - .env mode is not 600"; fi
+        if [ -d "$DOCKER_SECRETS_DIR" ]; then echo "✓ PASS - secrets directory exists"; else echo "✗ FAIL - secrets directory missing"; fi
+        if [ "$(root_stat_mode "$DOCKER_SECRETS_DIR")" == "700" ]; then echo "✓ PASS - secrets directory mode is 700"; else echo "! WARN - secrets directory mode is not 700"; fi
+
+        for secret_file in \
+            postgres_password \
+            redis_password \
+            authentik_secret_key \
+            authentik_postgres_password \
+            postiz_postgres_password \
+            temporal_postgres_password
+        do
+            if [ -s "${DOCKER_SECRETS_DIR}/${secret_file}" ]; then
+                echo "✓ PASS - ${secret_file} exists and is non-empty"
+            else
+                echo "✗ FAIL - ${secret_file} missing or empty"
+            fi
+
+            if [ "$(root_stat_mode "${DOCKER_SECRETS_DIR}/${secret_file}")" == "600" ]; then
+                echo "✓ PASS - ${secret_file} mode is 600"
+            else
+                echo "! WARN - ${secret_file} mode is not 600"
+            fi
+        done
+
+        if [ -e "$CF_API_TOKEN_FILE" ]; then echo "✓ PASS - Cloudflare token file exists"; else echo "! WARN - Cloudflare token file missing"; fi
+        if [ -e "${DOCKER_SECRETS_DIR}/htpasswd" ]; then echo "✓ PASS - htpasswd file exists"; else echo "! WARN - htpasswd file missing"; fi
+        if [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ]; then echo "✓ PASS - PostgreSQL init script exists and is executable"; else echo "✗ FAIL - PostgreSQL init script missing or not executable"; fi
+
+        if command -v docker >/dev/null 2>&1; then echo "✓ PASS - Docker CLI detected"; else echo "! WARN - Docker CLI not detected"; fi
+        if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then echo "✓ PASS - Docker Compose plugin detected"; else echo "! WARN - Docker Compose plugin not detected for current shell"; fi
+        if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then echo "✓ PASS - Docker user is in docker group"; else echo "! WARN - Docker user is not currently in docker group"; fi
+
+        if [ -f "$COMPLETED_MARKER" ]; then echo "✓ PASS - completion marker exists"; else echo "! WARN - completion marker not present yet at verification time"; fi
+    } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
+
+    msg_ok "DOCKER ENV VERIFICATION REPORT CREATED"
+}
+
+# --- 55. COMPLETION MARKER ---
+# Creates marker showing ENV setup completed successfully.
+# No secret values are stored in the marker.
+function write_completion_marker() {
+    section "COMPLETION MARKER"
+
+    msg_info "Writing completion marker"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" bash -c "cat > '$COMPLETED_MARKER'" <<EOF
 Docker ENV Setup completed on: $(date)
 Docker dir: $DOCKER_DIR
+Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
 User: $DOCKER_USER
+PUID: $PUID_VALUE
+PGID: $PGID_VALUE
+Timezone: $TZ_VALUE
+Existing setup detected: $EXISTING_SETUP
 Secrets regenerated: $REGENERATE_SECRETS
+Cloudflare token file: $CF_API_TOKEN_FILE
+Htpasswd mode: $HTPASSWD_MODE
+Docker ready: $DOCKER_READY
+Docker Compose ready: $DOCKER_COMPOSE_READY
+Docker user in docker group: $DOCKER_USER_IN_DOCKER_GROUP
+Secret screen displayed: $SECRET_DISPLAY_WAS_SHOWN
+Secret screen cleared: $SECRET_SCREEN_CLEARED
+Verify log: $VERIFY_LOG
 EOF
+    else
+        cat > "$COMPLETED_MARKER" <<EOF
+Docker ENV Setup completed on: $(date)
+Docker dir: $DOCKER_DIR
+Secrets dir: $DOCKER_SECRETS_DIR
+Domain: $DOMAIN_VALUE
+User: $DOCKER_USER
+PUID: $PUID_VALUE
+PGID: $PGID_VALUE
+Timezone: $TZ_VALUE
+Existing setup detected: $EXISTING_SETUP
+Secrets regenerated: $REGENERATE_SECRETS
+Cloudflare token file: $CF_API_TOKEN_FILE
+Htpasswd mode: $HTPASSWD_MODE
+Docker ready: $DOCKER_READY
+Docker Compose ready: $DOCKER_COMPOSE_READY
+Docker user in docker group: $DOCKER_USER_IN_DOCKER_GROUP
+Secret screen displayed: $SECRET_DISPLAY_WAS_SHOWN
+Secret screen cleared: $SECRET_SCREEN_CLEARED
+Verify log: $VERIFY_LOG
+EOF
+    fi
 
-msg_ok "COMPLETION MARKER WRITTEN"
+    msg_ok "COMPLETION MARKER WRITTEN"
+}
 
-# --- 32. FINAL SECRET DISPLAY WARNING ---
-# Shows generated/reused secret values once, but bypasses tee logging so they are not written to /var/log/docker-env-setup.log.
-disable_logging
+# --- 56. FINAL SECRET DISPLAY ---
+# Shows generated/reused secret values once while logging is disabled.
+# After user confirms they saved them, terminal and scrollback are cleared where supported.
+function show_secrets_once_without_logging() {
+    disable_logging
 
-echo ""
-if [ "$EXISTING_SETUP" == "yes" ] && [ "$REGENERATE_SECRETS" != "y" ]; then
-    echo -e "${YW}${CLF}EXISTING SECRETS WERE REUSED WHERE PRESENT. SAVE ANY NEW/MISSING VALUES SHOWN BELOW.${CL}"
-else
-    echo -e "${RD}${CLF}SAVE THESE VALUES NOW. THEY WILL NOT BE DISPLAYED AGAIN BY THIS SCRIPT.${CL}"
-fi
-echo ""
-echo -e "${GN}POSTGRES_PASSWORD:${CL} ${POSTGRES_PASSWORD}"
-echo -e "${GN}REDIS_PASSWORD:${CL} ${REDIS_PASSWORD}"
-echo -e "${GN}AUTHENTIK_SECRET_KEY:${CL} ${AUTHENTIK_SECRET_KEY}"
-echo -e "${GN}AUTHENTIK_POSTGRES_PASSWORD:${CL} ${AUTHENTIK_POSTGRES_PASSWORD}"
-echo -e "${GN}POSTIZ_POSTGRES_PASSWORD:${CL} ${POSTIZ_POSTGRES_PASSWORD}"
-echo -e "${GN}TEMPORAL_POSTGRES_PASSWORD:${CL} ${TEMPORAL_POSTGRES_PASSWORD}"
-echo ""
+    SECRET_DISPLAY_WAS_SHOWN="yes"
 
-if [ -n "$CF_API_TOKEN_VALUE" ]; then
-    echo -e "${GN}Cloudflare API token saved to:${CL} ${CF_API_TOKEN_FILE}"
-elif sudo_file_not_empty "${CF_API_TOKEN_FILE}"; then
-    echo -e "${GN}Existing Cloudflare API token preserved at:${CL} ${CF_API_TOKEN_FILE}"
-else
-    echo -e "${YW}Cloudflare API token file created empty:${CL} ${CF_API_TOKEN_FILE}"
-    echo -e "${YW}Add your Cloudflare API token before deploying Traefik/cf-ddns/cf-companion.${CL}"
-fi
+    clear
+    header_info
 
-if [ "$HTPASSWD_MODE" == "generated" ]; then
-    echo -e "${GN}HTPASSWD_USERNAME:${CL} ${HTPASSWD_USER_VALUE}"
-    echo -e "${GN}HTPASSWD_HASH:${CL} ${HTPASSWD_HASH_VALUE}"
-    echo -e "${GN}htpasswd entry generated and saved to:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
-    echo -e "${YW}Plain htpasswd password was not displayed or logged.${CL}"
-elif [ "$HTPASSWD_MODE" == "provided" ]; then
-    echo -e "${GN}Provided htpasswd entry saved to:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
-    echo -e "${YW}Provided htpasswd hash was not displayed in final output or log.${CL}"
-elif sudo_file_not_empty "${DOCKER_SECRETS_DIR}/htpasswd"; then
-    echo -e "${GN}Existing htpasswd file preserved at:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
-else
-    echo -e "${YW}htpasswd file created empty:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
-    echo -e "${YW}This is fine when Authentik/Authelia/SSO is used instead of Traefik basic-auth.${CL}"
-fi
+    echo -e "${RD}${CLF}SENSITIVE SECRET OUTPUT - NOT LOGGED${CL}"
+    echo -e "${YW}Save these values now. This screen will be cleared after confirmation.${CL}"
+    echo ""
 
-echo ""
+    echo -e "${BL}CORE PATHS:${CL}"
+    echo -e "DOCKER_DIR=${GN}${DOCKER_DIR}${CL}"
+    echo -e "DOCKER_SECRETS_DIR=${GN}${DOCKER_SECRETS_DIR}${CL}"
+    echo -e "USERDIR=${GN}${USERDIR}${CL}"
+    echo ""
 
-# --- 33. FINAL SUMMARY ---
-# Shows final folder layout.
-echo -e "${GN}FINISHED!${CL}"
-echo -e "DOCKER DIR: ${GN}${DOCKER_DIR}${CL}"
-echo -e ".ENV FILE: ${GN}${DOCKER_DIR}/.env${CL}"
-echo -e "SECRETS DIR: ${GN}${DOCKER_SECRETS_DIR}${CL}"
-echo -e "POSTGRES INIT: ${GN}${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh${CL}"
-echo -e "CLOUDFLARE API TOKEN FILE: ${GN}${CF_API_TOKEN_FILE}${CL}"
-echo -e "HTPASSWD FILE: ${GN}${DOCKER_SECRETS_DIR}/htpasswd${CL}"
-echo -e "EXISTING SETUP DETECTED: ${GN}${EXISTING_SETUP}${CL}"
-echo -e "SECRETS REGENERATED: ${GN}${REGENERATE_SECRETS}${CL}"
-echo ""
-echo -e "${YW}Sensitive final output above was intentionally not written to ${LOG_FILE}.${CL}"
-echo ""
+    echo -e "${BL}LINUX USER / IDS:${CL}"
+    echo -e "DOCKER_USER=${GN}${DOCKER_USER}${CL}"
+    echo -e "PUID=${GN}${PUID_VALUE}${CL}"
+    echo -e "PGID=${GN}${PGID_VALUE}${CL}"
+    echo ""
 
-enable_logging
+    echo -e "${BL}DOMAIN / CLOUDFLARE:${CL}"
+    echo -e "DOMAIN=${GN}${DOMAIN_VALUE}${CL}"
+    echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE}${CL}"
+    echo -e "CF_ZONE_ID=${GN}${CF_ZONE_ID_VALUE}${CL}"
+    echo -e "CF_API_TOKEN_FILE=${GN}${CF_API_TOKEN_FILE}${CL}"
 
-exit 0
+    if [ -n "$CF_API_TOKEN_VALUE" ]; then
+        echo -e "CF_API_TOKEN=${GN}${CF_API_TOKEN_VALUE}${CL}"
+    else
+        echo -e "CF_API_TOKEN=${YW}<empty / not provided>${CL}"
+    fi
+
+    echo ""
+    echo -e "${BL}SERVICE SECRETS:${CL}"
+    echo -e "POSTGRES_PASSWORD=${GN}${POSTGRES_PASSWORD}${CL}"
+    echo -e "REDIS_PASSWORD=${GN}${REDIS_PASSWORD}${CL}"
+    echo -e "AUTHENTIK_SECRET_KEY=${GN}${AUTHENTIK_SECRET_KEY}${CL}"
+    echo -e "AUTHENTIK_POSTGRES_PASSWORD=${GN}${AUTHENTIK_POSTGRES_PASSWORD}${CL}"
+    echo -e "POSTIZ_POSTGRES_PASSWORD=${GN}${POSTIZ_POSTGRES_PASSWORD}${CL}"
+    echo -e "TEMPORAL_POSTGRES_PASSWORD=${GN}${TEMPORAL_POSTGRES_PASSWORD}${CL}"
+    echo ""
+
+    echo -e "${BL}HTPASSWD:${CL}"
+
+    if [ "$HTPASSWD_MODE" == "generated" ]; then
+        echo -e "HTPASSWD_HASHED_LINE=${GN}${HTPASSWD_LINE_VALUE}${CL}"
+        echo -e "${YW}Plain htpasswd password was not displayed or logged.${CL}"
+    elif [ "$HTPASSWD_MODE" == "provided" ]; then
+        echo -e "${GN}Provided htpasswd entry saved to:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
+        echo -e "${YW}Provided htpasswd hash is intentionally not displayed or logged.${CL}"
+    elif root_file_not_empty "${DOCKER_SECRETS_DIR}/htpasswd"; then
+        echo -e "${GN}Existing htpasswd file preserved at:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
+        echo -e "${YW}Existing htpasswd content is intentionally not displayed.${CL}"
+    else
+        echo -e "${YW}htpasswd file created empty:${CL} ${DOCKER_SECRETS_DIR}/htpasswd"
+        echo -e "${YW}This is fine when Authentik/Authelia/SSO is used instead of Traefik basic-auth.${CL}"
+    fi
+
+    echo ""
+    echo -e "${YW}Sensitive final output above was intentionally not written to ${LOG_FILE}.${CL}"
+
+    wait_then_clear_secret_display
+
+    enable_logging
+}
+
+# --- 57. CLEAN FINAL SUMMARY ---
+# Prints non-sensitive final summary after secrets have been cleared from the terminal.
+function show_clean_final_summary() {
+    section "FINISHED"
+
+    echo -e "DOCKER DIR:                 ${GN}${DOCKER_DIR}${CL}"
+    echo -e ".ENV FILE:                  ${GN}${DOCKER_DIR}/.env${CL}"
+    echo -e "SECRETS DIR:                ${GN}${DOCKER_SECRETS_DIR}${CL}"
+    echo -e "POSTGRES INIT:              ${GN}${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh${CL}"
+    echo -e "CLOUDFLARE API TOKEN FILE:  ${GN}${CF_API_TOKEN_FILE}${CL}"
+    echo -e "HTPASSWD FILE:              ${GN}${DOCKER_SECRETS_DIR}/htpasswd${CL}"
+    echo -e "DOMAIN:                     ${GN}${DOMAIN_VALUE}${CL}"
+    echo -e "DOCKER USER:                ${GN}${DOCKER_USER}${CL}"
+    echo -e "PUID / PGID:                ${GN}${PUID_VALUE}:${PGID_VALUE}${CL}"
+    echo -e "EXISTING SETUP DETECTED:    ${GN}${EXISTING_SETUP}${CL}"
+    echo -e "SECRETS REGENERATED:        ${GN}${REGENERATE_SECRETS}${CL}"
+    echo -e "SECRET SCREEN CLEARED:      ${GN}${SECRET_SCREEN_CLEARED}${CL}"
+    echo -e "VERIFY LOG:                 ${GN}${VERIFY_LOG}${CL}"
+    echo ""
+    echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
+    echo ""
+    echo -e "${BL}NEXT STEP:${CL}"
+    echo -e "${YW}Deploy yml 0 and yml 1 first, then continue through the compose stack order in Portainer.${CL}"
+    echo ""
+}
+
+# =========================================================
+#  MAIN ORCHESTRATION
+# =========================================================
+
+# --- 58. MAIN FUNCTION ---
+# Runs full setup in validation -> input -> file creation -> verify -> one-time secret display order.
+function main() {
+    init_script
+
+    check_previous_marker
+    start_confirmation
+    check_docker_readiness
+    collect_user_and_path_inputs
+    detect_existing_setup
+    collect_domain_cloudflare_inputs
+    collect_htpasswd_inputs
+
+    create_docker_directories
+    generate_or_reuse_secrets
+    create_postgres_init_script
+    write_secret_files
+    write_env_file
+    apply_permissions
+
+    create_verification_report
+    write_completion_marker
+
+    show_secrets_once_without_logging
+
+    write_completion_marker
+    show_clean_final_summary
+
+    exit 0
+}
+
+main "$@"

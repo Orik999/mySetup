@@ -81,6 +81,9 @@ STATIC_DNS="1.1.1.1,1.0.0.1"
 
 INSTALL_POWERED_OFF="no"
 
+CLEANUP_INSTALLED_TOOLS="yes"
+INSTALLED_TOOL_PACKAGES=()
+
 BOOT_PARAM='autoinstall ds=nocloud\;s=/cdrom/nocloud/ subiquity.autoinstallpath=cdrom/autoinstall.yaml'
 
 # =========================================================
@@ -137,12 +140,26 @@ tty_println() {
 # =========================================================
 
 # --- 6. CLEANUP FUNCTION ---
-# Cleans temporary working files, unless DEBUG_KEEP_WORKDIR=1 is set.
+# Cleans temporary working files and uninstalls packages that were installed by this script.
 cleanup() {
     local exit_code="$?"
+    local pkg=""
 
     if [ "${DEBUG_KEEP_WORKDIR:-0}" != "1" ] && [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
         rm -rf "$WORK_DIR" 2>/dev/null || true
+    fi
+
+    if [ "$CLEANUP_INSTALLED_TOOLS" == "yes" ] && [ "${#INSTALLED_TOOL_PACKAGES[@]}" -gt 0 ]; then
+        echo ""
+        echo -e "${YW}Cleaning up tools installed by this script...${CL}"
+
+        for pkg in "${INSTALLED_TOOL_PACKAGES[@]}"; do
+            [ -z "$pkg" ] && continue
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y "$pkg" >/dev/null 2>&1 || true
+        done
+
+        DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >/dev/null 2>&1 || true
+        echo -e "${GN}Temporary tool cleanup complete.${CL}"
     fi
 
     exit "$exit_code"
@@ -155,11 +172,40 @@ on_error() {
     echo -e "${RD}ERROR:${CL} Script failed at line ${line_no}. Check ${LOG_FILE}"
 }
 
+# --- 8. COMMAND RUNNER ---
+# Runs critical commands quietly but shows real stderr if they fail.
+run_cmd() {
+    local description="$1"
+    shift
+
+    local err_file=""
+    err_file="$(mktemp)"
+
+    if ! "$@" > /dev/null 2> "$err_file"; then
+        echo ""
+        echo -e "${RD}Command failed during:${CL} ${description}"
+        echo -e "${YW}Command:${CL} $*"
+        echo ""
+        echo -e "${RD}Real error:${CL}"
+        cat "$err_file"
+        rm -f "$err_file"
+        exit 1
+    fi
+
+    rm -f "$err_file"
+}
+
+# --- 9. OPTIONAL COMMAND RUNNER ---
+# Runs non-critical commands quietly and does not stop the script.
+run_optional() {
+    "$@" >/dev/null 2>&1 || true
+}
+
 # =========================================================
 #  INPUT FUNCTIONS
 # =========================================================
 
-# --- 8. YES/NO LABEL HELPER ---
+# --- 10. YES/NO LABEL HELPER ---
 yes_no_label() {
     local value="$1"
 
@@ -170,7 +216,7 @@ yes_no_label() {
     fi
 }
 
-# --- 9. BLOCKING YES/NO HELPER ---
+# --- 11. BLOCKING YES/NO HELPER ---
 # Used after SPACE is pressed during a timed Y/n prompt.
 tty_read_yes_no_blocking() {
     local prompt="$1"
@@ -203,7 +249,7 @@ tty_read_yes_no_blocking() {
     done
 }
 
-# --- 10. TIMED YES/NO PROMPT HELPER ---
+# --- 12. TIMED YES/NO PROMPT HELPER ---
 # Uses wall-clock countdown. SPACE pauses. Timeout accepts default.
 timed_yes_no() {
     local prompt="$1"
@@ -271,7 +317,7 @@ timed_yes_no() {
     echo "$answer"
 }
 
-# --- 11. NUMERIC VALIDATION HELPER ---
+# --- 13. NUMERIC VALIDATION HELPER ---
 validate_number() {
     local value="$1"
     local min_value="${2:-1}"
@@ -303,7 +349,7 @@ print_number_error() {
     fi
 }
 
-# --- 12. EDITABLE INPUT LOOP HELPER ---
+# --- 14. EDITABLE INPUT LOOP HELPER ---
 editable_input_loop() {
     local prompt="$1"
     local default="$2"
@@ -363,7 +409,7 @@ editable_input_loop() {
     done
 }
 
-# --- 13. TIMED TEXT INPUT HELPER ---
+# --- 15. TIMED TEXT INPUT HELPER ---
 timed_text_input() {
     local prompt="$1"
     local default="$2"
@@ -423,7 +469,7 @@ timed_text_input() {
     echo "$answer"
 }
 
-# --- 14. TIMED NUMERIC INPUT HELPER ---
+# --- 16. TIMED NUMERIC INPUT HELPER ---
 timed_number_input() {
     local prompt="$1"
     local default="$2"
@@ -504,7 +550,7 @@ timed_number_input() {
     done
 }
 
-# --- 15. MENU SELECTION HELPER ---
+# --- 17. MENU SELECTION HELPER ---
 timed_menu_select() {
     local title="$1"
     local default_index="$2"
@@ -527,10 +573,91 @@ timed_menu_select() {
 }
 
 # =========================================================
+#  VALIDATION HELPERS
+# =========================================================
+
+# --- 18. UBUNTU USERNAME VALIDATOR ---
+# Linux username rule: starts with lowercase letter or underscore, then lowercase letters, numbers, underscore or hyphen.
+validate_linux_username() {
+    local username="$1"
+
+    if [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 19. IPV4 VALIDATOR ---
+# Validates dotted IPv4 address and octet range.
+validate_ipv4() {
+    local ip="$1"
+    local a=""
+    local b=""
+    local c=""
+    local d=""
+
+    if ! [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        return 1
+    fi
+
+    IFS='.' read -r a b c d <<< "$ip"
+
+    for octet in "$a" "$b" "$c" "$d"; do
+        if [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# --- 20. IPV4 CIDR VALIDATOR ---
+# Validates IPv4/CIDR format, for example 192.168.1.50/24.
+validate_ipv4_cidr() {
+    local value="$1"
+    local ip=""
+    local prefix=""
+
+    if ! [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+        return 1
+    fi
+
+    ip="${value%/*}"
+    prefix="${value#*/}"
+
+    validate_ipv4 "$ip" || return 1
+
+    if [ "$prefix" -lt 1 ] || [ "$prefix" -gt 32 ]; then
+        return 1
+    fi
+
+    return 0
+}
+
+# --- 21. DNS LIST VALIDATOR ---
+# Validates comma-separated IPv4 DNS server list.
+validate_dns_list() {
+    local value="$1"
+    local dns=""
+
+    [ -z "$value" ] && return 1
+
+    IFS=',' read -ra DNS_CHECK_ARRAY <<< "$value"
+
+    for dns in "${DNS_CHECK_ARRAY[@]}"; do
+        dns="$(echo "$dns" | xargs)"
+        validate_ipv4 "$dns" || return 1
+    done
+
+    return 0
+}
+
+# =========================================================
 #  GENERAL HELPERS
 # =========================================================
 
-# --- 16. YAML QUOTE HELPER ---
+# --- 22. YAML QUOTE HELPER ---
 yaml_quote() {
     local value="$1"
     value="${value//\\/\\\\}"
@@ -538,7 +665,7 @@ yaml_quote() {
     printf '"%s"' "$value"
 }
 
-# --- 17. SAFE HOSTNAME HELPER ---
+# --- 23. SAFE HOSTNAME HELPER ---
 safe_hostname() {
     local value="$1"
 
@@ -552,13 +679,13 @@ safe_hostname() {
     echo "$value"
 }
 
-# --- 18. VM STATUS HELPER ---
+# --- 24. VM STATUS HELPER ---
 get_vm_status() {
     local vmid="$1"
     qm status "$vmid" 2>/dev/null | awk '{print $2}'
 }
 
-# --- 19. WAIT FOR VM POWEROFF HELPER ---
+# --- 25. WAIT FOR VM POWEROFF HELPER ---
 wait_for_vm_poweroff() {
     local vmid="$1"
     local timeout_minutes="$2"
@@ -572,7 +699,8 @@ wait_for_vm_poweroff() {
 
     start_time="$(date +%s)"
 
-    echo ""
+    section "INSTALL MONITORING"
+
     echo -e "${BL}Ubuntu autoinstall is running inside VM ${vmid}.${CL}"
     echo -e "${YW}Waiting for VM to power off after installation...${CL}"
     echo -e "${YW}Timeout: ${timeout_minutes} minutes.${CL}"
@@ -604,7 +732,7 @@ wait_for_vm_poweroff() {
     done
 }
 
-# --- 20. VM IPV4 DETECTION HELPER ---
+# --- 26. VM IPV4 DETECTION HELPER ---
 get_vm_ipv4_from_guest_agent() {
     local vmid="$1"
 
@@ -615,8 +743,8 @@ get_vm_ipv4_from_guest_agent() {
         head -n 1
 }
 
-# --- 21. WAIT FOR VM IPV4 HELPER ---
-# Important: progress goes to /dev/tty; only the final IPv4 goes to stdout.
+# --- 27. WAIT FOR VM IPV4 HELPER ---
+# Progress goes to /dev/tty; only the final IPv4 goes to stdout.
 wait_for_vm_ipv4() {
     local vmid="$1"
     local timeout_seconds="$2"
@@ -655,7 +783,7 @@ wait_for_vm_ipv4() {
     done
 }
 
-# --- 22. PATCH GRUB FILE HELPER ---
+# --- 28. PATCH GRUB FILE HELPER ---
 patch_grub_file() {
     local file="$1"
     local temp_file=""
@@ -708,7 +836,7 @@ patch_grub_file() {
     rm -f "$temp_file"
 }
 
-# --- 23. NETWORK AUTOINSTALL YAML BUILDER ---
+# --- 29. NETWORK AUTOINSTALL YAML BUILDER ---
 build_network_autoinstall_yaml() {
     if [ "$NETWORK_MODE" == "dhcp" ]; then
         cat <<EOF
@@ -754,7 +882,7 @@ EOF
     fi
 }
 
-# --- 24. LOGIN VERIFIER BUILDER ---
+# --- 30. LOGIN VERIFIER BUILDER ---
 build_verifier_base64() {
     local verifier_file="$1"
 
@@ -789,7 +917,7 @@ FAIL() { echo "✗ FAIL - \$1"; }
 
 if [ -s "/home/${TARGET_USERNAME}/.ssh/authorized_keys" ]; then PASS "SSH authorized_keys present"; else FAIL "SSH authorized_keys missing"; fi
 if sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled"; else FAIL "SSH password authentication not disabled"; fi
-if sshd -T 2>/dev/null | grep -q "^permitrootlogin no"; then PASS "Root SSH login disabled"; else WARN "Root SSH login not confirmed disabled"; fi
+if sshd -T 2>/dev/null | grep -Eq "^permitrootlogin (no|prohibit-password|without-password)"; then PASS "Root SSH login disabled or passwordless-only"; else WARN "Root SSH login not confirmed secure"; fi
 if [ -f "/etc/sudoers.d/90-${TARGET_USERNAME}-nopasswd" ]; then PASS "NOPASSWD sudo rule present"; else WARN "NOPASSWD sudo rule missing"; fi
 if systemctl is-enabled --quiet qemu-guest-agent 2>/dev/null; then PASS "QEMU guest agent enabled"; else WARN "QEMU guest agent not enabled"; fi
 if systemctl is-active --quiet qemu-guest-agent 2>/dev/null; then PASS "QEMU guest agent active"; else WARN "QEMU guest agent not active yet"; fi
@@ -815,7 +943,7 @@ EOF
     base64 -w0 "$verifier_file"
 }
 
-# --- 25. AUTOINSTALL DIRECT CONFIG WRITER ---
+# --- 31. AUTOINSTALL DIRECT CONFIG WRITER ---
 write_direct_autoinstall_yaml() {
     local file="$1"
 
@@ -850,14 +978,14 @@ late-commands:
   - curtin in-target --target=/target -- usermod -aG sudo ${TARGET_USERNAME}
   - curtin in-target --target=/target -- bash -c 'echo "${TARGET_USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-${TARGET_USERNAME}-nopasswd'
   - curtin in-target --target=/target -- chmod 0440 /etc/sudoers.d/90-${TARGET_USERNAME}-nopasswd
-  - curtin in-target --target=/target -- bash -c 'apt-get update || true'
-  - curtin in-target --target=/target -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent curl ca-certificates || true'
-  - curtin in-target --target=/target -- systemctl enable qemu-guest-agent || true
-  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config || true'
+  - curtin in-target --target=/target -- apt-get update
+  - curtin in-target --target=/target -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent curl ca-certificates'
+  - curtin in-target --target=/target -- systemctl enable qemu-guest-agent
+  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config'
   - curtin in-target --target=/target -- bash -c 'grep -q "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication no" >> /etc/ssh/sshd_config'
-  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config || true'
+  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config'
   - curtin in-target --target=/target -- bash -c 'grep -q "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin no" >> /etc/ssh/sshd_config'
-  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*AddressFamily.*/AddressFamily inet/" /etc/ssh/sshd_config || true'
+  - curtin in-target --target=/target -- bash -c 'sed -i -E "s/^[#[:space:]]*AddressFamily.*/AddressFamily inet/" /etc/ssh/sshd_config'
   - curtin in-target --target=/target -- bash -c 'grep -q "^AddressFamily" /etc/ssh/sshd_config || echo "AddressFamily inet" >> /etc/ssh/sshd_config'
   - curtin in-target --target=/target -- bash -c 'date > /var/log/ubuntu-autoinstall-completed'
   - curtin in-target --target=/target -- bash -c 'echo "${VERIFIER_B64}" | base64 -d > /etc/profile.d/ubuntu-autoinstall-verify-display.sh'
@@ -866,7 +994,7 @@ shutdown: poweroff
 EOF
 }
 
-# --- 26. CLOUD-CONFIG USER-DATA WRITER ---
+# --- 32. CLOUD-CONFIG USER-DATA WRITER ---
 write_cloud_config_user_data() {
     local source_file="$1"
     local output_file="$2"
@@ -882,19 +1010,23 @@ write_cloud_config_user_data() {
 #  VALIDATION / INITIALIZATION
 # =========================================================
 
-# --- 27. DEPENDENCY VALIDATION ---
+# --- 33. DEPENDENCY VALIDATION ---
 validate_dependencies() {
     local required_commands=(
         awk
         base64
+        basename
         cat
         cut
         date
         dpkg
+        find
         grep
         head
         mkdir
+        mktemp
         openssl
+        pveversion
         qm
         rm
         sed
@@ -904,12 +1036,14 @@ validate_dependencies() {
         xargs
     )
 
+    local cmd=""
+
     for cmd in "${required_commands[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || msg_error "Required command not found: ${cmd}"
     done
 }
 
-# --- 28. PROXMOX VALIDATION ---
+# --- 34. PROXMOX VALIDATION ---
 validate_proxmox() {
     local pve_major=""
 
@@ -924,24 +1058,68 @@ validate_proxmox() {
     fi
 }
 
-# --- 29. TOOL INSTALLATION ---
+# --- 35. TOOL INSTALLATION ---
+# Installs required temporary ISO tooling only if missing, then cleanup removes only packages installed by this script.
 ensure_tools() {
-    msg_info "Checking required tools"
+    local missing_packages=()
+    local pkg=""
+    local install_yn=""
+
+    section "TOOL CHECK"
+
+    msg_info "Checking required ISO tools"
 
     for pkg in xorriso rsync p7zip-full; do
         if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-            msg_warn "${pkg} not found. Installing it now."
-            DEBIAN_FRONTEND=noninteractive apt-get update &>/dev/null
-            DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" &>/dev/null
+            missing_packages+=("$pkg")
         fi
     done
 
-    command -v xorriso >/dev/null 2>&1 || msg_error "xorriso is required."
+    if [ "${#missing_packages[@]}" -gt 0 ]; then
+        msg_warn "Missing required tools: ${missing_packages[*]}"
+        install_yn="$(timed_yes_no "Install missing ISO tools now?" "y")"
 
-    msg_ok "REQUIRED TOOLS FOUND"
+        if [[ "$install_yn" =~ ^[Nn] ]]; then
+            msg_error "Required ISO tools are missing. Cannot continue."
+        fi
+
+        msg_info "Installing missing ISO tools"
+        run_cmd "updating APT package lists before tool install" env DEBIAN_FRONTEND=noninteractive apt-get update
+
+        for pkg in "${missing_packages[@]}"; do
+            run_cmd "installing ${pkg}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"
+            INSTALLED_TOOL_PACKAGES+=("$pkg")
+        done
+
+        msg_ok "MISSING ISO TOOLS INSTALLED"
+    else
+        msg_ok "REQUIRED ISO TOOLS ALREADY INSTALLED"
+    fi
+
+    command -v xorriso >/dev/null 2>&1 || msg_error "xorriso is required."
 }
 
-# --- 30. INITIALIZATION ---
+# --- 36. PREVIOUS RUN MARKER CHECK ---
+check_previous_marker() {
+    local continue_yn=""
+
+    if [ -f "$COMPLETED_MARKER" ]; then
+        section "PREVIOUS UBUNTU AUTO INSTALL MARKER DETECTED"
+
+        echo -e "${YW}A previous Ubuntu Auto Install marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        echo ""
+        cat "$COMPLETED_MARKER" 2>/dev/null || true
+        echo ""
+
+        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
+
+        if [[ "$continue_yn" =~ ^[Nn] ]]; then
+            exit 0
+        fi
+    fi
+}
+
+# --- 37. INITIALIZATION ---
 init_script() {
     if [ "$EUID" -ne 0 ]; then
         echo -e "${RD}Please run as root.${CL}"
@@ -959,13 +1137,14 @@ init_script() {
     validate_dependencies
     validate_proxmox
     ensure_tools
+    check_previous_marker
 }
 
 # =========================================================
 #  INPUT COLLECTION
 # =========================================================
 
-# --- 31. START WARNING ---
+# --- 38. START WARNING ---
 show_start_warning() {
     echo -e "${YW}This script creates a generated Ubuntu 26.04 autoinstall ISO copy.${CL}"
     echo -e "${YW}The original Ubuntu ISO remains untouched.${CL}"
@@ -976,7 +1155,7 @@ show_start_warning() {
     echo ""
 }
 
-# --- 32. VM SELECTION ---
+# --- 39. VM SELECTION ---
 select_vm() {
     local vmid=""
     local name=""
@@ -985,6 +1164,8 @@ select_vm() {
     local highest_vmid="0"
     local vm_index=""
     local shutdown_yn=""
+
+    section "VM SELECTION"
 
     msg_info "Detecting Proxmox VMs"
 
@@ -1028,7 +1209,7 @@ select_vm() {
 
         if [[ "$shutdown_yn" =~ ^[Yy] ]]; then
             msg_info "Shutting down VM ${TARGET_VMID}"
-            qm shutdown "$TARGET_VMID" --timeout 60 &>/dev/null || qm stop "$TARGET_VMID" &>/dev/null
+            run_cmd "shutting down VM ${TARGET_VMID}" qm shutdown "$TARGET_VMID" --timeout 60 || run_cmd "stopping VM ${TARGET_VMID}" qm stop "$TARGET_VMID"
             msg_ok "VM STOPPED"
             TARGET_VM_STATUS="stopped"
         else
@@ -1037,7 +1218,7 @@ select_vm() {
     fi
 }
 
-# --- 33. VM MAC DETECTION ---
+# --- 40. VM MAC DETECTION ---
 detect_vm_mac() {
     msg_info "Detecting VM MAC address"
 
@@ -1050,11 +1231,22 @@ detect_vm_mac() {
     msg_ok "VM MAC DETECTED (${TARGET_VM_MAC})"
 }
 
-# --- 34. USER / LOCALE INPUTS ---
+# --- 41. USER / LOCALE INPUTS ---
 collect_user_locale_inputs() {
     local keyboard_choice=""
 
-    TARGET_USERNAME="$(timed_text_input "Enter Ubuntu admin username" "$DEFAULT_USERNAME")"
+    section "IDENTITY / LOCALE"
+
+    while true; do
+        TARGET_USERNAME="$(timed_text_input "Enter Ubuntu admin username" "$DEFAULT_USERNAME")"
+
+        if validate_linux_username "$TARGET_USERNAME"; then
+            break
+        fi
+
+        msg_warn "Invalid username. Use lowercase Linux username format, for example: orik"
+    done
+
     TARGET_TIMEZONE="$(timed_text_input "Enter timezone" "$DEFAULT_TIMEZONE")"
     TARGET_LOCALE="$(timed_text_input "Enter Ubuntu locale" "$DEFAULT_LOCALE")"
 
@@ -1081,8 +1273,10 @@ collect_user_locale_inputs() {
     TARGET_HOSTNAME="$(safe_hostname "$TARGET_VM_NAME")"
 }
 
-# --- 35. SSH KEY DETECTION ---
+# --- 42. SSH KEY DETECTION ---
 detect_ssh_keys() {
+    section "SSH KEY DETECTION"
+
     msg_info "Detecting SSH authorized keys"
 
     KEY_SOURCE=""
@@ -1117,12 +1311,12 @@ detect_ssh_keys() {
     msg_ok "SSH KEYS DETECTED (${KEY_SOURCE})"
 }
 
-# --- 36. NETWORK INPUTS ---
+# --- 43. NETWORK INPUTS ---
 collect_network_inputs() {
     local dhcp_yn=""
 
-    echo ""
-    echo -e "${BL}NETWORK CONFIGURATION:${CL}"
+    section "NETWORK CONFIGURATION"
+
     echo -e "${YW}Recommended: use DHCP here and reserve static IP in your router using this MAC:${CL} ${GN}${TARGET_VM_MAC}${CL}"
     echo ""
 
@@ -1130,18 +1324,35 @@ collect_network_inputs() {
 
     if [[ "$dhcp_yn" =~ ^[Nn] ]]; then
         NETWORK_MODE="static"
-        STATIC_IP_CIDR="$(timed_text_input "Enter static IP/CIDR" "192.168.1.50/24")"
-        STATIC_GATEWAY="$(timed_text_input "Enter gateway IP" "192.168.1.1")"
-        STATIC_DNS="$(timed_text_input "Enter DNS servers comma-separated" "$STATIC_DNS")"
+
+        while true; do
+            STATIC_IP_CIDR="$(timed_text_input "Enter static IP/CIDR" "192.168.1.50/24")"
+            validate_ipv4_cidr "$STATIC_IP_CIDR" && break
+            msg_warn "Invalid static IP/CIDR. Example: 192.168.1.50/24"
+        done
+
+        while true; do
+            STATIC_GATEWAY="$(timed_text_input "Enter gateway IP" "192.168.1.1")"
+            validate_ipv4 "$STATIC_GATEWAY" && break
+            msg_warn "Invalid gateway IPv4 address. Example: 192.168.1.1"
+        done
+
+        while true; do
+            STATIC_DNS="$(timed_text_input "Enter DNS servers comma-separated" "$STATIC_DNS")"
+            validate_dns_list "$STATIC_DNS" && break
+            msg_warn "Invalid DNS list. Example: 1.1.1.1,1.0.0.1"
+        done
     else
         NETWORK_MODE="dhcp"
     fi
 }
 
-# --- 37. POST-INSTALL INPUTS ---
+# --- 44. POST-INSTALL INPUTS ---
 collect_post_install_options() {
     local cleanup_yn=""
     local start_installed_yn=""
+
+    section "POST-INSTALL OPTIONS"
 
     INSTALL_WAIT_MINUTES="$(timed_number_input "Enter autoinstall wait timeout in minutes" "$DEFAULT_INSTALL_WAIT_MINUTES" "10" "240")"
 
@@ -1152,11 +1363,13 @@ collect_post_install_options() {
     [[ "$start_installed_yn" =~ ^[Nn] ]] && POST_INSTALL_START_VM="n" || POST_INSTALL_START_VM="y"
 }
 
-# --- 38. UBUNTU ISO SELECTION ---
+# --- 45. UBUNTU ISO SELECTION ---
 select_ubuntu_iso() {
     local default_iso_index="1"
     local iso_base=""
     local iso_index=""
+
+    section "ISO SELECTION"
 
     msg_info "Finding Ubuntu install ISO"
 
@@ -1182,7 +1395,7 @@ select_ubuntu_iso() {
     INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
 }
 
-# --- 39. UBUNTU PRO NOTE ---
+# --- 46. UBUNTU PRO NOTE ---
 show_ubuntu_pro_note() {
     echo ""
     echo -e "${BL}UBUNTU PRO:${CL}"
@@ -1195,12 +1408,25 @@ show_ubuntu_pro_note() {
 #  ISO / AUTOINSTALL GENERATION
 # =========================================================
 
-# --- 40. PREPARE WORKSPACE ---
+# --- 47. PREPARE WORKSPACE ---
 prepare_workspace() {
+    local replace_yn=""
+
     AUTOINSTALL_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
     AUTOINSTALL_ISO_PATH="/var/lib/vz/template/iso/${AUTOINSTALL_ISO_NAME}"
     AUTOINSTALL_ISO_REF="local:iso/${AUTOINSTALL_ISO_NAME}"
     WORK_DIR="/tmp/ubuntu-autoinstall-vm${TARGET_VMID}"
+
+    if [ -f "$AUTOINSTALL_ISO_PATH" ]; then
+        section "GENERATED ISO CONFLICT"
+
+        echo -e "${YW}Generated autoinstall ISO already exists:${CL} ${GN}${AUTOINSTALL_ISO_PATH}${CL}"
+        replace_yn="$(timed_yes_no "Replace existing generated ISO?" "y")"
+
+        if [[ "$replace_yn" =~ ^[Nn] ]]; then
+            msg_error "Existing generated ISO was not replaced. Script cancelled."
+        fi
+    fi
 
     rm -rf "$WORK_DIR"
     mkdir -p "$WORK_DIR/nocloud"
@@ -1208,7 +1434,7 @@ prepare_workspace() {
     mkdir -p "$WORK_DIR/verify"
 }
 
-# --- 41. BUILD SSH KEY YAML ---
+# --- 48. BUILD SSH KEY YAML ---
 build_ssh_key_yaml() {
     SSH_KEYS_YAML=""
 
@@ -1218,7 +1444,7 @@ build_ssh_key_yaml() {
     done <<< "$SSH_KEYS"
 }
 
-# --- 42. WRITE NETWORK CONFIG ---
+# --- 49. WRITE NETWORK CONFIG ---
 write_nocloud_network_config() {
     local dns_yaml=""
     local dns=""
@@ -1263,7 +1489,7 @@ EOF
     fi
 }
 
-# --- 43. WRITE META-DATA ---
+# --- 50. WRITE META-DATA ---
 write_metadata() {
 cat > "${WORK_DIR}/nocloud/meta-data" <<EOF
 instance-id: ubuntu-autoinstall-vm${TARGET_VMID}
@@ -1271,8 +1497,10 @@ local-hostname: ${TARGET_HOSTNAME}
 EOF
 }
 
-# --- 44. WRITE AUTOINSTALL CONFIG ---
+# --- 51. WRITE AUTOINSTALL CONFIG ---
 write_autoinstall_config() {
+    section "AUTOINSTALL CONFIGURATION"
+
     msg_info "Creating Ubuntu autoinstall configuration"
 
     RANDOM_PASSWORD_HASH="$(openssl passwd -6 "$(openssl rand -base64 48)")"
@@ -1293,20 +1521,24 @@ write_autoinstall_config() {
     msg_ok "UBUNTU AUTOINSTALL CONFIGURATION CREATED"
 }
 
-# --- 45. EXTRACT GRUB CONFIGS ---
+# --- 52. EXTRACT GRUB CONFIGS ---
 extract_grub_configs() {
+    section "BOOT CONFIG EXTRACTION"
+
     msg_info "Extracting Ubuntu boot configuration"
 
-    xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract /boot/grub/grub.cfg "$WORK_DIR/grub/grub.cfg" &>/dev/null || \
-        msg_error "Could not extract /boot/grub/grub.cfg from source ISO."
+    run_cmd "extracting /boot/grub/grub.cfg from source ISO" \
+        xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract /boot/grub/grub.cfg "$WORK_DIR/grub/grub.cfg"
 
     xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract /boot/grub/loopback.cfg "$WORK_DIR/grub/loopback.cfg" &>/dev/null || true
 
     msg_ok "UBUNTU BOOT CONFIGURATION EXTRACTED"
 }
 
-# --- 46. PATCH BOOT PARAMETERS ---
+# --- 53. PATCH BOOT PARAMETERS ---
 patch_boot_parameters() {
+    section "BOOT PARAMETER PATCHING"
+
     msg_info "Patching Ubuntu autoinstall boot parameters"
 
     patch_grub_file "$WORK_DIR/grub/grub.cfg"
@@ -1327,8 +1559,10 @@ patch_boot_parameters() {
     msg_ok "AUTOINSTALL BOOT PARAMETERS PATCHED"
 }
 
-# --- 47. BUILD GENERATED ISO ---
+# --- 54. BUILD GENERATED ISO ---
 build_generated_iso() {
+    section "AUTOINSTALL ISO BUILD"
+
     msg_info "Building generated Ubuntu autoinstall ISO copy"
 
     rm -f "$AUTOINSTALL_ISO_PATH"
@@ -1348,7 +1582,7 @@ build_generated_iso() {
         )
     fi
 
-    xorriso "${XORRISO_ARGS[@]}" &>/dev/null
+    run_cmd "building generated Ubuntu autoinstall ISO copy" xorriso "${XORRISO_ARGS[@]}"
 
     if [ ! -s "$AUTOINSTALL_ISO_PATH" ]; then
         msg_error "Generated Ubuntu autoinstall ISO was not created."
@@ -1357,21 +1591,23 @@ build_generated_iso() {
     msg_ok "GENERATED AUTOINSTALL ISO CREATED (${AUTOINSTALL_ISO_REF})"
 }
 
-# --- 48. VERIFY GENERATED ISO ---
+# --- 55. VERIFY GENERATED ISO ---
 verify_generated_iso() {
+    section "AUTOINSTALL ISO VERIFICATION"
+
     msg_info "Verifying generated autoinstall ISO"
 
     rm -rf "$WORK_DIR/verify"
     mkdir -p "$WORK_DIR/verify"
 
-    xorriso -osirrox on -indev "$AUTOINSTALL_ISO_PATH" -extract /boot/grub/grub.cfg "$WORK_DIR/verify/grub.cfg" &>/dev/null || \
-        msg_error "Could not verify generated ISO grub.cfg."
+    run_cmd "verifying generated ISO grub.cfg" \
+        xorriso -osirrox on -indev "$AUTOINSTALL_ISO_PATH" -extract /boot/grub/grub.cfg "$WORK_DIR/verify/grub.cfg"
 
-    xorriso -osirrox on -indev "$AUTOINSTALL_ISO_PATH" -extract /autoinstall.yaml "$WORK_DIR/verify/autoinstall.yaml" &>/dev/null || \
-        msg_error "Generated ISO is missing /autoinstall.yaml."
+    run_cmd "verifying generated ISO /autoinstall.yaml" \
+        xorriso -osirrox on -indev "$AUTOINSTALL_ISO_PATH" -extract /autoinstall.yaml "$WORK_DIR/verify/autoinstall.yaml"
 
-    xorriso -osirrox on -indev "$AUTOINSTALL_ISO_PATH" -extract /nocloud/user-data "$WORK_DIR/verify/user-data" &>/dev/null || \
-        msg_error "Generated ISO is missing /nocloud/user-data."
+    run_cmd "verifying generated ISO /nocloud/user-data" \
+        xorriso -osirrox on -indev "$AUTOINSTALL_ISO_PATH" -extract /nocloud/user-data "$WORK_DIR/verify/user-data"
 
     grep -q "AUTO-INSTALL Ubuntu Server" "$WORK_DIR/verify/grub.cfg" || msg_error "Generated ISO boot menu title was not patched."
     grep -q "ds=nocloud" "$WORK_DIR/verify/grub.cfg" || msg_error "Generated ISO is missing NoCloud boot parameter."
@@ -1384,7 +1620,7 @@ verify_generated_iso() {
     msg_ok "GENERATED AUTOINSTALL ISO VERIFIED"
 }
 
-# --- 49. GENERATE AUTOINSTALL ISO ---
+# --- 56. GENERATE AUTOINSTALL ISO ---
 generate_autoinstall_iso() {
     prepare_workspace
     write_nocloud_network_config
@@ -1400,10 +1636,10 @@ generate_autoinstall_iso() {
 #  APPLY / EXECUTION
 # =========================================================
 
-# --- 50. FINAL SUMMARY BEFORE APPLY ---
+# --- 57. FINAL SUMMARY BEFORE APPLY ---
 show_apply_summary() {
-    echo ""
-    echo -e "${BL}READY TO ATTACH GENERATED UBUNTU AUTOINSTALL ISO:${CL}"
+    section "READY TO APPLY"
+
     echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
     echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
     echo -e "VM STATUS: ${GN}${TARGET_VM_STATUS}${CL}"
@@ -1435,23 +1671,27 @@ show_apply_summary() {
     echo ""
 }
 
-# --- 51. ATTACH AND START INSTALL ---
+# --- 58. ATTACH AND START INSTALL ---
 attach_iso_and_start_install() {
+    section "ATTACH INSTALLER AND START VM"
+
     msg_info "Attaching generated Ubuntu autoinstall ISO"
-    qm set "$TARGET_VMID" --ide2 "${AUTOINSTALL_ISO_REF},media=cdrom" &>/dev/null
+    run_cmd "attaching generated Ubuntu autoinstall ISO" qm set "$TARGET_VMID" --ide2 "${AUTOINSTALL_ISO_REF},media=cdrom"
     msg_ok "GENERATED UBUNTU AUTOINSTALL ISO ATTACHED"
 
     msg_info "Setting VM boot order to installer first"
-    qm set "$TARGET_VMID" --boot "order=ide2;scsi0" &>/dev/null
+    run_cmd "setting VM boot order to installer first" qm set "$TARGET_VMID" --boot "order=ide2;scsi0"
     msg_ok "VM BOOT ORDER CONFIGURED"
 
     msg_info "Starting VM ${TARGET_VMID} for Ubuntu autoinstall"
-    qm start "$TARGET_VMID" &>/dev/null
+    run_cmd "starting VM ${TARGET_VMID} for Ubuntu autoinstall" qm start "$TARGET_VMID"
     msg_ok "VM STARTED FOR AUTOINSTALL"
 }
 
-# --- 52. POST-INSTALL CLEANUP ---
+# --- 59. POST-INSTALL CLEANUP ---
 post_install_cleanup() {
+    section "POST-INSTALL CLEANUP"
+
     if wait_for_vm_poweroff "$TARGET_VMID" "$INSTALL_WAIT_MINUTES"; then
         INSTALL_POWERED_OFF="yes"
     else
@@ -1464,15 +1704,19 @@ post_install_cleanup() {
         echo -e "${YW}Leaving installer ISO attached for troubleshooting.${CL}"
         echo -e "${YW}Check the Proxmox console for installer errors.${CL}"
         echo ""
+        echo -e "${YW}Useful host checks:${CL}"
+        echo -e "${GN}qm config ${TARGET_VMID} | grep -E \"ide2|boot\"${CL}"
+        echo -e "${GN}xorriso -indev ${AUTOINSTALL_ISO_PATH} -report_el_torito plain${CL}"
+        echo ""
         exit 1
     fi
 
     msg_info "Detaching generated autoinstall ISO from VM"
-    qm set "$TARGET_VMID" --delete ide2 &>/dev/null || true
+    run_cmd "detaching installer ISO from VM" qm set "$TARGET_VMID" --delete ide2
     msg_ok "INSTALLER ISO DETACHED FROM VM"
 
     msg_info "Setting VM boot order to installed disk"
-    qm set "$TARGET_VMID" --boot "order=scsi0" &>/dev/null
+    run_cmd "setting VM boot order to installed disk" qm set "$TARGET_VMID" --boot "order=scsi0"
     msg_ok "VM BOOT ORDER SET TO INSTALLED DISK"
 
     if [ "$DELETE_GENERATED_ISO_AFTER_INSTALL" == "y" ]; then
@@ -1484,11 +1728,13 @@ post_install_cleanup() {
     fi
 }
 
-# --- 53. START INSTALLED VM AND DETECT IP ---
+# --- 60. START INSTALLED VM AND DETECT IP ---
 start_installed_vm_and_detect_ip() {
+    section "START INSTALLED VM"
+
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
         msg_info "Starting installed Ubuntu VM"
-        qm start "$TARGET_VMID" &>/dev/null
+        run_cmd "starting installed Ubuntu VM" qm start "$TARGET_VMID"
         msg_ok "INSTALLED UBUNTU VM STARTED"
 
         ASSIGNED_IPV4="$(wait_for_vm_ipv4 "$TARGET_VMID" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "$SSH_IP_CHECK_INTERVAL_SECONDS" || true)"
@@ -1504,7 +1750,7 @@ start_installed_vm_and_detect_ip() {
     fi
 }
 
-# --- 54. WRITE COMPLETION MARKER ---
+# --- 61. WRITE COMPLETION MARKER ---
 write_completion_marker() {
     cat > "$COMPLETED_MARKER" <<EOF
 Ubuntu Auto Install completed on: $(date)
@@ -1527,13 +1773,15 @@ Generated ISO Deleted: $DELETE_GENERATED_ISO_AFTER_INSTALL
 Installed VM Started: $POST_INSTALL_START_VM
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
+Tools Installed By Script: ${INSTALLED_TOOL_PACKAGES[*]:-none}
+Tools Cleanup Enabled: ${CLEANUP_INSTALLED_TOOLS}
 EOF
 }
 
-# --- 55. FINAL OUTPUT ---
+# --- 62. FINAL OUTPUT ---
 show_final_output() {
-    echo ""
-    echo -e "${GN}FINISHED!${CL}"
+    section "FINISHED"
+
     echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
     echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
     echo -e "VM MAC: ${GN}${TARGET_VM_MAC}${CL}"
@@ -1549,7 +1797,7 @@ show_final_output() {
     fi
 
     echo ""
-    echo -e "${YW}Ubuntu autoinstall powered off successfully, installer media was detached,${CL}"
+    echo -e "${YW}Ubuntu autoinstall powered off successfully, installer media was detached.${CL}"
 
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
         echo ""
