@@ -35,6 +35,11 @@ INSTALL_WAIT_MINUTES="90"
 POST_INSTALL_START_VM="y"
 DELETE_GENERATED_ISO_AFTER_INSTALL="y"
 
+SSH_IP_DETECT_TIMEOUT_SECONDS="90"
+SSH_IP_CHECK_INTERVAL_SECONDS="3"
+ASSIGNED_IPV4=""
+SSH_COMMAND=""
+
 TARGET_VMID=""
 TARGET_VM_NAME=""
 TARGET_VM_STATUS=""
@@ -590,7 +595,61 @@ function wait_for_vm_poweroff() {
     done
 }
 
-# --- 22. PATCH GRUB FILE HELPER ---
+# --- 22. VM IPV4 DETECTION HELPER ---
+# Tries to read the installed Ubuntu VM IPv4 address through QEMU Guest Agent.
+# This works after Ubuntu has booted and qemu-guest-agent is installed/running.
+function get_vm_ipv4_from_guest_agent() {
+    local vmid="$1"
+
+    qm guest cmd "$vmid" network-get-interfaces 2>/dev/null | \
+        grep -oE '"ip-address"[[:space:]]*:[[:space:]]*"([0-9]{1,3}\.){3}[0-9]{1,3}"' | \
+        sed -E 's/.*"(([0-9]{1,3}\.){3}[0-9]{1,3})".*/\1/' | \
+        grep -Ev '^(127\.|169\.254\.)' | \
+        head -n 1
+}
+
+# --- 23. WAIT FOR VM IPV4 HELPER ---
+# Waits for QEMU Guest Agent to report a usable IPv4 address after first boot.
+# It continues immediately as soon as an IPv4 address appears.
+function wait_for_vm_ipv4() {
+    local vmid="$1"
+    local timeout_seconds="$2"
+    local interval_seconds="$3"
+    local start_time=""
+    local now_time=""
+    local elapsed=""
+    local ip=""
+
+    start_time="$(date +%s)"
+
+    echo ""
+    echo -e "${YW}Waiting for VM ${vmid} to report an IPv4 address through QEMU Guest Agent...${CL}"
+    echo -e "${YW}This continues immediately when an IPv4 address appears. Timeout: ${timeout_seconds}s.${CL}"
+
+    while true; do
+        now_time="$(date +%s)"
+        elapsed=$(( now_time - start_time ))
+
+        ip="$(get_vm_ipv4_from_guest_agent "$vmid" || true)"
+
+        if [ -n "$ip" ]; then
+            tty_print "${BFR}"
+            echo "$ip"
+            return 0
+        fi
+
+        if [ "$elapsed" -ge "$timeout_seconds" ]; then
+            tty_print "${BFR}"
+            echo ""
+            return 1
+        fi
+
+        tty_print "${BFR}${YW}Waiting for assigned IPv4... elapsed ${elapsed}s / ${timeout_seconds}s${CL}"
+        sleep "$interval_seconds"
+    done
+}
+
+# --- 24. PATCH GRUB FILE HELPER ---
 # Adds autoinstall boot parameters to Ubuntu GRUB linux lines.
 # Also renames the menu entry and reduces timeout so the console clearly shows automation.
 function patch_grub_file() {
@@ -645,7 +704,7 @@ function patch_grub_file() {
     rm -f "$temp_file"
 }
 
-# --- 23. NETWORK AUTOINSTALL YAML BUILDER ---
+# --- 25. NETWORK AUTOINSTALL YAML BUILDER ---
 # Creates a network: YAML section for the direct autoinstall file.
 # DHCP is recommended, but static IP is supported.
 function build_network_autoinstall_yaml() {
@@ -693,7 +752,7 @@ EOF
     fi
 }
 
-# --- 24. LOGIN VERIFIER BUILDER ---
+# --- 26. LOGIN VERIFIER BUILDER ---
 # Builds the first-login verification helper separately and encodes it as base64.
 # This avoids embedding a large shell script directly inside YAML, which caused YAML parse errors.
 function build_verifier_base64() {
@@ -756,7 +815,7 @@ EOF
     base64 -w0 "$verifier_file"
 }
 
-# --- 25. AUTOINSTALL DIRECT CONFIG WRITER ---
+# --- 27. AUTOINSTALL DIRECT CONFIG WRITER ---
 # Writes direct Subiquity autoinstall YAML for /autoinstall.yaml on the generated ISO.
 # This file intentionally does not include #cloud-config.
 # The login verifier is injected as base64 to avoid YAML multiline indentation errors.
@@ -811,7 +870,7 @@ shutdown: poweroff
 EOF
 }
 
-# --- 26. CLOUD-CONFIG USER-DATA WRITER ---
+# --- 28. CLOUD-CONFIG USER-DATA WRITER ---
 # Wraps direct autoinstall YAML under #cloud-config/autoinstall for NoCloud datasource fallback.
 function write_cloud_config_user_data() {
     local source_file="$1"
@@ -828,7 +887,7 @@ function write_cloud_config_user_data() {
 #  PHASE 1: SAFE AUDIT + USER INPUT COLLECTION ONLY
 # =========================================================
 
-# --- 27. PROXMOX VALIDATION ---
+# --- 29. PROXMOX VALIDATION ---
 # Confirms the script is being run on Proxmox VE 9 or newer.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -840,7 +899,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 28. DEPENDENCY CHECK ---
+# --- 30. DEPENDENCY CHECK ---
 # Installs tools required to create a bootable generated ISO copy.
 msg_info "Checking required tools"
 
@@ -858,7 +917,7 @@ command -v openssl >/dev/null 2>&1 || msg_error "openssl command not found."
 
 msg_ok "REQUIRED TOOLS FOUND"
 
-# --- 29. START WARNING ---
+# --- 31. START WARNING ---
 # Explains the purpose and destructive nature of Ubuntu autoinstall.
 echo -e "${YW}This script creates a generated Ubuntu 26.04 autoinstall ISO copy.${CL}"
 echo -e "${YW}The original Ubuntu ISO remains untouched.${CL}"
@@ -871,7 +930,7 @@ echo ""
 start_yn=$(timed_yes_no "Start Ubuntu Auto Install ISO Creator?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 30. VM DETECTION AND SAFE SELECTION ---
+# --- 32. VM DETECTION AND SAFE SELECTION ---
 # Detects existing VMs and lets the user select the target VM.
 msg_info "Detecting Proxmox VMs"
 
@@ -912,7 +971,7 @@ TARGET_VM_STATUS="$(echo "${VM_LINES[$((VM_INDEX-1))]}" | cut -d'|' -f3)"
 
 qm config "$TARGET_VMID" >/dev/null 2>&1 || msg_error "Selected VM ${TARGET_VMID} does not exist."
 
-# --- 31. VM MAC DETECTION ---
+# --- 33. VM MAC DETECTION ---
 # Reads VM MAC address from net0 so DHCP router reservation can stay stable.
 msg_info "Detecting VM MAC address"
 
@@ -924,7 +983,7 @@ fi
 
 msg_ok "VM MAC DETECTED (${TARGET_VM_MAC})"
 
-# --- 32. USERNAME / TIMEZONE / LOCALE INPUTS ---
+# --- 34. USERNAME / TIMEZONE / LOCALE INPUTS ---
 # Collects Ubuntu identity and UK-friendly locale defaults.
 TARGET_USERNAME=$(timed_text_input "Enter Ubuntu admin username" "$DEFAULT_USERNAME")
 TARGET_TIMEZONE=$(timed_text_input "Enter timezone" "$DEFAULT_TIMEZONE")
@@ -952,7 +1011,7 @@ esac
 
 TARGET_HOSTNAME="$(safe_hostname "$TARGET_VM_NAME")"
 
-# --- 33. SSH KEY DETECTION ---
+# --- 35. SSH KEY DETECTION ---
 # Detects SSH keys and refuses to continue if none are found.
 msg_info "Detecting SSH authorized keys"
 
@@ -987,7 +1046,7 @@ fi
 
 msg_ok "SSH KEYS DETECTED (${KEY_SOURCE})"
 
-# --- 34. NETWORK MODE ---
+# --- 36. NETWORK MODE ---
 # Recommends DHCP plus router reservation by VM MAC, but supports static IP.
 echo ""
 echo -e "${BL}NETWORK CONFIGURATION:${CL}"
@@ -1005,7 +1064,7 @@ else
     NETWORK_MODE="dhcp"
 fi
 
-# --- 35. POST-INSTALL AUTOMATION OPTIONS ---
+# --- 37. POST-INSTALL AUTOMATION OPTIONS ---
 # Controls wait timeout, generated ISO cleanup, and whether to boot the installed VM automatically.
 INSTALL_WAIT_MINUTES=$(timed_number_input "Enter autoinstall wait timeout in minutes" "$DEFAULT_INSTALL_WAIT_MINUTES" "10" "240")
 
@@ -1015,7 +1074,7 @@ cleanup_yn=$(timed_yes_no "Delete generated autoinstall ISO after successful pow
 start_installed_yn=$(timed_yes_no "Start installed Ubuntu VM after cleanup?" "y")
 [[ "$start_installed_yn" =~ ^[Nn] ]] && POST_INSTALL_START_VM="n" || POST_INSTALL_START_VM="y"
 
-# --- 36. UBUNTU ISO SELECTION ---
+# --- 38. UBUNTU ISO SELECTION ---
 # Selects the original Ubuntu ISO. It remains untouched.
 msg_info "Finding Ubuntu install ISO"
 
@@ -1042,7 +1101,7 @@ ISO_INDEX=$(timed_number_input "Select Ubuntu ISO number" "$DEFAULT_ISO_INDEX" "
 INSTALL_ISO_PATH="${ISOS[$((ISO_INDEX-1))]}"
 INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
 
-# --- 37. UBUNTU PRO NOTE ---
+# --- 39. UBUNTU PRO NOTE ---
 # Keeps Ubuntu Pro handling in script 4.
 echo ""
 echo -e "${BL}UBUNTU PRO:${CL}"
@@ -1050,7 +1109,7 @@ echo -e "${YW}Ubuntu Pro is intentionally not attached by this script.${CL}"
 echo -e "${YW}script 4 can attach Ubuntu Pro later, or manually use:${CL} ${GN}sudo pro attach <token>${CL}"
 echo ""
 
-# --- 38. GENERATED ISO PATHS ---
+# --- 40. GENERATED ISO PATHS ---
 # Prepares paths for generated autoinstall ISO copy and temporary files.
 AUTOINSTALL_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
 AUTOINSTALL_ISO_PATH="/var/lib/vz/template/iso/${AUTOINSTALL_ISO_NAME}"
@@ -1062,12 +1121,12 @@ mkdir -p "$WORK_DIR/nocloud"
 mkdir -p "$WORK_DIR/grub"
 mkdir -p "$WORK_DIR/verify"
 
-# --- 39. RANDOM PASSWORD HASH ---
+# --- 41. RANDOM PASSWORD HASH ---
 # Autoinstall requires a password hash. The password is random and never displayed.
 # SSH password login is disabled. Sudo is configured as NOPASSWD for automation/script 4 compatibility.
 RANDOM_PASSWORD_HASH="$(openssl passwd -6 "$(openssl rand -base64 48)")"
 
-# --- 40. SSH KEY YAML BLOCK ---
+# --- 42. SSH KEY YAML BLOCK ---
 # Converts detected SSH public keys into YAML list entries.
 SSH_KEYS_YAML=""
 
@@ -1076,7 +1135,7 @@ while IFS= read -r keyline; do
     SSH_KEYS_YAML+="      - $(yaml_quote "$keyline")"$'\n'
 done <<< "$SSH_KEYS"
 
-# --- 41. NETWORK CONFIG CREATION ---
+# --- 43. NETWORK CONFIG CREATION ---
 # Creates cloud-init network-config matching the VM MAC address for NoCloud fallback.
 if [ "$NETWORK_MODE" == "dhcp" ]; then
 cat > "${WORK_DIR}/nocloud/network-config" <<EOF
@@ -1118,14 +1177,14 @@ ${DNS_YAML}
 EOF
 fi
 
-# --- 42. META-DATA CREATION ---
+# --- 44. META-DATA CREATION ---
 # Creates NoCloud meta-data with stable instance ID and hostname.
 cat > "${WORK_DIR}/nocloud/meta-data" <<EOF
 instance-id: ubuntu-autoinstall-vm${TARGET_VMID}
 local-hostname: ${TARGET_HOSTNAME}
 EOF
 
-# --- 43. AUTOINSTALL CONFIG CREATION ---
+# --- 45. AUTOINSTALL CONFIG CREATION ---
 # Creates verifier helper, direct /autoinstall.yaml and NoCloud /nocloud/user-data versions.
 msg_info "Creating Ubuntu autoinstall configuration"
 
@@ -1144,7 +1203,7 @@ fi
 
 msg_ok "UBUNTU AUTOINSTALL CONFIGURATION CREATED"
 
-# --- 44. EXTRACT GRUB CONFIGS FROM ORIGINAL ISO ---
+# --- 46. EXTRACT GRUB CONFIGS FROM ORIGINAL ISO ---
 # Extracts only boot config files. The original ISO remains untouched.
 msg_info "Extracting Ubuntu boot configuration"
 
@@ -1155,7 +1214,7 @@ xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract /boot/grub/loopback.cfg 
 
 msg_ok "UBUNTU BOOT CONFIGURATION EXTRACTED"
 
-# --- 45. PATCH BOOT PARAMETERS ---
+# --- 47. PATCH BOOT PARAMETERS ---
 # Adds autoinstall path, NoCloud path, clear menu title, and short timeout.
 msg_info "Patching Ubuntu autoinstall boot parameters"
 
@@ -1176,7 +1235,7 @@ fi
 
 msg_ok "AUTOINSTALL BOOT PARAMETERS PATCHED"
 
-# --- 46. BUILD GENERATED AUTOINSTALL ISO COPY ---
+# --- 48. BUILD GENERATED AUTOINSTALL ISO COPY ---
 # Uses xorriso replay mode to preserve the original Ubuntu ISO boot structure.
 # Maps patched GRUB files, direct /autoinstall.yaml, and /nocloud data into the generated ISO copy.
 msg_info "Building generated Ubuntu autoinstall ISO copy"
@@ -1206,7 +1265,7 @@ fi
 
 msg_ok "GENERATED AUTOINSTALL ISO CREATED (${AUTOINSTALL_ISO_REF})"
 
-# --- 47. GENERATED ISO VERIFICATION ---
+# --- 49. GENERATED ISO VERIFICATION ---
 # Verifies the generated ISO contains the patched boot line and autoinstall files before starting the VM.
 msg_info "Verifying generated autoinstall ISO"
 
@@ -1252,7 +1311,7 @@ fi
 
 msg_ok "GENERATED AUTOINSTALL ISO VERIFIED"
 
-# --- 48. FINAL SUMMARY BEFORE APPLY ---
+# --- 50. FINAL SUMMARY BEFORE APPLY ---
 # Shows all collected settings before modifying the VM.
 echo ""
 echo -e "${BL}READY TO ATTACH GENERATED UBUNTU AUTOINSTALL ISO:${CL}"
@@ -1279,6 +1338,7 @@ echo -e "GENERATED AUTOINSTALL ISO: ${GN}${AUTOINSTALL_ISO_REF}${CL}"
 echo -e "WAIT TIMEOUT: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
 echo -e "DELETE GENERATED ISO AFTER INSTALL: ${GN}${DELETE_GENERATED_ISO_AFTER_INSTALL}${CL}"
 echo -e "START INSTALLED VM AFTER CLEANUP: ${GN}${POST_INSTALL_START_VM}${CL}"
+echo -e "IP DETECTION TIMEOUT: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
 echo ""
 echo -e "${RD}WARNING:${CL} Starting this VM can begin Ubuntu autoinstall and wipe its VM disk."
 echo ""
@@ -1292,7 +1352,7 @@ attach_yn=$(timed_yes_no "Attach generated autoinstall ISO and start VM now?" "y
 #  PHASE 2: APPLY ONLY AFTER FINAL CONFIRMATION
 # =========================================================
 
-# --- 49. VM STOP HANDLING ---
+# --- 51. VM STOP HANDLING ---
 # Ensures the VM is stopped before attaching boot media.
 TARGET_VM_STATUS="$(get_vm_status "$TARGET_VMID")"
 
@@ -1309,7 +1369,7 @@ if [ "$TARGET_VM_STATUS" == "running" ]; then
     fi
 fi
 
-# --- 50. ATTACH GENERATED AUTOINSTALL ISO ---
+# --- 52. ATTACH GENERATED AUTOINSTALL ISO ---
 # Replaces the install CD-ROM with the generated autoinstall ISO copy.
 msg_info "Attaching generated Ubuntu autoinstall ISO"
 
@@ -1317,7 +1377,7 @@ qm set "$TARGET_VMID" --ide2 "${AUTOINSTALL_ISO_REF},media=cdrom" &>/dev/null
 
 msg_ok "GENERATED UBUNTU AUTOINSTALL ISO ATTACHED"
 
-# --- 51. BOOT ORDER SETUP ---
+# --- 53. BOOT ORDER SETUP ---
 # Boots the generated ISO first, then the OS disk.
 msg_info "Setting VM boot order to installer first"
 
@@ -1325,7 +1385,7 @@ qm set "$TARGET_VMID" --boot "order=ide2;scsi0" &>/dev/null
 
 msg_ok "VM BOOT ORDER CONFIGURED"
 
-# --- 52. START VM FOR INSTALL ---
+# --- 54. START VM FOR INSTALL ---
 # Starts the VM so Ubuntu autoinstall can begin.
 msg_info "Starting VM ${TARGET_VMID} for Ubuntu autoinstall"
 
@@ -1333,7 +1393,7 @@ qm start "$TARGET_VMID" &>/dev/null
 
 msg_ok "VM STARTED FOR AUTOINSTALL"
 
-# --- 53. WAIT FOR INSTALL POWEROFF ---
+# --- 55. WAIT FOR INSTALL POWEROFF ---
 # Waits for shutdown: poweroff from Ubuntu autoinstall.
 if wait_for_vm_poweroff "$TARGET_VMID" "$INSTALL_WAIT_MINUTES"; then
     INSTALL_POWERED_OFF="yes"
@@ -1350,7 +1410,7 @@ if [ "$INSTALL_POWERED_OFF" != "yes" ]; then
     exit 1
 fi
 
-# --- 54. DETACH INSTALLER ISO ---
+# --- 56. DETACH INSTALLER ISO ---
 # Removes the generated autoinstall ISO from the VM before booting installed Ubuntu.
 msg_info "Detaching generated autoinstall ISO from VM"
 
@@ -1358,7 +1418,7 @@ qm set "$TARGET_VMID" --delete ide2 &>/dev/null || true
 
 msg_ok "INSTALLER ISO DETACHED FROM VM"
 
-# --- 55. SET BOOT ORDER TO INSTALLED DISK ---
+# --- 57. SET BOOT ORDER TO INSTALLED DISK ---
 # Prevents reinstall loops by booting the installed OS disk first.
 msg_info "Setting VM boot order to installed disk"
 
@@ -1366,7 +1426,7 @@ qm set "$TARGET_VMID" --boot "order=scsi0" &>/dev/null
 
 msg_ok "VM BOOT ORDER SET TO INSTALLED DISK"
 
-# --- 56. DELETE GENERATED ISO OPTION ---
+# --- 58. DELETE GENERATED ISO OPTION ---
 # Deletes the generated autoinstall ISO after successful install/poweroff if selected.
 if [ "$DELETE_GENERATED_ISO_AFTER_INSTALL" == "y" ]; then
     msg_info "Deleting generated autoinstall ISO"
@@ -1378,7 +1438,7 @@ else
     msg_warn "Generated autoinstall ISO kept at ${AUTOINSTALL_ISO_PATH}"
 fi
 
-# --- 57. START INSTALLED UBUNTU OPTION ---
+# --- 59. START INSTALLED UBUNTU OPTION ---
 # Starts the installed Ubuntu VM after installer media cleanup if selected.
 if [ "$POST_INSTALL_START_VM" == "y" ]; then
     msg_info "Starting installed Ubuntu VM"
@@ -1386,11 +1446,20 @@ if [ "$POST_INSTALL_START_VM" == "y" ]; then
     qm start "$TARGET_VMID" &>/dev/null
 
     msg_ok "INSTALLED UBUNTU VM STARTED"
+
+    ASSIGNED_IPV4="$(wait_for_vm_ipv4 "$TARGET_VMID" "$SSH_IP_DETECT_TIMEOUT_SECONDS" "$SSH_IP_CHECK_INTERVAL_SECONDS" || true)"
+
+    if [ -n "$ASSIGNED_IPV4" ]; then
+        SSH_COMMAND="ssh ${TARGET_USERNAME}@${ASSIGNED_IPV4}"
+        msg_ok "VM IPV4 DETECTED (${ASSIGNED_IPV4})"
+    else
+        msg_warn "VM started but IPv4 was not reported by QEMU Guest Agent within ${SSH_IP_DETECT_TIMEOUT_SECONDS}s"
+    fi
 else
     msg_warn "Installed Ubuntu VM was left powered off because user selected no"
 fi
 
-# --- 58. COMPLETION MARKER ---
+# --- 60. COMPLETION MARKER ---
 # Records what this script generated and the final cleanup state.
 cat > "$COMPLETED_MARKER" <<EOF
 Ubuntu Auto Install ISO completed on: $(date)
@@ -1411,9 +1480,11 @@ Installer Detached: yes
 Boot Order: scsi0
 Generated ISO Deleted: $DELETE_GENERATED_ISO_AFTER_INSTALL
 Installed VM Started: $POST_INSTALL_START_VM
+Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
+SSH Command: ${SSH_COMMAND:-not-generated}
 EOF
 
-# --- 59. FINAL NOTES ---
+# --- 61. FINAL NOTES ---
 # Shows next steps.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
@@ -1426,11 +1497,28 @@ echo -e "BOOT ORDER: ${GN}scsi0${CL}"
 echo -e "INSTALLED VM STARTED: ${GN}${POST_INSTALL_START_VM}${CL}"
 echo -e "KEYBOARD: ${GN}${TARGET_KEYBOARD_LAYOUT}${CL}"
 echo -e "LOCALE: ${GN}${TARGET_LOCALE}${CL}"
+
+if [ -n "$ASSIGNED_IPV4" ]; then
+    echo -e "ASSIGNED IPV4: ${GN}${ASSIGNED_IPV4}${CL}"
+fi
+
 echo ""
 echo -e "${YW}Ubuntu autoinstall powered off successfully, installer media was detached, and reinstall loop prevention was applied.${CL}"
 
 if [ "$POST_INSTALL_START_VM" == "y" ]; then
-    echo -e "${YW}Wait for Ubuntu to finish first boot, then SSH in as:${CL} ${GN}${TARGET_USERNAME}${CL}"
+    echo ""
+
+    if [ -n "$SSH_COMMAND" ]; then
+        echo -e "${YW}Wait for Ubuntu to finish first boot, then use SSH:${CL}"
+        echo -e "${GN}${SSH_COMMAND}${CL}"
+    else
+        echo -e "${YW}Ubuntu VM was started, but an IPv4 address was not reported yet.${CL}"
+        echo -e "${YW}Check the IP from the Proxmox host with:${CL}"
+        echo -e "${GN}qm guest cmd ${TARGET_VMID} network-get-interfaces${CL}"
+        echo -e "${YW}Then use SSH:${CL}"
+        echo -e "${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
+    fi
+
     echo -e "${YW}Then run script 4 inside the Ubuntu VM.${CL}"
 else
     echo -e "${YW}Start the VM manually when ready with:${CL} ${GN}qm start ${TARGET_VMID}${CL}"
