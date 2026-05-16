@@ -10,9 +10,7 @@ shopt -s inherit_errexit nullglob
 YW=`echo "\033[33m"`
 BL=`echo "\033[36m"`
 RD=`echo "\033[01;31m"`
-BGN=`echo "\033[4;92m"`
 GN=`echo "\033[1;92m"`
-DGN=`echo "\033[32m"`
 CL=`echo "\033[m"`
 CLF=`echo "\033[5m"`
 BFR="\\r\\033[K"
@@ -37,10 +35,10 @@ TARGET_USERNAME=""
 TARGET_TIMEZONE=""
 INSTALL_ISO_PATH=""
 INSTALL_ISO_REF=""
-SEED_NAME=""
-SEED_DIR=""
-SEED_ISO_PATH=""
-SEED_ISO_REF=""
+CUSTOM_ISO_NAME=""
+CUSTOM_ISO_PATH=""
+CUSTOM_ISO_REF=""
+WORK_DIR=""
 SSH_KEYS=""
 NETWORK_MODE="dhcp"
 STATIC_IP_CIDR=""
@@ -50,12 +48,12 @@ STATIC_DNS="1.1.1.1,1.0.0.1"
 # --- 3. HEADER FUNCTION ---
 function header_info {
 echo -e "${BL}
-██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗████████╗██╗   ██╗     █████╗ ██╗   ██╗████████╗ ██████╗     ██╗███╗   ██╗███████╗████████╗ █████╗ ██╗     ██╗     
-██║   ██║██╔══██╗██║   ██║████╗  ██║╚══██╔══╝██║   ██║    ██╔══██╗██║   ██║╚══██╔══╝██╔═══██╗    ██║████╗  ██║██╔════╝╚══██╔══╝██╔══██╗██║     ██║     
-██║   ██║██████╔╝██║   ██║██╔██╗ ██║   ██║   ██║   ██║    ███████║██║   ██║   ██║   ██║   ██║    ██║██╔██╗ ██║███████╗   ██║   ███████║██║     ██║     
-██║   ██║██╔══██╗██║   ██║██║╚██╗██║   ██║   ██║   ██║    ██╔══██║██║   ██║   ██║   ██║   ██║    ██║██║╚██╗██║╚════██║   ██║   ██╔══██║██║     ██║     
-╚██████╔╝██████╔╝╚██████╔╝██║ ╚████║   ██║   ╚██████╔╝    ██║  ██║╚██████╔╝   ██║   ╚██████╔╝    ██║██║ ╚████║███████║   ██║   ██║  ██║███████╗███████╗
- ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝   ╚═╝    ╚═════╝     ╚═╝  ╚═╝ ╚═════╝    ╚═╝    ╚═════╝     ╚═╝╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚══════╝
+██╗   ██╗██████╗ ██╗   ██╗███╗   ██╗████████╗██╗   ██╗     █████╗ ██╗   ██╗████████╗ ██████╗ 
+██║   ██║██╔══██╗██║   ██║████╗  ██║╚══██╔══╝██║   ██║    ██╔══██╗██║   ██║╚══██╔══╝██╔═══██╗
+██║   ██║██████╔╝██║   ██║██╔██╗ ██║   ██║   ██║   ██║    ███████║██║   ██║   ██║   ██║   ██║
+██║   ██║██╔══██╗██║   ██║██║╚██╗██║   ██║   ██║   ██║    ██╔══██║██║   ██║   ██║   ██║   ██║
+╚██████╔╝██████╔╝╚██████╔╝██║ ╚████║   ██║   ╚██████╔╝    ██║  ██║╚██████╔╝   ██║   ╚██████╔╝
+ ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝   ╚═╝    ╚═════╝     ╚═╝  ╚═╝ ╚═════╝    ╚═╝    ╚═════╝ 
 ${CL}"
 }
 
@@ -78,45 +76,27 @@ fi
 clear
 header_info
 
-# --- 7. TTY PRINT HELPER ---
+# --- 7. TTY PRINT HELPERS ---
 function tty_print() {
-    if [ -w /dev/tty ]; then
-        echo -ne "$*" > /dev/tty
-    else
-        echo -ne "$*" >&2
-    fi
+    if [ -w /dev/tty ]; then echo -ne "$*" > /dev/tty; else echo -ne "$*" >&2; fi
 }
 
-# --- 8. TTY PRINTLN HELPER ---
 function tty_println() {
-    if [ -w /dev/tty ]; then
-        echo -e "$*" > /dev/tty
-    else
-        echo -e "$*" >&2
-    fi
+    if [ -w /dev/tty ]; then echo -e "$*" > /dev/tty; else echo -e "$*" >&2; fi
 }
 
-# --- 9. YES/NO LABEL HELPER ---
+# --- 8. YES/NO HELPERS ---
 function yes_no_label() {
-    local value="$1"
-
-    if [[ "$value" =~ ^[Yy]$ ]]; then
-        echo "yes"
-    else
-        echo "no"
-    fi
+    [[ "$1" =~ ^[Yy]$ ]] && echo "yes" || echo "no"
 }
 
-# --- 10. BLOCKING YES/NO HELPER ---
 function tty_read_yes_no_blocking() {
     local prompt="$1"
     local default="$2"
     local default_label="Y/n"
     local key=""
 
-    if [[ "$default" =~ ^[Nn]$ ]]; then
-        default_label="y/N"
-    fi
+    [[ "$default" =~ ^[Nn]$ ]] && default_label="y/N"
 
     while true; do
         tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
@@ -139,22 +119,17 @@ function tty_read_yes_no_blocking() {
     done
 }
 
-# --- 11. TIMED YES/NO PROMPT HELPER ---
 function timed_yes_no() {
     local prompt="$1"
     local default="$2"
     local answer=""
     local key=""
     local default_label="Y/n"
-    local final_label=""
     local deadline=""
     local now=""
     local remaining=""
 
-    if [[ "$default" =~ ^[Nn]$ ]]; then
-        default_label="y/N"
-    fi
-
+    [[ "$default" =~ ^[Nn]$ ]] && default_label="y/N"
     deadline=$(( $(date +%s) + T ))
 
     while true; do
@@ -198,62 +173,33 @@ function timed_yes_no() {
     done
 
     [ -z "$answer" ] && answer="$default"
-    final_label="$(yes_no_label "$answer")"
 
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    tty_println "${CM} ${GN}${prompt} $(yes_no_label "$answer")${CL}"
 
     echo "$answer"
 }
 
-# --- 12. TEXT INPUT HELPER ---
+# --- 9. TEXT / NUMBER HELPERS ---
 function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    deadline=$(( $(date +%s) + T ))
+    tty_print "${YW}${prompt} [default: ${default}] (${T}s): ${CL}"
 
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            IFS= read -r -t 1 answer < /dev/tty || true
-        else
-            IFS= read -r -t 1 answer || true
-        fi
-
-        if [ -n "$answer" ]; then
-            break
-        fi
-
-        if [ "$remaining" -le 1 ]; then
-            answer="$default"
-            break
-        fi
-    done
+    if [ -r /dev/tty ]; then
+        IFS= read -r -t "$T" answer < /dev/tty || true
+    else
+        IFS= read -r -t "$T" answer || true
+    fi
 
     [ -z "$answer" ] && answer="$default"
 
-    tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-
     echo "$answer"
 }
 
-# --- 13. NUMBER VALIDATION HELPER ---
 function validate_number() {
     local value="$1"
     local min_value="${2:-1}"
@@ -269,7 +215,6 @@ function validate_number() {
     return 0
 }
 
-# --- 14. NUMBER INPUT HELPER ---
 function timed_number_input() {
     local prompt="$1"
     local default="$2"
@@ -285,15 +230,11 @@ function timed_number_input() {
             return 0
         fi
 
-        if [ -n "$max_value" ]; then
-            tty_println "${RD}Invalid input. Enter a number between ${min_value} and ${max_value}.${CL}"
-        else
-            tty_println "${RD}Invalid input. Enter a number greater than or equal to ${min_value}.${CL}"
-        fi
+        tty_println "${RD}Invalid input. Enter a valid number.${CL}"
     done
 }
 
-# --- 15. YAML QUOTE HELPER ---
+# --- 10. YAML QUOTE HELPER ---
 function yaml_quote() {
     local value="$1"
     value="${value//\\/\\\\}"
@@ -301,7 +242,7 @@ function yaml_quote() {
     printf '"%s"' "$value"
 }
 
-# --- 16. PROXMOX VALIDATION ---
+# --- 11. PROXMOX VALIDATION ---
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
 fi
@@ -312,34 +253,36 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 17. DEPENDENCY CHECK ---
+# --- 12. DEPENDENCY CHECK ---
 msg_info "Checking required tools"
 
-if ! command -v genisoimage >/dev/null 2>&1; then
-    msg_warn "genisoimage not found. Installing it now."
-    DEBIAN_FRONTEND=noninteractive apt-get update &>/dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y genisoimage &>/dev/null
-fi
+for pkg in xorriso rsync p7zip-full; do
+    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+        msg_warn "${pkg} not found. Installing it now."
+        DEBIAN_FRONTEND=noninteractive apt-get update &>/dev/null
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" &>/dev/null
+    fi
+done
 
-command -v genisoimage >/dev/null 2>&1 || msg_error "genisoimage is required but could not be installed."
+command -v xorriso >/dev/null 2>&1 || msg_error "xorriso is required."
+command -v rsync >/dev/null 2>&1 || msg_error "rsync is required."
 command -v qm >/dev/null 2>&1 || msg_error "qm command not found."
 command -v openssl >/dev/null 2>&1 || msg_error "openssl command not found."
 
 msg_ok "REQUIRED TOOLS FOUND"
 
-# --- 18. START WARNING ---
-echo -e "${YW}This script creates a NoCloud autoinstall seed ISO for Ubuntu Server 26.04 VM installs.${CL}"
+# --- 13. START WARNING ---
+echo -e "${YW}This script creates a custom Ubuntu 26.04 autoinstall ISO with boot parameters already injected.${CL}"
 echo -e "${YW}Written for: ${GN}${DEFAULT_ISO_NAME}${CL}"
-echo -e "${YW}Use another Ubuntu ISO only if you are prepared to debug installer/autoinstall differences.${CL}"
 echo ""
 echo -e "${RD}WARNING:${CL} Ubuntu autoinstall will erase the selected VM install disk."
 echo -e "${YW}For best results, use a fresh VM created by script 3 with one OS disk.${CL}"
 echo ""
 
-start_yn=$(timed_yes_no "Start Ubuntu Auto Install Seed Creator?" "y")
+start_yn=$(timed_yes_no "Start Ubuntu Auto Install ISO Creator?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 19. VM DETECTION AND SAFE SELECTION ---
+# --- 14. VM DETECTION AND SAFE SELECTION ---
 msg_info "Detecting Proxmox VMs"
 
 mapfile -t VM_LINES < <(qm list | awk 'NR>1 {print $1 "|" $2 "|" $3}')
@@ -369,11 +312,9 @@ for i in "${!VM_LINES[@]}"; do
     echo "$((i+1))) ${vmid} | ${name} | ${status}"
 done
 
-if [ "${#VM_LINES[@]}" -eq 1 ]; then
-    DEFAULT_VM_INDEX="1"
-fi
+[ "${#VM_LINES[@]}" -eq 1 ] && DEFAULT_VM_INDEX="1"
 
-VM_INDEX=$(timed_number_input "Select VM for Ubuntu autoinstall seed" "$DEFAULT_VM_INDEX" "1" "${#VM_LINES[@]}")
+VM_INDEX=$(timed_number_input "Select VM for Ubuntu autoinstall" "$DEFAULT_VM_INDEX" "1" "${#VM_LINES[@]}")
 
 TARGET_VMID="$(echo "${VM_LINES[$((VM_INDEX-1))]}" | cut -d'|' -f1)"
 TARGET_VM_NAME="$(echo "${VM_LINES[$((VM_INDEX-1))]}" | cut -d'|' -f2)"
@@ -381,7 +322,7 @@ TARGET_VM_STATUS="$(echo "${VM_LINES[$((VM_INDEX-1))]}" | cut -d'|' -f3)"
 
 qm config "$TARGET_VMID" >/dev/null 2>&1 || msg_error "Selected VM ${TARGET_VMID} does not exist."
 
-# --- 20. VM MAC DETECTION ---
+# --- 15. VM MAC DETECTION ---
 msg_info "Detecting VM MAC address"
 
 TARGET_VM_MAC="$(qm config "$TARGET_VMID" | awk -F'[=,]' '/^net0:/ {print $2; exit}' | tr '[:lower:]' '[:upper:]')"
@@ -392,11 +333,11 @@ fi
 
 msg_ok "VM MAC DETECTED (${TARGET_VM_MAC})"
 
-# --- 21. USERNAME AND TIMEZONE ---
+# --- 16. USERNAME AND TIMEZONE ---
 TARGET_USERNAME=$(timed_text_input "Enter Ubuntu admin username" "$DEFAULT_USERNAME")
 TARGET_TIMEZONE=$(timed_text_input "Enter timezone" "$DEFAULT_TIMEZONE")
 
-# --- 22. SSH KEY DETECTION ---
+# --- 17. SSH KEY DETECTION ---
 msg_info "Detecting SSH authorized keys"
 
 KEY_SOURCE=""
@@ -430,7 +371,7 @@ fi
 
 msg_ok "SSH KEYS DETECTED (${KEY_SOURCE})"
 
-# --- 23. NETWORK MODE ---
+# --- 18. NETWORK MODE ---
 echo ""
 echo -e "${BL}NETWORK CONFIGURATION:${CL}"
 echo -e "${YW}Recommended: use DHCP here and reserve static IP in your router using this MAC:${CL} ${GN}${TARGET_VM_MAC}${CL}"
@@ -447,60 +388,53 @@ else
     NETWORK_MODE="dhcp"
 fi
 
-# --- 24. UBUNTU ISO DETECTION / SELECTION ---
-msg_info "Checking Ubuntu install ISO"
+# --- 19. UBUNTU ISO SELECTION ---
+msg_info "Finding Ubuntu install ISO"
 
-if qm config "$TARGET_VMID" | grep -q "local:iso/.*\.iso"; then
-    INSTALL_ISO_REF="$(qm config "$TARGET_VMID" | awk -F'[, ]' '/ide2:|sata0:|scsi1:|ide0:/ && /iso/ {print $2; exit}')"
+mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" | sort || true)
+
+if [ "${#ISOS[@]}" -eq 0 ]; then
+    msg_error "No ISO files found in /var/lib/vz/template/iso."
 fi
 
-if [ -z "$INSTALL_ISO_REF" ]; then
-    mapfile -t ISOS < <(find /var/lib/vz/template/iso -maxdepth 1 -type f -iname "*.iso" | sort || true)
+msg_ok "ISO FILES FOUND"
 
-    if [ "${#ISOS[@]}" -eq 0 ]; then
-        msg_error "No ISO files found in /var/lib/vz/template/iso."
-    fi
+echo ""
+echo -e "${BL}SELECT SOURCE UBUNTU INSTALL ISO:${CL}"
 
-    msg_warn "No install ISO detected on VM ${TARGET_VMID}."
-    echo ""
-    echo -e "${BL}SELECT UBUNTU INSTALL ISO:${CL}"
+DEFAULT_ISO_INDEX="1"
 
-    DEFAULT_ISO_INDEX="1"
+for i in "${!ISOS[@]}"; do
+    iso_base="$(basename "${ISOS[$i]}")"
+    [ "$iso_base" == "$DEFAULT_ISO_NAME" ] && DEFAULT_ISO_INDEX="$((i+1))"
+    echo "$((i+1))) ${iso_base}"
+done
 
-    for i in "${!ISOS[@]}"; do
-        iso_base="$(basename "${ISOS[$i]}")"
-        [ "$iso_base" == "$DEFAULT_ISO_NAME" ] && DEFAULT_ISO_INDEX="$((i+1))"
-        echo "$((i+1))) ${iso_base}"
-    done
+ISO_INDEX=$(timed_number_input "Select Ubuntu ISO number" "$DEFAULT_ISO_INDEX" "1" "${#ISOS[@]}")
+INSTALL_ISO_PATH="${ISOS[$((ISO_INDEX-1))]}"
+INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
 
-    ISO_INDEX=$(timed_number_input "Select Ubuntu ISO number" "$DEFAULT_ISO_INDEX" "1" "${#ISOS[@]}")
-    INSTALL_ISO_PATH="${ISOS[$((ISO_INDEX-1))]}"
-    INSTALL_ISO_REF="local:iso/$(basename "$INSTALL_ISO_PATH")"
-else
-    msg_ok "INSTALL ISO DETECTED (${INSTALL_ISO_REF})"
-fi
-
-# --- 25. UBUNTU PRO NOTE ---
+# --- 20. UBUNTU PRO NOTE ---
 echo ""
 echo -e "${BL}UBUNTU PRO:${CL}"
 echo -e "${YW}Ubuntu Pro is intentionally not attached by this script.${CL}"
 echo -e "${YW}script 4 can attach Ubuntu Pro later, or manually use:${CL} ${GN}sudo pro attach <token>${CL}"
 echo ""
 
-# --- 26. SEED FILE PATHS ---
-SEED_NAME="ubuntu-autoinstall-vm${TARGET_VMID}.iso"
-SEED_DIR="/tmp/ubuntu-autoinstall-vm${TARGET_VMID}"
-SEED_ISO_PATH="/var/lib/vz/template/iso/${SEED_NAME}"
-SEED_ISO_REF="local:iso/${SEED_NAME}"
+# --- 21. WORK PATHS ---
+CUSTOM_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
+CUSTOM_ISO_PATH="/var/lib/vz/template/iso/${CUSTOM_ISO_NAME}"
+CUSTOM_ISO_REF="local:iso/${CUSTOM_ISO_NAME}"
+WORK_DIR="/tmp/ubuntu-autoinstall-vm${TARGET_VMID}"
 
-rm -rf "$SEED_DIR"
-mkdir -p "$SEED_DIR"
+rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR/extract"
+mkdir -p "$WORK_DIR/nocloud"
 
-# --- 27. RANDOM LOCKED PASSWORD HASH ---
-# Ubuntu autoinstall identity requires a password hash. We generate a random one, then lock the account in late-commands.
+# --- 22. RANDOM LOCKED PASSWORD HASH ---
 RANDOM_PASSWORD_HASH="$(openssl passwd -6 "$(openssl rand -base64 48)")"
 
-# --- 28. SSH KEY YAML BLOCK ---
+# --- 23. SSH KEY YAML BLOCK ---
 SSH_KEYS_YAML=""
 
 while IFS= read -r keyline; do
@@ -508,9 +442,9 @@ while IFS= read -r keyline; do
     SSH_KEYS_YAML+="      - $(yaml_quote "$keyline")"$'\n'
 done <<< "$SSH_KEYS"
 
-# --- 29. NETWORK CONFIG CREATION ---
+# --- 24. NETWORK CONFIG CREATION ---
 if [ "$NETWORK_MODE" == "dhcp" ]; then
-cat > "${SEED_DIR}/network-config" <<EOF
+cat > "${WORK_DIR}/nocloud/network-config" <<EOF
 version: 2
 ethernets:
   vmnic0:
@@ -529,7 +463,7 @@ for dns in "${DNS_ARRAY[@]}"; do
     [ -n "$dns" ] && DNS_YAML+="        - ${dns}"$'\n'
 done
 
-cat > "${SEED_DIR}/network-config" <<EOF
+cat > "${WORK_DIR}/nocloud/network-config" <<EOF
 version: 2
 ethernets:
   vmnic0:
@@ -549,14 +483,14 @@ ${DNS_YAML}
 EOF
 fi
 
-# --- 30. META-DATA CREATION ---
-cat > "${SEED_DIR}/meta-data" <<EOF
+# --- 25. META-DATA CREATION ---
+cat > "${WORK_DIR}/nocloud/meta-data" <<EOF
 instance-id: ubuntu-autoinstall-vm${TARGET_VMID}
 local-hostname: ${TARGET_VM_NAME}
 EOF
 
-# --- 31. USER-DATA CREATION ---
-cat > "${SEED_DIR}/user-data" <<EOF
+# --- 26. USER-DATA CREATION ---
+cat > "${WORK_DIR}/nocloud/user-data" <<EOF
 #cloud-config
 autoinstall:
   version: 1
@@ -655,24 +589,81 @@ EOS
   shutdown: reboot
 EOF
 
-# --- 32. SEED ISO CREATION ---
-msg_info "Creating NoCloud autoinstall seed ISO"
+# --- 27. EXTRACT SOURCE ISO ---
+msg_info "Extracting Ubuntu ISO"
 
-genisoimage \
-    -output "$SEED_ISO_PATH" \
-    -volid cidata \
-    -joliet \
-    -rock \
-    "${SEED_DIR}/user-data" \
-    "${SEED_DIR}/meta-data" \
-    "${SEED_DIR}/network-config" \
+xorriso -osirrox on -indev "$INSTALL_ISO_PATH" -extract / "$WORK_DIR/extract" &>/dev/null
+chmod -R u+w "$WORK_DIR/extract"
+
+msg_ok "UBUNTU ISO EXTRACTED"
+
+# --- 28. INJECT NOCLOUD AUTOINSTALL DATA ---
+msg_info "Injecting NoCloud autoinstall data"
+
+mkdir -p "$WORK_DIR/extract/nocloud"
+cp "$WORK_DIR/nocloud/user-data" "$WORK_DIR/extract/nocloud/user-data"
+cp "$WORK_DIR/nocloud/meta-data" "$WORK_DIR/extract/nocloud/meta-data"
+cp "$WORK_DIR/nocloud/network-config" "$WORK_DIR/extract/nocloud/network-config"
+
+msg_ok "NOCLOUD DATA INJECTED"
+
+# --- 29. PATCH BOOT PARAMETERS ---
+msg_info "Patching Ubuntu boot parameters"
+
+BOOT_PARAM='autoinstall ds=nocloud;s=/cdrom/nocloud/'
+
+if [ -f "$WORK_DIR/extract/boot/grub/grub.cfg" ]; then
+    if ! grep -q "ds=nocloud;s=/cdrom/nocloud/" "$WORK_DIR/extract/boot/grub/grub.cfg"; then
+        sed -i "s| ---| ${BOOT_PARAM} ---|g" "$WORK_DIR/extract/boot/grub/grub.cfg"
+        sed -i "s| quiet | quiet ${BOOT_PARAM} |g" "$WORK_DIR/extract/boot/grub/grub.cfg"
+    fi
+fi
+
+if [ -f "$WORK_DIR/extract/isolinux/txt.cfg" ]; then
+    if ! grep -q "ds=nocloud;s=/cdrom/nocloud/" "$WORK_DIR/extract/isolinux/txt.cfg"; then
+        sed -i "s| ---| ${BOOT_PARAM} ---|g" "$WORK_DIR/extract/isolinux/txt.cfg"
+    fi
+fi
+
+msg_ok "BOOT PARAMETERS PATCHED"
+
+# --- 30. REBUILD CUSTOM BOOTABLE ISO ---
+msg_info "Building custom autoinstall Ubuntu ISO"
+
+rm -f "$CUSTOM_ISO_PATH"
+
+xorriso \
+    -as mkisofs \
+    -r \
+    -V "UBUNTU_AUTOINSTALL" \
+    -o "$CUSTOM_ISO_PATH" \
+    -J -joliet-long \
+    -cache-inodes \
+    -isohybrid-gpt-basdat \
+    -eltorito-alt-boot \
+    -e boot/grub/efi.img \
+    -no-emul-boot \
+    "$WORK_DIR/extract" \
+    &>/dev/null || \
+xorriso \
+    -as mkisofs \
+    -r \
+    -V "UBUNTU_AUTOINSTALL" \
+    -o "$CUSTOM_ISO_PATH" \
+    -J -joliet-long \
+    -cache-inodes \
+    "$WORK_DIR/extract" \
     &>/dev/null
 
-msg_ok "AUTOINSTALL SEED ISO CREATED (${SEED_ISO_REF})"
+if [ ! -s "$CUSTOM_ISO_PATH" ]; then
+    msg_error "Custom autoinstall ISO was not created."
+fi
 
-# --- 33. FINAL SUMMARY BEFORE APPLY ---
+msg_ok "CUSTOM AUTOINSTALL ISO CREATED (${CUSTOM_ISO_REF})"
+
+# --- 31. FINAL SUMMARY BEFORE APPLY ---
 echo ""
-echo -e "${BL}READY TO ATTACH UBUNTU AUTOINSTALL SEED:${CL}"
+echo -e "${BL}READY TO ATTACH CUSTOM UBUNTU AUTOINSTALL ISO:${CL}"
 echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
 echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
 echo -e "VM STATUS: ${GN}${TARGET_VM_STATUS}${CL}"
@@ -687,19 +678,19 @@ if [ "$NETWORK_MODE" == "static" ]; then
     echo -e "DNS: ${GN}${STATIC_DNS}${CL}"
 fi
 
-echo -e "INSTALL ISO: ${GN}${INSTALL_ISO_REF}${CL}"
-echo -e "SEED ISO: ${GN}${SEED_ISO_REF}${CL}"
+echo -e "SOURCE ISO: ${GN}${INSTALL_ISO_REF}${CL}"
+echo -e "CUSTOM AUTOINSTALL ISO: ${GN}${CUSTOM_ISO_REF}${CL}"
 echo ""
 echo -e "${RD}WARNING:${CL} Starting this VM with autoinstall can wipe and install Ubuntu on its VM disk."
 echo ""
 
-attach_yn=$(timed_yes_no "Attach seed ISO and start VM now?" "y")
+attach_yn=$(timed_yes_no "Attach custom autoinstall ISO and start VM now?" "y")
 [[ "$attach_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 34. VM STOP HANDLING ---
+# --- 32. VM STOP HANDLING ---
 if [ "$TARGET_VM_STATUS" == "running" ]; then
     msg_warn "VM ${TARGET_VMID} is currently running"
-    stop_yn=$(timed_yes_no "Shutdown VM before attaching seed ISO?" "n")
+    stop_yn=$(timed_yes_no "Shutdown VM before attaching autoinstall ISO?" "n")
 
     if [[ "$stop_yn" =~ ^[Yy] ]]; then
         msg_info "Shutting down VM ${TARGET_VMID}"
@@ -710,59 +701,49 @@ if [ "$TARGET_VM_STATUS" == "running" ]; then
     fi
 fi
 
-# --- 35. ATTACH INSTALL ISO AND SEED ISO ---
-msg_info "Attaching Ubuntu install ISO"
+# --- 33. ATTACH CUSTOM ISO ---
+msg_info "Attaching custom autoinstall ISO"
 
-qm set "$TARGET_VMID" --ide2 "${INSTALL_ISO_REF},media=cdrom" &>/dev/null
+qm set "$TARGET_VMID" --ide2 "${CUSTOM_ISO_REF},media=cdrom" &>/dev/null
 
-msg_ok "UBUNTU INSTALL ISO ATTACHED"
+msg_ok "CUSTOM AUTOINSTALL ISO ATTACHED"
 
-msg_info "Attaching NoCloud seed ISO"
-
-qm set "$TARGET_VMID" --ide3 "${SEED_ISO_REF},media=cdrom" &>/dev/null
-
-msg_ok "NOCLOUD SEED ISO ATTACHED"
-
-# --- 36. BOOT ORDER SETUP ---
+# --- 34. BOOT ORDER SETUP ---
 msg_info "Setting VM boot order"
 
 qm set "$TARGET_VMID" --boot "order=ide2;scsi0" &>/dev/null
 
 msg_ok "VM BOOT ORDER CONFIGURED"
 
-# --- 37. START VM ---
+# --- 35. START VM ---
 msg_info "Starting VM ${TARGET_VMID}"
 
 qm start "$TARGET_VMID" &>/dev/null
 
 msg_ok "VM STARTED"
 
-# --- 38. COMPLETION MARKER ---
+# --- 36. COMPLETION MARKER ---
 cat > "$COMPLETED_MARKER" <<EOF
-Ubuntu Auto Install Seed completed on: $(date)
+Ubuntu Auto Install ISO completed on: $(date)
 VMID: $TARGET_VMID
 VM Name: $TARGET_VM_NAME
 VM MAC: $TARGET_VM_MAC
 Username: $TARGET_USERNAME
 Timezone: $TARGET_TIMEZONE
 Network Mode: $NETWORK_MODE
-Install ISO: $INSTALL_ISO_REF
-Seed ISO: $SEED_ISO_REF
+Source ISO: $INSTALL_ISO_REF
+Custom ISO: $CUSTOM_ISO_REF
 EOF
 
-# --- 39. FINAL NOTES ---
+# --- 37. FINAL NOTES ---
 echo ""
 echo -e "${GN}FINISHED!${CL}"
 echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
 echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
 echo -e "VM MAC: ${GN}${TARGET_VM_MAC}${CL}"
-echo -e "SEED ISO: ${GN}${SEED_ISO_REF}${CL}"
-echo -e "INSTALL ISO: ${GN}${INSTALL_ISO_REF}${CL}"
+echo -e "CUSTOM AUTOINSTALL ISO: ${GN}${CUSTOM_ISO_REF}${CL}"
 echo ""
-echo -e "${YW}Watch the Proxmox console now.${CL}"
-echo -e "${YW}If Ubuntu starts normally but does not begin autoinstall, the ISO may require the boot option:${CL}"
-echo -e "${GN}autoinstall ds=nocloud${CL}"
-echo ""
+echo -e "${YW}Watch the Proxmox console now. Ubuntu should boot directly into autoinstall without manual GRUB editing.${CL}"
 echo -e "${YW}After Ubuntu finishes and reboots, SSH in as:${CL} ${GN}${TARGET_USERNAME}${CL}"
 echo -e "${YW}Then run script 4 inside the Ubuntu VM.${CL}"
 echo ""
