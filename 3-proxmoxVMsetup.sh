@@ -33,6 +33,7 @@ DEFAULT_VMID="100"
 DEFAULT_DISK_GB="40"
 DEFAULT_RAM_PERCENT="75"
 DEFAULT_CPU_PERCENT="50"
+DEFAULT_CUSTOM_MAC=""
 
 TOTAL_RAM_GB="0"
 TOTAL_CORES="0"
@@ -61,6 +62,8 @@ CPU_INPUT=""
 RAM_GB_INPUT=""
 RAM_MB=""
 DISK_GB_INPUT=""
+VM_MAC_ADDRESS=""
+CUSTOM_MAC_SELECTED="no"
 
 ADVANCED_SETTINGS="n"
 MACHINE_TYPE="q35"
@@ -661,7 +664,70 @@ function get_efi_format_for_storage_type() {
     esac
 }
 
-# --- 25. YES/NO VALUE HELPER ---
+# --- 25. MAC ADDRESS VALIDATION HELPER ---
+# Validates standard colon-separated MAC addresses.
+function validate_mac_address() {
+    local mac="$1"
+
+    if [[ "$mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 26. MAC ADDRESS NORMALISATION HELPER ---
+# Converts a valid MAC address to uppercase for consistent display and storage.
+function normalize_mac_address() {
+    local mac="$1"
+    echo "$mac" | tr '[:lower:]' '[:upper:]'
+}
+
+# --- 27. MAC ADDRESS IN-USE CHECK HELPER ---
+# Checks existing Proxmox VM config files for a MAC address to avoid duplicate network identities.
+function mac_address_in_use() {
+    local mac="$1"
+    local normalized_mac=""
+
+    normalized_mac="$(normalize_mac_address "$mac")"
+
+    if grep -Riq "$normalized_mac" /etc/pve/qemu-server/*.conf 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 28. PROXMOX MAC GENERATOR HELPER ---
+# Generates a Proxmox-style locally usable MAC address using the common BC:24:11 prefix.
+# It retries if a generated MAC is already present in existing VM configs.
+function generate_proxmox_mac() {
+    local mac=""
+    local suffix=""
+    local attempt=""
+
+    for attempt in {1..25}; do
+        suffix="$(openssl rand -hex 3 | sed 's/../&:/g; s/:$//')"
+        mac="BC:24:11:${suffix^^}"
+
+        if ! mac_address_in_use "$mac"; then
+            echo "$mac"
+            return 0
+        fi
+    done
+
+    msg_error "Could not generate a unique VM MAC address after multiple attempts."
+}
+
+# --- 29. VM MAC FROM CONFIG HELPER ---
+# Reads the VM net0 MAC address from Proxmox config after VM creation.
+function get_vm_mac_from_config() {
+    local vmid="$1"
+
+    qm config "$vmid" 2>/dev/null | awk -F'[=,]' '/^net0:/ {print $2; exit}' | tr '[:lower:]' '[:upper:]'
+}
+
+# --- 30. YES/NO VALUE HELPER ---
 # Converts yes/no values into Proxmox qm values.
 function apply_boolean_values() {
     if [ "$BALLOONING_ENABLED" == "yes" ]; then
@@ -684,7 +750,7 @@ function apply_boolean_values() {
     fi
 }
 
-# --- 26. PROXMOX COMMAND RUNNER ---
+# --- 31. PROXMOX COMMAND RUNNER ---
 # Runs qm commands while hiding normal successful output.
 # If a Proxmox command fails, it prints the real stderr so the problem can be fixed.
 function run_proxmox_cmd() {
@@ -714,7 +780,7 @@ function run_proxmox_cmd() {
     rm -f "$err_file"
 }
 
-# --- 27. PROXMOX VALIDATION ---
+# --- 32. PROXMOX VALIDATION ---
 # Confirms the script is being run on Proxmox VE 9 or newer.
 if ! command -v pveversion >/dev/null 2>&1; then
     msg_error "This system is not Proxmox VE. Script cancelled."
@@ -726,7 +792,7 @@ if ! [[ "$PVE_MAJOR" =~ ^[0-9]+$ ]] || [ "$PVE_MAJOR" -lt 9 ]; then
     msg_error "Requires Proxmox VE 9+."
 fi
 
-# --- 28. SYSTEM RESOURCE AUDIT ---
+# --- 33. SYSTEM RESOURCE AUDIT ---
 # Detects RAM, CPU cores and calculates adaptive default VM resources.
 msg_info "Auditing system resources"
 
@@ -741,7 +807,7 @@ DEFAULT_CORES=$(( TOTAL_CORES * DEFAULT_CPU_PERCENT / 100 ))
 
 msg_ok "SYSTEM RESOURCES DETECTED"
 
-# --- 29. SAFE SYSFS GPU AUDIT ---
+# --- 34. SAFE SYSFS GPU AUDIT ---
 # Detects GPU through sysfs only, avoiding lspci because lspci can hang on some fresh Proxmox/laptop systems.
 msg_info "Detecting GPU hardware"
 
@@ -755,7 +821,7 @@ else
     msg_ok "GPU DETECTION SKIPPED"
 fi
 
-# --- 30. SYSTEM AUDIT DISPLAY ---
+# --- 35. SYSTEM AUDIT DISPLAY ---
 # Shows available host resources and adaptive defaults before asking user inputs.
 echo ""
 echo -e "${DGN}SYSTEM AUDIT:${CL}"
@@ -772,12 +838,12 @@ fi
 
 echo "------------------------------------------------------"
 
-# --- 31. FINAL START CONFIRMATION ---
+# --- 36. FINAL START CONFIRMATION ---
 # Starts input collection after audit. No VM changes happen yet.
 start_yn=$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")
 [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
-# --- 32. USER VM CONFIGURATION INPUTS ---
+# --- 37. USER VM CONFIGURATION INPUTS ---
 # Collects VM ID, name, CPU, RAM and OS disk size using adaptive defaults.
 # This stage still does not create or modify any VM.
 VMID=$(timed_number_input "Enter VM ID" "$DEFAULT_VMID" "1")
@@ -788,7 +854,7 @@ DISK_GB_INPUT=$(timed_number_input "Enter OS DISK SIZE in GB" "$DEFAULT_DISK_GB"
 
 RAM_MB=$(( RAM_GB_INPUT * 1024 ))
 
-# --- 33. ISO SELECTION ---
+# --- 38. ISO SELECTION ---
 # Lists ISO files from local storage and lets the user choose one with numeric validation.
 # Still input-only; no VM changes are made here.
 msg_info "Finding ISO images"
@@ -811,7 +877,7 @@ else
     ISO_PATH="local:iso/$(basename "${ISOS[$((ISO_IDX-1))]}")"
 fi
 
-# --- 34. STORAGE SELECTION ---
+# --- 39. STORAGE SELECTION ---
 # Lists Proxmox storage that supports images and lets the user choose where to place VM disks.
 # Still input-only; no VM changes are made here.
 msg_info "Finding Proxmox storage"
@@ -837,7 +903,7 @@ STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
 STORAGE_TYPE="$(get_storage_type "$STORAGE_ID")"
 EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
 
-# --- 35. GPU PASSTHROUGH OPTION ---
+# --- 40. GPU PASSTHROUGH OPTION ---
 # Offers discrete GPU passthrough only if sysfs GPU detection found a discrete GPU.
 # Default is no for first Crea Social test because Docker/Postgres/Postiz do not require GPU initially.
 if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
@@ -847,7 +913,7 @@ else
     ENABLE_GPU="n"
 fi
 
-# --- 36. ADVANCED SETTINGS PROMPT ---
+# --- 41. ADVANCED SETTINGS PROMPT ---
 # Keeps Crea Social recommended defaults unless user chooses to edit advanced VM options.
 advanced_yn=$(timed_yes_no "Open Advanced VM Settings?" "n")
 
@@ -880,7 +946,47 @@ fi
 
 apply_boolean_values
 
-# --- 37. FINAL APPLY CONFIRMATION ---
+# --- 42. VM MAC ADDRESS CONFIGURATION ---
+# Generates a stable VM MAC by default and optionally accepts a custom router-reserved MAC.
+# The selected MAC is explicitly written into net0 so router DHCP reservation remains stable.
+echo ""
+echo -e "${BL}VM NETWORK / ROUTER DHCP RESERVATION:${CL}"
+echo -e "${YW}Recommended: keep DHCP inside Ubuntu and reserve a static IP in your router using the VM MAC address.${CL}"
+echo -e "${YW}This script can auto-generate a stable MAC, or you can enter a custom MAC if your router reservation already exists.${CL}"
+echo ""
+
+custom_mac_yn=$(timed_yes_no "Use custom VM MAC address?" "n")
+
+if [[ "$custom_mac_yn" =~ ^[Yy] ]]; then
+    while true; do
+        VM_MAC_ADDRESS=$(timed_text_input "Enter custom VM MAC address" "$DEFAULT_CUSTOM_MAC")
+        VM_MAC_ADDRESS="$(normalize_mac_address "$VM_MAC_ADDRESS")"
+
+        if ! validate_mac_address "$VM_MAC_ADDRESS"; then
+            msg_warn "Invalid MAC address format. Use format AA:BB:CC:DD:EE:FF."
+            continue
+        fi
+
+        if mac_address_in_use "$VM_MAC_ADDRESS"; then
+            msg_warn "MAC address ${VM_MAC_ADDRESS} is already used by an existing Proxmox VM."
+            continue
+        fi
+
+        CUSTOM_MAC_SELECTED="yes"
+        break
+    done
+else
+    msg_info "Generating VM MAC address"
+    VM_MAC_ADDRESS="$(generate_proxmox_mac)"
+    CUSTOM_MAC_SELECTED="no"
+    msg_ok "VM MAC ADDRESS GENERATED (${VM_MAC_ADDRESS})"
+fi
+
+echo -e "${GN}VM MAC ADDRESS:${CL} ${VM_MAC_ADDRESS}"
+echo -e "${YW}Use this MAC in your router DHCP reservation if you want the VM to always receive the same IP.${CL}"
+echo ""
+
+# --- 43. FINAL APPLY CONFIRMATION ---
 # Last checkpoint before any Proxmox VM changes are made.
 # Shows every setting, including safe defaults and advanced options, whether advanced mode was used or not.
 echo ""
@@ -894,6 +1000,8 @@ echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
 echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
 echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
 echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
+echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
+echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
 echo ""
 echo -e "${BL}VM PLATFORM SETTINGS:${CL}"
 echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
@@ -917,14 +1025,14 @@ apply_yn=$(timed_yes_no "Create VM now?" "y")
 #  PHASE 2: APPLY / CREATE VM ONLY AFTER ALL INPUTS
 # =========================================================
 
-# --- 38. VM ID CONFLICT CHECK ---
+# --- 44. VM ID CONFLICT CHECK ---
 # Checks conflict only after all input is collected, immediately before creation.
 # Uses qm config because it catches partial/incomplete VM configs better than qm status.
 if qm config "$VMID" >/dev/null 2>&1; then
     msg_error "VM ID ${VMID} already exists. Remove it first or choose another VM ID."
 fi
 
-# --- 39. VM CREATE ---
+# --- 45. VM CREATE ---
 # Creates Ubuntu/Linux VM using selected standard and advanced settings.
 # Proxmox errors are captured and displayed if qm create fails.
 msg_info "Creating VM ${VMID} (${VM_NAME})"
@@ -940,12 +1048,12 @@ run_proxmox_cmd "creating VM ${VMID}" \
     --cores "$CPU_INPUT" \
     --memory "$RAM_MB" \
     --balloon "$BALLOON_VALUE" \
-    --net0 "${NETWORK_MODEL},bridge=vmbr0" \
+    --net0 "${NETWORK_MODEL}=${VM_MAC_ADDRESS},bridge=vmbr0" \
     --agent "$QEMU_AGENT_VALUE"
 
 msg_ok "VM CREATED"
 
-# --- 40. EFI DISK CONFIGURATION ---
+# --- 46. EFI DISK CONFIGURATION ---
 # Adds OVMF EFI disk only when OVMF BIOS is selected.
 # SeaBIOS does not use an EFI disk.
 if [ "$BIOS_TYPE" == "ovmf" ]; then
@@ -958,7 +1066,7 @@ if [ "$BIOS_TYPE" == "ovmf" ]; then
     msg_ok "EFI DISK CONFIGURED"
 fi
 
-# --- 41. MAIN VM DISK CONFIGURATION ---
+# --- 47. MAIN VM DISK CONFIGURATION ---
 # Adds main OS disk with selected disk controller, discard setting and iothread.
 msg_info "Configuring VM OS disk"
 
@@ -972,7 +1080,7 @@ run_proxmox_cmd "creating VM OS disk" \
 
 msg_ok "VM OS DISK CONFIGURED"
 
-# --- 42. ISO AND BOOT ORDER ---
+# --- 48. ISO AND BOOT ORDER ---
 # Attaches selected ISO if available and sets VM boot order.
 msg_info "Configuring VM boot"
 
@@ -988,7 +1096,20 @@ run_proxmox_cmd "setting VM boot order" \
 
 msg_ok "VM BOOT CONFIGURED"
 
-# --- 43. GPU PASSTHROUGH ATTACHMENT ---
+# --- 49. VM MAC VERIFICATION ---
+# Reads back the MAC address from Proxmox config to confirm the router-reservation identity.
+msg_info "Verifying VM MAC address"
+
+CONFIGURED_MAC="$(get_vm_mac_from_config "$VMID" || true)"
+
+if [ -n "$CONFIGURED_MAC" ]; then
+    VM_MAC_ADDRESS="$CONFIGURED_MAC"
+    msg_ok "VM MAC ADDRESS VERIFIED (${VM_MAC_ADDRESS})"
+else
+    msg_warn "Could not read VM MAC address from Proxmox config. Check with: qm config ${VMID} | grep net0"
+fi
+
+# --- 50. GPU PASSTHROUGH ATTACHMENT ---
 # Adds the first detected discrete GPU BDF to the VM after all other settings are applied.
 if [ "$ENABLE_GPU" == "y" ]; then
     msg_info "Attaching discrete GPU to VM"
@@ -1006,7 +1127,7 @@ if [ "$ENABLE_GPU" == "y" ]; then
     fi
 fi
 
-# --- 44. COMPLETION MARKER ---
+# --- 51. COMPLETION MARKER ---
 # Creates marker file so future checks can identify that this setup was already run.
 cat <<EOF > "$COMPLETED_MARKER"
 Proxmox VM Setup completed on: $(date)
@@ -1019,6 +1140,8 @@ Storage: ${STORAGE_ID}
 Storage Type: ${STORAGE_TYPE}
 ISO: ${ISO_PATH:-none}
 GPU Passthrough: ${ENABLE_GPU}
+VM MAC Address: ${VM_MAC_ADDRESS}
+Custom MAC Selected: ${CUSTOM_MAC_SELECTED}
 Machine Type: ${MACHINE_TYPE}
 BIOS: ${BIOS_TYPE}
 EFI Format Mode: ${EFI_FORMAT_MODE}
@@ -1033,8 +1156,8 @@ Discard/TRIM: ${DISCARD_ENABLED}
 Advanced Settings Used: ${ADVANCED_SETTINGS}
 EOF
 
-# --- 45. FINAL SUMMARY ---
-# Shows final VM configuration.
+# --- 52. FINAL SUMMARY ---
+# Shows final VM configuration and the MAC address to reserve in the router.
 echo ""
 echo -e "${GN}FINISHED!${CL}"
 echo -e "VM ID: ${GN}${VMID}${CL}"
@@ -1056,6 +1179,12 @@ echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
 echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
 echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
 echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
+echo ""
+echo -e "${BL}NETWORK / ROUTER DHCP RESERVATION:${CL}"
+echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
+echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
+echo -e "${YW}Recommended: reserve this MAC address in your router so the VM always receives the same IP via DHCP.${CL}"
+echo -e "${YW}Check later with: qm config ${VMID} | grep net0${CL}"
 echo ""
 
 exit 0
