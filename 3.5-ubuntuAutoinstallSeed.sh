@@ -972,7 +972,7 @@ show_start_warning() {
     echo -e "${YW}Written for: ${GN}${DEFAULT_ISO_NAME}${CL}"
     echo ""
     echo -e "${RD}WARNING:${CL} Ubuntu autoinstall can erase the selected VM install disk."
-    echo -e "${YW}For best results, use a fresh VM created by script 3 with one OS disk.${CL}"
+    echo -e "${YW}For best results, use a fresh VM created by script 3-proxmoxVMsetup with one OS disk.${CL}"
     echo ""
 }
 
@@ -1187,7 +1187,7 @@ show_ubuntu_pro_note() {
     echo ""
     echo -e "${BL}UBUNTU PRO:${CL}"
     echo -e "${YW}Ubuntu Pro is intentionally not attached by this script.${CL}"
-    echo -e "${YW}script 4 can attach Ubuntu Pro later, or manually use:${CL} ${GN}sudo pro attach <token>${CL}"
+    echo -e "${YW}script 4-ubuntuVMsetup can attach Ubuntu Pro later, or manually use:${CL} ${GN}sudo pro attach <token>${CL}"
     echo ""
 }
 
@@ -1550,7 +1550,6 @@ show_final_output() {
 
     echo ""
     echo -e "${YW}Ubuntu autoinstall powered off successfully, installer media was detached,${CL}"
-    echo -e "${YW}and reinstall loop prevention was applied.${CL}"
 
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
         echo ""
@@ -1566,7 +1565,7 @@ show_final_output() {
             echo -e "${GN}ssh ${TARGET_USERNAME}@<assigned-ip>${CL}"
         fi
 
-        echo -e "${YW}Then run script 4 inside the Ubuntu VM.${CL}"
+        echo -e "${YW}Then run script 4-ubuntuVMsetup inside the Ubuntu VM.${CL}"
     else
         echo -e "${YW}Start the VM manually when ready with:${CL} ${GN}qm start ${TARGET_VMID}${CL}"
     fi
