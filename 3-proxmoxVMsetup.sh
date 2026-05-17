@@ -690,8 +690,6 @@ function check_previous_marker() {
             exit 0
         fi
     fi
-
-    return 0
 }
 
 # --- 23. VM NAME VALIDATION HELPER ---
@@ -1157,12 +1155,7 @@ function start_confirmation() {
 
     echo ""
     start_yn="$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")"
-
-    if [[ "$start_yn" =~ ^[Nn] ]]; then
-        exit 0
-    fi
-
-    return 0
+    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 }
 
 # --- 46. USER VM CONFIGURATION INPUTS ---
@@ -1418,12 +1411,7 @@ function final_apply_confirmation() {
     echo ""
 
     apply_yn="$(timed_yes_no "Create VM now?" "y")"
-
-    if [[ "$apply_yn" =~ ^[Nn] ]]; then
-        exit 0
-    fi
-
-    return 0
+    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
 }
 
 # =========================================================
