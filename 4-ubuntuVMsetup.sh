@@ -1000,6 +1000,7 @@ function handle_ubuntu_pro() {
     local pro_yn=""
     local retry_pro_yn=""
     local err_file=""
+    local attempt="1"
 
     section "UBUNTU PRO"
 
@@ -1011,66 +1012,87 @@ function handle_ubuntu_pro() {
         return 0
     fi
 
-    if [ -n "${UBUNTU_PRO_TOKEN:-}" ]; then
-        PRO_TOKEN="$UBUNTU_PRO_TOKEN"
-        unset UBUNTU_PRO_TOKEN
-        msg_ok "UBUNTU PRO TOKEN RECEIVED FROM ENVIRONMENT"
-    fi
-
-    while [ -z "${PRO_TOKEN:-}" ]; do
-        PRO_TOKEN="$(hidden_input "Enter Ubuntu Pro token")"
-
-        if [ -n "$PRO_TOKEN" ]; then
-            msg_ok "UBUNTU PRO TOKEN RECEIVED"
-            break
-        fi
-
-        msg_warn "Ubuntu Pro token was empty"
-
-        retry_pro_yn="$(timed_yes_no "Try entering Ubuntu Pro token again?" "y")"
-
-        if [[ "$retry_pro_yn" =~ ^[Nn] ]]; then
-            UBUNTU_PRO_ATTACHED="no"
-            unset PRO_TOKEN
-            PRO_TOKEN=""
-            msg_ok "UBUNTU PRO ATTACHMENT SKIPPED"
-            return 0
-        fi
-    done
-
     msg_info "Installing Ubuntu Pro client"
     run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-advantage-tools ubuntu-pro-client
     run_cmd "installing Ubuntu Pro client" env DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-advantage-tools
     msg_ok "UBUNTU PRO CLIENT READY"
 
-    msg_info "Attaching Ubuntu Pro"
+    while [ "$attempt" -le 3 ]; do
+        PRO_TOKEN=""
 
-    err_file="$(mktemp)"
-    TEMP_FILES+=("$err_file")
-
-    if [ -n "$SUDO_CMD" ]; then
-        if "$SUDO_CMD" pro attach "$PRO_TOKEN" > /dev/null 2> "$err_file"; then
-            UBUNTU_PRO_ATTACHED="yes"
-            msg_ok "UBUNTU PRO ATTACHED"
+        if [ -n "${UBUNTU_PRO_TOKEN:-}" ]; then
+            PRO_TOKEN="$UBUNTU_PRO_TOKEN"
+            unset UBUNTU_PRO_TOKEN
+            msg_ok "UBUNTU PRO TOKEN RECEIVED FROM ENVIRONMENT"
         else
-            UBUNTU_PRO_ATTACHED="failed"
-            msg_warn "Ubuntu Pro attachment failed. Check token or run: sudo pro status"
-            cat "$err_file" >/dev/null 2>&1 || true
-        fi
-    else
-        if pro attach "$PRO_TOKEN" > /dev/null 2> "$err_file"; then
-            UBUNTU_PRO_ATTACHED="yes"
-            msg_ok "UBUNTU PRO ATTACHED"
-        else
-            UBUNTU_PRO_ATTACHED="failed"
-            msg_warn "Ubuntu Pro attachment failed. Check token or run: sudo pro status"
-            cat "$err_file" >/dev/null 2>&1 || true
-        fi
-    fi
+            PRO_TOKEN="$(hidden_input "Enter Ubuntu Pro token")"
 
-    rm -f "$err_file"
+            if [ -n "$PRO_TOKEN" ]; then
+                msg_ok "UBUNTU PRO TOKEN RECEIVED"
+            fi
+        fi
+
+        # Normalize pasted tokens safely without printing them.
+        # This removes carriage returns/newlines and trims accidental surrounding spaces from clipboard paste.
+        PRO_TOKEN="$(printf '%s' "$PRO_TOKEN" | tr -d '\r\n' | xargs 2>/dev/null || true)"
+
+        if [ -z "$PRO_TOKEN" ]; then
+            msg_warn "Ubuntu Pro token was empty"
+        else
+            msg_info "Attaching Ubuntu Pro"
+
+            err_file="$(mktemp)"
+            TEMP_FILES+=("$err_file")
+
+            # Use --no-auto-enable for automation stability. It attaches the machine first without failing later
+            # because an automatically-enabled service is unavailable or slow on a fresh VM.
+            if [ -n "$SUDO_CMD" ]; then
+                if "$SUDO_CMD" pro attach "$PRO_TOKEN" --no-auto-enable > /dev/null 2> "$err_file"; then
+                    UBUNTU_PRO_ATTACHED="yes"
+                    msg_ok "UBUNTU PRO ATTACHED"
+                    rm -f "$err_file"
+                    unset PRO_TOKEN
+                    PRO_TOKEN=""
+                    return 0
+                fi
+            else
+                if pro attach "$PRO_TOKEN" --no-auto-enable > /dev/null 2> "$err_file"; then
+                    UBUNTU_PRO_ATTACHED="yes"
+                    msg_ok "UBUNTU PRO ATTACHED"
+                    rm -f "$err_file"
+                    unset PRO_TOKEN
+                    PRO_TOKEN=""
+                    return 0
+                fi
+            fi
+
+            UBUNTU_PRO_ATTACHED="failed"
+            rm -f "$err_file"
+            unset PRO_TOKEN
+            PRO_TOKEN=""
+            msg_warn "Ubuntu Pro attachment failed"
+            echo -e "${YW}The token was received, but Canonical rejected the attach request or the VM could not reach Ubuntu Pro services.${CL}"
+            echo -e "${YW}Run after the script if needed: sudo pro status${CL}"
+        fi
+
+        retry_pro_yn="$(timed_yes_no "Try Ubuntu Pro token again?" "n")"
+
+        if [[ "$retry_pro_yn" =~ ^[Nn] ]]; then
+            UBUNTU_PRO_ATTACHED="failed"
+            unset PRO_TOKEN
+            PRO_TOKEN=""
+            msg_warn "UBUNTU PRO ATTACHMENT LEFT UNFINISHED"
+            return 0
+        fi
+
+        attempt=$((attempt + 1))
+    done
+
+    UBUNTU_PRO_ATTACHED="failed"
     unset PRO_TOKEN
     PRO_TOKEN=""
+    msg_warn "UBUNTU PRO ATTACHMENT FAILED AFTER 3 ATTEMPTS"
+    return 0
 }
 
 # =========================================================
