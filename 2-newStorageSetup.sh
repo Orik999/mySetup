@@ -78,14 +78,15 @@ TEMP_FILES=()
 # Displays the New Storage Setup ASCII banner.
 function header_info {
 echo -e "${BL}
-███╗   ██╗███████╗██╗    ██╗    ███████╗████████╗ ██████╗ ██████╗  █████╗  ██████╗ ███████╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
-████╗  ██║██╔════╝██║    ██║    ██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗██╔════╝ ██╔════╝    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
-██╔██╗ ██║█████╗  ██║ █╗ ██║    ███████╗   ██║   ██║   ██║██████╔╝███████║██║  ███╗█████╗      ███████╗█████╗     ██║   ██║   ██║██████╔╝
-██║╚██╗██║██╔══╝  ██║███╗██║    ╚════██║   ██║   ██║   ██║██╔══██╗██╔══██║██║   ██║██╔══╝      ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
-██║ ╚████║███████╗╚███╔███╔╝    ███████║   ██║   ╚██████╔╝██║  ██║██║  ██║╚██████╔╝███████╗    ███████║███████╗   ██║   ╚██████╔╝██║     
-╚═╝  ╚═══╝╚══════╝ ╚══╝╚══╝     ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
+███╗   ██╗███████╗██╗    ██╗    ███████╗████████╗ ██████╗ ██████╗  █████╗  ██████╗ ███████╗
+████╗  ██║██╔════╝██║    ██║    ██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗██╔════╝ ██╔════╝
+██╔██╗ ██║█████╗  ██║ █╗ ██║    ███████╗   ██║   ██║   ██║██████╔╝███████║██║  ███╗█████╗  
+██║╚██╗██║██╔══╝  ██║███╗██║    ╚════██║   ██║   ██║   ██║██╔══██╗██╔══██║██║   ██║██╔══╝  
+██║ ╚████║███████╗╚███╔███╔╝    ███████║   ██║   ╚██████╔╝██║  ██║██║  ██║╚██████╔╝███████╗
+╚═╝  ╚═══╝╚══════╝ ╚══╝╚══╝     ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 ${CL}"
 }
+
 
 # --- 4. MESSAGE HELPER FUNCTIONS ---
 # Provides consistent status messages for display -> apply -> success flow.
@@ -795,6 +796,7 @@ function validate_dependencies() {
         command
         cut
         date
+        env
         findmnt
         grep
         head
@@ -810,21 +812,26 @@ function validate_dependencies() {
         rm
         sed
         sgdisk
+        sleep
         sort
         sysctl
         systemctl
         tee
         touch
+        vgcfgbackup
         vgcreate
         vgs
         wipefs
         xargs
     )
 
+    local cmd=""
+
     for cmd in "${required_commands[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || msg_error "Missing required command: $cmd"
     done
 }
+
 
 # --- 30. PROXMOX VALIDATION ---
 # Confirms this is Proxmox VE 9+ before touching storage.
@@ -970,7 +977,14 @@ function show_disk_lists() {
             dtype="HDD"
         fi
 
-        echo "$((i+1))) /dev/${name} | ${size} | ${dtype} | BUS=${tran:-unknown} | ${model:-unknown}"
+        printf " %b %2d) %-12s %-8s %-4s BUS=%-8s %s\n" \
+            "${BL}━━━━━▶${CL}" \
+            "$((i+1))" \
+            "/dev/${name}" \
+            "${size}" \
+            "${dtype}" \
+            "${tran:-unknown}" \
+            "${model:-unknown}"
     done
 
     if [ "${#BLOCKED_DISKS[@]}" -gt 0 ]; then
@@ -979,10 +993,16 @@ function show_disk_lists() {
 
         for line in "${BLOCKED_DISKS[@]}"; do
             IFS='|' read -r name size tran rota model reason <<< "$line"
-            echo "   /dev/${name} | ${size} | ${model:-unknown} | reason=${reason}"
+            printf " %b %-12s %-8s %s | reason=%s\n" \
+                "${YW}━━━━━▶${CL}" \
+                "/dev/${name}" \
+                "${size}" \
+                "${model:-unknown}" \
+                "${reason}"
         done
     fi
 }
+
 
 # --- 35. DISK SELECTION ---
 # Selects a safe disk using numeric validation.
@@ -1049,12 +1069,12 @@ function inspect_selected_disk() {
 # Shows disk details and warns if data/signatures already exist.
 function show_selected_disk_summary() {
     echo ""
-    echo -e "${BL}SELECTED DISK:${CL} ${GN}${SELECTED_DISK}${CL}"
-    echo -e "MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e "TYPE: ${GN}${DISK_TYPE}${CL}"
-    echo -e "BUS: ${GN}${DISK_BUS}${CL}"
-    echo -e "SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
-    echo -e "EXISTING DATA/SIGNATURES: ${GN}${HAS_DATA}${CL}"
+    echo -e "${BL}SELECTED DISK:${CL}"
+    echo -e " ${BL}━━━━━▶${CL} DISK: ${GN}${SELECTED_DISK}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} TYPE/BUS: ${GN}${DISK_TYPE} / ${DISK_BUS}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
+    echo -e " ${BL}━━━━━▶${CL} EXISTING DATA/SIGNATURES: ${GN}${HAS_DATA}${CL}"
 
     if [ "$HAS_DATA" == "yes" ]; then
         echo ""
@@ -1065,6 +1085,7 @@ function show_selected_disk_summary() {
         done <<< "$DATA_RISK_REPORT"
     fi
 }
+
 
 # --- 38. FIRST DESTRUCTIVE CONFIRMATION ---
 # If disk has data, default is NO. If disk looks empty, default is YES.
@@ -1139,7 +1160,7 @@ function check_storage_conflicts() {
 
     msg_info "Checking for storage conflicts"
 
-    if pvesm status "$STORAGE_ID" >/dev/null 2>&1; then
+    if pvesm config "$STORAGE_ID" >/dev/null 2>&1; then
         msg_error "Proxmox storage ID ${STORAGE_ID} already exists."
     fi
 
@@ -1153,6 +1174,7 @@ function check_storage_conflicts() {
 
     msg_ok "NO STORAGE CONFLICTS FOUND"
 }
+
 
 # --- 42. THINPOOL ALLOCATION LOGIC ---
 # Uses adaptive allocation to leave free VG space for metadata growth and repair.
@@ -1183,27 +1205,29 @@ function collect_content_types() {
 function final_destructive_confirmation() {
     local final_yn=""
 
-    section "FINAL DESTRUCTIVE CONFIRMATION"
+    section "READY TO CREATE STORAGE"
 
     echo -e "${RD}FINAL WARNING: ALL DATA ON ${SELECTED_DISK} WILL BE DESTROYED.${CL}"
     echo ""
-    echo -e "DISK: ${GN}${SELECTED_DISK}${CL}"
-    echo -e "MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e "SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
-    echo -e "STORAGE ID: ${GN}${STORAGE_ID}${CL}"
-    echo -e "VG NAME: ${GN}${VG_NAME}${CL}"
-    echo -e "THINPOOL: ${GN}${THINPOOL_NAME}${CL}"
-    echo -e "THIN ALLOCATION: ${GN}${THIN_PERCENT}%FREE${CL}"
-    echo -e "CONTENT: ${GN}${CONTENT_TYPES}${CL}"
+    echo -e "${BL}DISK SAFETY CONTEXT:${CL}"
+    echo -e " ${BL}━━━━━▶${CL} ROOT / BOOT / PVE DISKS: ${GN}${ROOT_PARENT_DISKS:-none}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} MOUNTED DISKS: ${GN}${MOUNTED_PARENT_DISKS:-none}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} EXISTING LVM PV DISKS: ${GN}${PV_PARENT_DISKS:-none}${CL}"
+    echo ""
+    echo -e "${BL}SELECTED STORAGE TARGET:${CL}"
+    echo -e " ${BL}━━━━━▶${CL} DISK: ${GN}${SELECTED_DISK}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
+    echo -e " ${BL}━━━━━▶${CL} STORAGE ID: ${GN}${STORAGE_ID}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} VG / THINPOOL: ${GN}${VG_NAME} / ${THINPOOL_NAME}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} THIN ALLOCATION: ${GN}${THIN_PERCENT}%FREE${CL}"
+    echo -e " ${BL}━━━━━▶${CL} CONTENT: ${GN}${CONTENT_TYPES}${CL}"
     echo ""
 
     final_yn="$(timed_yes_no "Proceed with disk wipe and storage creation?" "n")"
     [[ "$final_yn" =~ ^[Nn] ]] && msg_error "Aborted by user."
 }
 
-# =========================================================
-#  APPLY FUNCTIONS
-# =========================================================
 
 # --- 45. DISK WIPE ---
 # Clears old filesystem, partition and LVM signatures.
@@ -1221,9 +1245,23 @@ function wipe_selected_disk() {
 
     msg_info "Requesting kernel partition table reread"
     run_optional blockdev --rereadpt "$SELECTED_DISK"
+
+    if command -v partprobe >/dev/null 2>&1; then
+        run_optional partprobe "$SELECTED_DISK"
+    fi
+
+    if command -v udevadm >/dev/null 2>&1; then
+        run_optional udevadm settle
+    fi
+
+    if command -v pvscan >/dev/null 2>&1; then
+        run_optional pvscan --cache
+    fi
+
     sleep 2
     msg_ok "DISK PREPARED"
 }
+
 
 # --- 46. LVM PHYSICAL VOLUME ---
 # Creates an aligned LVM physical volume on the whole disk.
@@ -1260,7 +1298,12 @@ function create_lvm_thinpool() {
     msg_info "Enabling LVM thinpool monitoring"
     run_optional lvchange --monitor y "${VG_NAME}/${THINPOOL_NAME}"
     msg_ok "LVM THINPOOL MONITORING ENABLED"
+
+    msg_info "Backing up LVM metadata"
+    run_cmd "backing up LVM metadata for ${VG_NAME}" vgcfgbackup "$VG_NAME"
+    msg_ok "LVM METADATA BACKED UP"
 }
+
 
 # --- 49. PROXMOX STORAGE REGISTRATION ---
 # Registers the thinpool in Proxmox with selected content types and saferemove enabled.
@@ -1421,11 +1464,15 @@ EOF
 # --- 54. VERIFICATION SCRIPT ---
 # Creates and runs a verification report after storage creation.
 function create_verification_report() {
+    local verify_script="/root/new_storage_verify.sh"
+
     section "VERIFICATION"
 
     msg_info "Creating verification report"
 
-    cat <<EOF > /root/new_storage_verify.sh
+    TEMP_FILES+=("$verify_script")
+
+    cat <<EOF > "$verify_script"
 #!/usr/bin/env bash
 set +e
 : > "$VERIFY_FILE"
@@ -1445,15 +1492,28 @@ PASS() { echo "✓ PASS - \$1"; }
 WARN() { echo "! WARN - \$1"; }
 FAIL() { echo "✗ FAIL - \$1"; }
 
-if pvesm status "${STORAGE_ID}" >/dev/null 2>&1; then PASS "Proxmox storage exists"; else FAIL "Proxmox storage missing"; fi
+if pvesm config "${STORAGE_ID}" >/dev/null 2>&1; then PASS "Proxmox storage config exists"; else FAIL "Proxmox storage config missing"; fi
 if pvesm status 2>/dev/null | awk '{print \$1, \$3}' | grep -q "^${STORAGE_ID} active"; then PASS "Proxmox storage is active"; else WARN "Proxmox storage active state not confirmed"; fi
 if vgs "${VG_NAME}" >/dev/null 2>&1; then PASS "VG exists"; else FAIL "VG missing"; fi
 if lvs "${VG_NAME}/${THINPOOL_NAME}" >/dev/null 2>&1; then PASS "Thinpool exists"; else FAIL "Thinpool missing"; fi
 if lvs -o lv_monitor --noheadings "${VG_NAME}/${THINPOOL_NAME}" 2>/dev/null | grep -q monitored; then PASS "Thinpool monitoring enabled"; else WARN "Thinpool monitoring not confirmed"; fi
+if [ -f "/etc/lvm/backup/${VG_NAME}" ]; then PASS "LVM metadata backup exists"; else WARN "LVM metadata backup not found"; fi
+
+echo ""
+echo "Proxmox storage config:"
+pvesm config "${STORAGE_ID}" 2>/dev/null || true
+
+echo ""
+echo "VG details:"
+vgs -o vg_name,vg_size,vg_free "${VG_NAME}" 2>/dev/null || true
 
 echo ""
 echo "Thinpool usage:"
-lvs -a -o lv_name,lv_size,data_percent,metadata_percent "${VG_NAME}" 2>/dev/null || true
+lvs -a -o lv_name,lv_size,data_percent,metadata_percent,lv_attr "${VG_NAME}" 2>/dev/null || true
+
+echo ""
+echo "Selected disk residual signatures after setup:"
+wipefs -n "${SELECTED_DISK}" 2>/dev/null || true
 
 echo ""
 if [ "${IS_SSD}" == "yes" ]; then
@@ -1468,18 +1528,19 @@ else
     WARN "IO scheduler service was not created"
 fi
 
-if [ -f "$COMPLETED_MARKER" ]; then PASS "Completion marker exists"; else WARN "Completion marker not present yet at verification time"; fi
+if [ -f "$COMPLETED_MARKER" ]; then PASS "Completion marker exists"; else WARN "Completion marker missing"; fi
 
 echo ""
 echo "Verification complete."
-rm -f /root/new_storage_verify.sh
+rm -f "$verify_script"
 EOF
 
-    chmod +x /root/new_storage_verify.sh
-    run_optional /root/new_storage_verify.sh
+    chmod +x "$verify_script"
+    run_optional "$verify_script"
 
     msg_ok "VERIFICATION REPORT CREATED"
 }
+
 
 # --- 55. COMPLETION MARKER ---
 # Creates marker so later reruns can detect previous setup.
@@ -1512,26 +1573,21 @@ EOF
 function show_final_summary() {
     section "FINISHED"
 
-    echo -e "DISK: ${GN}${SELECTED_DISK}${CL}"
-    echo -e "MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
-    echo -e "TYPE: ${GN}${DISK_TYPE}${CL}"
-    echo -e "BUS: ${GN}${DISK_BUS}${CL}"
-    echo -e "SIZE: ${GN}${DISK_SIZE_GB}GB${CL}"
-    echo -e "PROXMOX STORAGE ID: ${GN}${STORAGE_ID}${CL}"
-    echo -e "VG: ${GN}${VG_NAME}${CL}"
-    echo -e "THINPOOL: ${GN}${THINPOOL_NAME}${CL}"
-    echo -e "THIN ALLOCATION: ${GN}${THIN_PERCENT}%FREE${CL}"
-    echo -e "CONTENT: ${GN}${CONTENT_TYPES}${CL}"
-    echo -e "IO SCHEDULER: ${GN}${IO_SCHEDULER}${CL}"
-    echo -e "VERIFY LOG: ${GN}${VERIFY_FILE}${CL}"
+    echo -e "${BL}NEW PROXMOX STORAGE CREATED:${CL}"
+    echo -e " ${BL}━━━━━▶${CL} DISK: ${GN}${SELECTED_DISK}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} MODEL: ${GN}${DISK_MODEL:-unknown}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} TYPE/BUS/SIZE: ${GN}${DISK_TYPE} / ${DISK_BUS} / ${DISK_SIZE_GB}GB${CL}"
+    echo -e " ${BL}━━━━━▶${CL} STORAGE ID: ${GN}${STORAGE_ID}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} VG / THINPOOL: ${GN}${VG_NAME} / ${THINPOOL_NAME}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} THIN ALLOCATION: ${GN}${THIN_PERCENT}%FREE${CL}"
+    echo -e " ${BL}━━━━━▶${CL} CONTENT: ${GN}${CONTENT_TYPES}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} IO SCHEDULER: ${GN}${IO_SCHEDULER}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} VERIFY LOG: ${GN}${VERIFY_FILE}${CL}"
     echo ""
     echo -e "${YW}New Proxmox LVM-thin storage is ready for VM disks, containers and backups according to selected content types.${CL}"
     echo ""
 }
 
-# =========================================================
-#  MAIN ORCHESTRATION
-# =========================================================
 
 # --- 57. MAIN FUNCTION ---
 # Runs validation -> safe disk selection -> configuration -> destructive apply -> verification.

@@ -28,6 +28,7 @@ BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━�
 # Stores timer, log file, defaults, detected hardware and user choices.
 T=15
 LOG_FILE="/var/log/proxmox-vm-setup.log"
+VERIFY_LOG="/var/log/proxmox-vm-setup-verify.log"
 COMPLETED_MARKER="/root/.proxmox-vm-setup-completed"
 
 DEFAULT_VM_NAME="crea-ubuntu"
@@ -73,6 +74,8 @@ DISK_GB_INPUT=""
 VM_MAC_ADDRESS=""
 SUGGESTED_MAC_ADDRESS=""
 CUSTOM_MAC_SELECTED="no"
+BOOT_ORDER=""
+VM_CREATED="no"
 
 ADVANCED_SETTINGS="n"
 MACHINE_TYPE="q35"
@@ -97,12 +100,19 @@ TEMP_FILES=()
 # Displays the one-line Proxmox VM Setup banner.
 function header_info {
 echo -e "${BL}
-██████╗ ██████╗  ██████╗ ██╗  ██╗███╗   ███╗ ██████╗ ██╗  ██╗    ██╗   ██╗███╗   ███╗    ███████╗███████╗████████╗██╗   ██╗██████╗ 
-██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝████╗ ████║██╔═══██╗╚██╗██╔╝    ██║   ██║████╗ ████║    ██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
-██████╔╝██████╔╝██║   ██║ ╚███╔╝ ██╔████╔██║██║   ██║ ╚███╔╝     ██║   ██║██╔████╔██║    ███████╗█████╗     ██║   ██║   ██║██████╔╝
-██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗ ██║╚██╔╝██║██║   ██║ ██╔██╗     ╚██╗ ██╔╝██║╚██╔╝██║    ╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝ 
-██║     ██║  ██║╚██████╔╝██╔╝ ██╗██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗     ╚████╔╝ ██║ ╚═╝ ██║    ███████║███████╗   ██║   ╚██████╔╝██║     
-╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝    ╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝     
+██████╗ ██████╗  ██████╗ ██╗  ██╗███╗   ███╗ ██████╗ ██╗  ██╗    ██╗   ██╗███╗   ███╗
+██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝████╗ ████║██╔═══██╗╚██╗██╔╝    ██║   ██║████╗ ████║
+██████╔╝██████╔╝██║   ██║ ╚███╔╝ ██╔████╔██║██║   ██║ ╚███╔╝     ██║   ██║██╔████╔██║
+██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗ ██║╚██╔╝██║██║   ██║ ██╔██╗     ╚██╗ ██╔╝██║╚██╔╝██║
+██║     ██║  ██║╚██████╔╝██╔╝ ██╗██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗     ╚████╔╝ ██║ ╚═╝ ██║
+╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝
+
+███████╗███████╗████████╗██╗   ██╗██████╗
+██╔════╝██╔════╝╚══██╔══╝██║   ██║██╔══██╗
+███████╗█████╗     ██║   ██║   ██║██████╔╝
+╚════██║██╔══╝     ██║   ██║   ██║██╔═══╝
+███████║███████╗   ██║   ╚██████╔╝██║
+╚══════╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝
 ${CL}"
 }
 
@@ -158,11 +168,31 @@ function cleanup() {
     exit "$exit_code"
 }
 
-# --- 9. ERROR TRAP HELPER ---
+# --- 9. PARTIAL VM FAILURE HINT ---
+# Prints clear inspection/removal commands if VM creation succeeded but a later step failed.
+function print_partial_vm_failure_hint() {
+    if [ "${VM_CREATED}" != "yes" ] || [ -z "${VMID:-}" ]; then
+        return 0
+    fi
+
+    echo ""
+    echo -e "${YW}Partial VM state may exist because VM ${VMID} was created before the failure.${CL}"
+    echo -e "${YW}Inspection commands:${CL}"
+    echo "  qm config ${VMID}"
+    echo "  qm status ${VMID}"
+    echo "  ls -l /etc/pve/qemu-server/${VMID}.conf 2>/dev/null || true"
+    echo ""
+    echo -e "${YW}Manual cleanup if you intentionally want to remove the partial VM:${CL}"
+    echo "  qm destroy ${VMID} --purge"
+    echo ""
+}
+
+# --- 10. ERROR TRAP HELPER ---
 # Shows the failing line number and points to the log file.
 function on_error() {
     local line_no="$1"
     echo -e "${RD}ERROR:${CL} Script failed at line ${line_no}. Check ${LOG_FILE}"
+    print_partial_vm_failure_hint
 }
 
 # --- 10. PROXMOX COMMAND RUNNER ---
@@ -190,6 +220,7 @@ function run_proxmox_cmd() {
         echo "qm list"
         echo "qm config ${VMID} 2>/dev/null || true"
         echo "ls -l /etc/pve/qemu-server/${VMID}.conf 2>/dev/null || true"
+        print_partial_vm_failure_hint
         exit 1
     fi
 
@@ -597,8 +628,10 @@ function validate_dependencies() {
         awk
         basename
         cat
+        chmod
         cut
         date
+        env
         find
         grep
         head
@@ -657,6 +690,8 @@ function check_previous_marker() {
             exit 0
         fi
     fi
+
+    return 0
 }
 
 # --- 23. VM NAME VALIDATION HELPER ---
@@ -1102,18 +1137,16 @@ function audit_gpu_hardware() {
 # --- 44. SYSTEM AUDIT DISPLAY ---
 # Shows available host resources and adaptive defaults before asking user inputs.
 function show_system_audit() {
-    echo ""
-    echo -e "${DGN}SYSTEM AUDIT:${CL}"
-    echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
-    echo -e "TOTAL RAM: ${GN}${TOTAL_RAM_GB}GB${CL}"
-    echo -e "CPU CORES: ${GN}${TOTAL_CORES}${CL}"
-    echo -e "DEFAULT VM RAM: ${GN}${DEFAULT_RAM_GB}GB${CL}"
-    echo -e "DEFAULT VM CPU CORES: ${GN}${DEFAULT_CORES}${CL}"
+    section "SYSTEM AUDIT"
+
+    echo -e " ${BL}━━━━━▶${CL} SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} HOST RESOURCES: ${GN}${TOTAL_CORES} CPU cores / ${TOTAL_RAM_GB}GB RAM${CL}"
+    echo -e " ${BL}━━━━━▶${CL} DEFAULT VM RESOURCES: ${GN}${DEFAULT_CORES} CPU cores / ${DEFAULT_RAM_GB}GB RAM${CL}"
 
     if [ -n "$GPU_SUMMARY" ]; then
-        echo -e "GPU: ${GN}${GPU_SUMMARY}${CL}"
+        echo -e " ${BL}━━━━━▶${CL} GPU: ${GN}${GPU_SUMMARY}${CL}"
     else
-        echo -e "GPU: ${YW}No passthrough target detected or GPU detection skipped${CL}"
+        echo -e " ${BL}━━━━━▶${CL} GPU: ${YW}No passthrough target detected or GPU detection skipped${CL}"
     fi
 }
 
@@ -1124,7 +1157,12 @@ function start_confirmation() {
 
     echo ""
     start_yn="$(timed_yes_no "Start the Proxmox VM Setup Script?" "y")"
-    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+
+    if [[ "$start_yn" =~ ^[Nn] ]]; then
+        exit 0
+    fi
+
+    return 0
 }
 
 # --- 46. USER VM CONFIGURATION INPUTS ---
@@ -1173,7 +1211,7 @@ function select_iso_image() {
         echo -e "${BL}SELECT ISO:${CL}"
 
         for i in "${!ISOS[@]}"; do
-            echo "$((i+1))) $(basename "${ISOS[$i]}")"
+            echo -e " ${BL}━━━━━▶${CL} $((i+1))) ${GN}$(basename "${ISOS[$i]}")${CL}"
         done
 
         ISO_IDX="$(timed_number_input "Select ISO number" "1" "1" "${#ISOS[@]}")"
@@ -1205,7 +1243,7 @@ function select_vm_storage() {
     for i in "${!STORAGE_LIST[@]}"; do
         storage_name="${STORAGE_LIST[$i]}"
         storage_type="$(get_storage_type "$storage_name")"
-        echo "$((i+1))) ${storage_name} (${storage_type:-unknown})"
+        echo -e " ${BL}━━━━━▶${CL} $((i+1))) ${GN}${storage_name}${CL} (${storage_type:-unknown})"
     done
 
     STORAGE_IDX="$(timed_number_input "Select storage number" "1" "1" "${#STORAGE_LIST[@]}")"
@@ -1219,16 +1257,32 @@ function select_vm_storage() {
 # Default is no for first Crea Social test because Docker/Postgres/Postiz do not require GPU initially.
 function collect_gpu_passthrough_option() {
     local gpu_yn=""
+    local first_gpu_bdf=""
 
     section "GPU OPTION"
 
     if [ "$DGPU_FOUND" == "yes" ] && [ -n "$DGPU_BDFS" ]; then
-        echo -e "${YW}Discrete GPU detected. Same-slot GPU functions will be attached together if passthrough is selected.${CL}"
+        first_gpu_bdf="$(echo "$DGPU_BDFS" | awk '{print $1}')"
+        GPU_SAME_SLOT_BDFS="$(get_same_slot_functions_for_bdf "$first_gpu_bdf")"
+        [ -z "$GPU_SAME_SLOT_BDFS" ] && GPU_SAME_SLOT_BDFS="$first_gpu_bdf"
+
+        echo -e " ${BL}━━━━━▶${CL} DISCRETE GPU: ${GN}${first_gpu_bdf}${CL}"
+        echo -e " ${BL}━━━━━▶${CL} SAME-SLOT FUNCTIONS: ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
         echo -e "${YW}For Docker/Postgres/Postiz workloads, GPU passthrough is not required initially.${CL}"
+
         gpu_yn="$(timed_yes_no "Add DISCRETE GPU to VM?" "n")"
-        [[ "$gpu_yn" =~ ^[Yy] ]] && ENABLE_GPU="y" || ENABLE_GPU="n"
+
+        if [[ "$gpu_yn" =~ ^[Yy] ]]; then
+            ENABLE_GPU="y"
+            msg_ok "GPU PASSTHROUGH SELECTED"
+        else
+            ENABLE_GPU="n"
+            GPU_SAME_SLOT_BDFS=""
+            msg_ok "GPU PASSTHROUGH SKIPPED"
+        fi
     else
         ENABLE_GPU="n"
+        GPU_SAME_SLOT_BDFS=""
         msg_ok "NO DISCRETE GPU PASSTHROUGH TARGET FOUND"
     fi
 }
@@ -1292,7 +1346,8 @@ function collect_mac_configuration() {
 
     msg_info "Generating suggested VM MAC address"
     SUGGESTED_MAC_ADDRESS="$(generate_proxmox_mac)"
-    msg_ok "SUGGESTED VM MAC ADDRESS GENERATED (${SUGGESTED_MAC_ADDRESS})"
+    msg_ok "SUGGESTED VM MAC ADDRESS GENERATED"
+    echo -e " ${BL}━━━━━▶${CL} ${GN}${SUGGESTED_MAC_ADDRESS}${CL}"
 
     custom_mac_yn="$(timed_yes_no "Use custom VM MAC address?" "n")"
 
@@ -1326,7 +1381,7 @@ function collect_mac_configuration() {
         CUSTOM_MAC_SELECTED="no"
     fi
 
-    echo -e "${GN}VM MAC ADDRESS:${CL} ${VM_MAC_ADDRESS}"
+    echo -e " ${BL}━━━━━▶${CL} VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
     echo -e "${YW}Use this MAC in your router DHCP reservation if you want the VM to always receive the same IP.${CL}"
 }
 
@@ -1338,35 +1393,37 @@ function final_apply_confirmation() {
 
     section "READY TO CREATE VM"
 
-    echo -e "VM ID: ${GN}${VMID}${CL}"
-    echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
-    echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
-    echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
-    echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
-    echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
-    echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
-    echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
-    echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
-    echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
-    echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} VM: ${GN}${VMID} / ${VM_NAME}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} RESOURCES: ${GN}${CPU_INPUT} CPU cores / ${RAM_GB_INPUT}GB RAM${CL}"
+    echo -e " ${BL}━━━━━▶${CL} OS DISK: ${GN}${DISK_GB_INPUT}GB on ${STORAGE_ID} (${STORAGE_TYPE:-unknown})${CL}"
+    echo -e " ${BL}━━━━━▶${CL} ISO: ${GN}${ISO_PATH:-none}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} MAC: ${GN}${VM_MAC_ADDRESS}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
+
+    if [ "$ENABLE_GPU" == "y" ]; then
+        echo -e " ${BL}━━━━━▶${CL} GPU FUNCTIONS: ${GN}${GPU_SAME_SLOT_BDFS:-pending}${CL}"
+    fi
+
     echo ""
     echo -e "${BL}VM PLATFORM SETTINGS:${CL}"
-    echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
-    echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
-    echo -e "EFI FORMAT MODE: ${GN}${EFI_FORMAT_MODE}${CL}"
-    echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
-    echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
-    echo -e "BALLOONING ENABLED: ${GN}${BALLOONING_ENABLED}${CL}"
-    echo -e "BALLOON VALUE: ${GN}${BALLOON_VALUE}${CL}"
-    echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
-    echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
-    echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
-    echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
-    echo -e "ADVANCED SETTINGS USED: ${GN}${ADVANCED_SETTINGS}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} MACHINE / BIOS: ${GN}${MACHINE_TYPE} / ${BIOS_TYPE}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} EFI: ${GN}${EFI_FORMAT_MODE} -> ${EFI_FORMAT}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} BALLOONING: ${GN}${BALLOONING_ENABLED} (${BALLOON_VALUE})${CL}"
+    echo -e " ${BL}━━━━━▶${CL} NETWORK: ${GN}${NETWORK_MODEL}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} ADVANCED SETTINGS USED: ${GN}${ADVANCED_SETTINGS}${CL}"
     echo ""
 
     apply_yn="$(timed_yes_no "Create VM now?" "y")"
-    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+
+    if [[ "$apply_yn" =~ ^[Nn] ]]; then
+        exit 0
+    fi
+
+    return 0
 }
 
 # =========================================================
@@ -1410,6 +1467,7 @@ function create_vm() {
         --net0 "${NETWORK_MODEL}=${VM_MAC_ADDRESS},bridge=vmbr0" \
         --agent "$QEMU_AGENT_VALUE"
 
+    VM_CREATED="yes"
     msg_ok "VM CREATED"
 }
 
@@ -1463,13 +1521,17 @@ function configure_vm_boot() {
             qm set "$VMID" \
             --cdrom "$ISO_PATH"
 
+        BOOT_ORDER="ide2;scsi0"
+
         run_proxmox_cmd "setting VM boot order to ISO first" \
             qm set "$VMID" \
-            --boot "order=ide2;scsi0"
+            --boot "order=${BOOT_ORDER}"
     else
+        BOOT_ORDER="scsi0"
+
         run_proxmox_cmd "setting VM boot order to disk first" \
             qm set "$VMID" \
-            --boot "order=scsi0"
+            --boot "order=${BOOT_ORDER}"
     fi
 
     msg_ok "VM BOOT CONFIGURED"
@@ -1488,7 +1550,8 @@ function verify_vm_mac() {
 
     if [ -n "$configured_mac" ]; then
         VM_MAC_ADDRESS="$configured_mac"
-        msg_ok "VM MAC ADDRESS VERIFIED (${VM_MAC_ADDRESS})"
+        msg_ok "VM MAC ADDRESS VERIFIED"
+        echo -e " ${BL}━━━━━▶${CL} ${GN}${VM_MAC_ADDRESS}${CL}"
     else
         msg_warn "Could not read VM MAC address from Proxmox config. Check with: qm config ${VMID} | grep net0"
     fi
@@ -1517,13 +1580,13 @@ function attach_gpu_passthrough() {
         return 0
     fi
 
-    GPU_SAME_SLOT_BDFS="$(get_same_slot_functions_for_bdf "$gpu_pci_id")"
-
     if [ -z "$GPU_SAME_SLOT_BDFS" ]; then
-        GPU_SAME_SLOT_BDFS="$gpu_pci_id"
+        GPU_SAME_SLOT_BDFS="$(get_same_slot_functions_for_bdf "$gpu_pci_id")"
+        [ -z "$GPU_SAME_SLOT_BDFS" ] && GPU_SAME_SLOT_BDFS="$gpu_pci_id"
     fi
 
-    msg_ok "GPU SAME-SLOT FUNCTIONS DETECTED (${GPU_SAME_SLOT_BDFS})"
+    msg_ok "GPU SAME-SLOT FUNCTIONS CONFIRMED"
+    echo -e " ${BL}━━━━━▶${CL} ${GN}${GPU_SAME_SLOT_BDFS}${CL}"
 
     for gpu_func in $GPU_SAME_SLOT_BDFS; do
         msg_info "Attaching GPU function ${gpu_func} to hostpci${pci_index}"
@@ -1563,6 +1626,8 @@ GPU Passthrough: ${ENABLE_GPU}
 GPU Functions Attached: ${GPU_FUNCTIONS_ATTACHED:-none}
 VM MAC Address: ${VM_MAC_ADDRESS}
 Custom MAC Selected: ${CUSTOM_MAC_SELECTED}
+Boot Order: ${BOOT_ORDER:-unknown}
+Verify Log: ${VERIFY_LOG}
 Machine Type: ${MACHINE_TYPE}
 BIOS: ${BIOS_TYPE}
 EFI Format Mode: ${EFI_FORMAT_MODE}
@@ -1580,47 +1645,118 @@ EOF
     msg_ok "COMPLETION MARKER WRITTEN"
 }
 
+# --- 61. VERIFICATION REPORT ---
+# Creates a post-create verification report without changing the VM.
+function create_verification_report() {
+    section "VERIFICATION"
+
+    msg_info "Creating VM verification report"
+
+    {
+        echo "--- PROXMOX VM SETUP VERIFICATION REPORT ---"
+        echo "Date: $(date)"
+        echo "VMID: ${VMID}"
+        echo "VM Name: ${VM_NAME}"
+        echo "Verify Log: ${VERIFY_LOG}"
+        echo ""
+
+        PASS() { echo "✓ PASS - $1"; }
+        WARN() { echo "! WARN - $1"; }
+        FAIL() { echo "✗ FAIL - $1"; }
+
+        if qm config "${VMID}" >/dev/null 2>&1; then
+            PASS "VM config exists"
+        else
+            FAIL "VM config missing"
+        fi
+
+        echo ""
+        echo "VM config snapshot:"
+        qm config "${VMID}" 2>/dev/null || true
+        echo ""
+
+        if qm config "${VMID}" 2>/dev/null | grep -q "^name: ${VM_NAME}$"; then PASS "VM name matches"; else WARN "VM name not confirmed"; fi
+        if qm config "${VMID}" 2>/dev/null | grep -q "^cores: ${CPU_INPUT}$"; then PASS "CPU cores match"; else WARN "CPU core count not confirmed"; fi
+        if qm config "${VMID}" 2>/dev/null | grep -q "^memory: ${RAM_MB}$"; then PASS "RAM matches"; else WARN "RAM not confirmed"; fi
+        if qm config "${VMID}" 2>/dev/null | grep -qi "${VM_MAC_ADDRESS}"; then PASS "VM MAC address matches"; else WARN "VM MAC address not confirmed"; fi
+        if qm config "${VMID}" 2>/dev/null | grep -q "^boot: order=${BOOT_ORDER}"; then PASS "Boot order matches"; else WARN "Boot order not confirmed"; fi
+
+        if [ "${BIOS_TYPE}" == "ovmf" ]; then
+            if qm config "${VMID}" 2>/dev/null | grep -q "^efidisk0:"; then PASS "EFI disk exists"; else FAIL "EFI disk missing"; fi
+        else
+            WARN "EFI disk check skipped because BIOS is ${BIOS_TYPE}"
+        fi
+
+        if qm config "${VMID}" 2>/dev/null | grep -q "^scsi0:"; then PASS "OS disk exists"; else FAIL "OS disk missing"; fi
+
+        if [ -n "${ISO_PATH}" ]; then
+            if qm config "${VMID}" 2>/dev/null | grep -q "${ISO_PATH}"; then PASS "ISO attached"; else WARN "ISO not confirmed"; fi
+        else
+            WARN "ISO attachment skipped by user/no ISO found"
+        fi
+
+        if qm config "${VMID}" 2>/dev/null | grep -q "^agent: ${QEMU_AGENT_VALUE}"; then PASS "QEMU guest agent setting matches"; else WARN "QEMU guest agent setting not confirmed"; fi
+
+        if [ "${DISCARD_ENABLED}" == "yes" ]; then
+            if qm config "${VMID}" 2>/dev/null | grep -q "discard=on"; then PASS "Discard/TRIM enabled on OS disk"; else WARN "Discard/TRIM not confirmed"; fi
+        else
+            WARN "Discard/TRIM disabled by selection"
+        fi
+
+        if [ "${ENABLE_GPU}" == "y" ]; then
+            if qm config "${VMID}" 2>/dev/null | grep -q "^hostpci"; then PASS "GPU hostpci entries exist"; else FAIL "GPU passthrough selected but hostpci entries missing"; fi
+        else
+            WARN "GPU passthrough not selected"
+        fi
+
+        if [ -f "${COMPLETED_MARKER}" ]; then PASS "Completion marker exists"; else WARN "Completion marker missing"; fi
+
+        echo ""
+        echo "Verification complete."
+    } > "${VERIFY_LOG}" 2>&1
+
+    msg_ok "VM VERIFICATION REPORT CREATED"
+    echo -e " ${BL}━━━━━▶${CL} ${GN}${VERIFY_LOG}${CL}"
+}
+
 # --- 61. FINAL SUMMARY ---
 # Shows final VM configuration and the MAC address to reserve in the router.
 function show_final_summary() {
     section "FINISHED"
 
-    echo -e "VM ID: ${GN}${VMID}${CL}"
-    echo -e "VM NAME: ${GN}${VM_NAME}${CL}"
-    echo -e "RAM: ${GN}${RAM_GB_INPUT}GB${CL}"
-    echo -e "CPU CORES: ${GN}${CPU_INPUT}${CL}"
-    echo -e "OS DISK: ${GN}${DISK_GB_INPUT}GB${CL}"
-    echo -e "STORAGE: ${GN}${STORAGE_ID}${CL}"
-    echo -e "STORAGE TYPE: ${GN}${STORAGE_TYPE:-unknown}${CL}"
-    echo -e "ISO: ${GN}${ISO_PATH:-none}${CL}"
-    echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_GPU}${CL}"
-    echo -e "GPU FUNCTIONS ATTACHED: ${GN}${GPU_FUNCTIONS_ATTACHED:-none}${CL}"
-    echo -e "VGA DISPLAY: ${GN}std${CL}"
-    echo -e "MACHINE TYPE: ${GN}${MACHINE_TYPE}${CL}"
-    echo -e "BIOS: ${GN}${BIOS_TYPE}${CL}"
-    echo -e "EFI FORMAT: ${GN}${EFI_FORMAT}${CL}"
-    echo -e "CPU TYPE: ${GN}${CPU_TYPE_VM}${CL}"
-    echo -e "BALLOONING: ${GN}${BALLOONING_ENABLED}${CL}"
-    echo -e "NETWORK MODEL: ${GN}${NETWORK_MODEL}${CL}"
-    echo -e "QEMU GUEST AGENT: ${GN}${QEMU_AGENT_ENABLED}${CL}"
-    echo -e "DISK CONTROLLER: ${GN}${DISK_CONTROLLER}${CL}"
-    echo -e "DISCARD/TRIM: ${GN}${DISCARD_ENABLED}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} VM: ${GN}${VMID} / ${VM_NAME}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} RESOURCES: ${GN}${CPU_INPUT} CPU cores / ${RAM_GB_INPUT}GB RAM${CL}"
+    echo -e " ${BL}━━━━━▶${CL} OS DISK: ${GN}${DISK_GB_INPUT}GB on ${STORAGE_ID} (${STORAGE_TYPE:-unknown})${CL}"
+    echo -e " ${BL}━━━━━▶${CL} BOOT ORDER: ${GN}${BOOT_ORDER:-unknown}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} ISO: ${GN}${ISO_PATH:-none}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} MAC: ${GN}${VM_MAC_ADDRESS}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} GPU: ${GN}${ENABLE_GPU}${CL}"
+
+    if [ "$ENABLE_GPU" == "y" ]; then
+        echo -e " ${BL}━━━━━▶${CL} GPU FUNCTIONS: ${GN}${GPU_FUNCTIONS_ATTACHED:-none}${CL}"
+    fi
+
+    echo ""
+    echo -e "${BL}PLATFORM:${CL}"
+    echo -e " ${BL}━━━━━▶${CL} MACHINE / BIOS / EFI: ${GN}${MACHINE_TYPE} / ${BIOS_TYPE} / ${EFI_FORMAT}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} CPU TYPE / BALLOONING: ${GN}${CPU_TYPE_VM} / ${BALLOONING_ENABLED}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} NETWORK / AGENT: ${GN}${NETWORK_MODEL} / ${QEMU_AGENT_ENABLED}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} DISK CONTROLLER / TRIM: ${GN}${DISK_CONTROLLER} / ${DISCARD_ENABLED}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} VERIFY LOG: ${GN}${VERIFY_LOG}${CL}"
     echo ""
     echo -e "${BL}NETWORK / ROUTER DHCP RESERVATION:${CL}"
-    echo -e "VM MAC ADDRESS: ${GN}${VM_MAC_ADDRESS}${CL}"
-    echo -e "CUSTOM MAC SELECTED: ${GN}${CUSTOM_MAC_SELECTED}${CL}"
-    echo -e "${YW}Recommended: reserve this MAC address in your router so the VM always receives the same IP via DHCP.${CL}"
-    echo -e "${YW}Check later with: qm config ${VMID} | grep net0${CL}"
+    echo -e " ${BL}━━━━━▶${CL} Reserve this MAC in your router: ${GN}${VM_MAC_ADDRESS}${CL}"
+    echo -e " ${BL}━━━━━▶${CL} Check later with: ${YW}qm config ${VMID} | grep net0${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
 
     if [ -n "$ISO_PATH" ]; then
-        echo -e "${YW}Manual install path:${CL} Start the VM and install Ubuntu from the Proxmox console."
+        echo -e " ${BL}━━━━━▶${CL} Manual install: ${YW}Start the VM and install Ubuntu from the Proxmox console.${CL}"
     else
-        echo -e "${YW}No ISO was attached. Attach/install media before starting the VM.${CL}"
+        echo -e " ${BL}━━━━━▶${CL} ${YW}No ISO was attached. Attach/install media before starting the VM.${CL}"
     fi
 
-    echo -e "${YW}Autoinstall path:${CL} Run script 3.5 next to generate and attach the Ubuntu autoinstall ISO."
+    echo -e " ${BL}━━━━━▶${CL} Autoinstall: ${YW}Run script 3.5 next to generate and attach the Ubuntu autoinstall ISO.${CL}"
     echo ""
 }
 
@@ -1654,6 +1790,7 @@ function main() {
     verify_vm_mac
     attach_gpu_passthrough
     write_completion_marker
+    create_verification_report
     show_final_summary
 
     exit 0
