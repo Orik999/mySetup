@@ -529,12 +529,16 @@ function timed_text_input() {
 }
 
 # --- 19. SENSITIVE LINE INPUT HELPER ---
-# Reads one sensitive line directly from /dev/tty, then immediately clears that terminal line.
-# Used for Ubuntu Pro token. The token is not written by the script to stdout, logs, marker, or summary.
-# It may briefly appear on-screen while typing/pasting, then the full input line is cleared after ENTER.
-function hidden_input() {
+# Reads one sensitive line directly from /dev/tty and clears the visible prompt/token line immediately after ENTER.
+# The token is returned through stdout for command substitution only; prompt/token text is printed only to /dev/tty.
+# Do not call flush_input_buffer here because it can consume pasted token characters.
+function sensitive_line_input() {
     local prompt="$1"
     local answer=""
+    local cols="80"
+    local visible_len="0"
+    local lines_to_clear="1"
+    local i=""
 
     tty_print "${YW}${prompt}: ${CL}"
 
@@ -544,17 +548,27 @@ function hidden_input() {
         IFS= read -r answer || answer=""
     fi
 
-    # Clear the prompt + token from the current visible terminal line before anything else is printed.
-    tty_print "${BFR}"
+    # Best-effort removal of the visible prompt/token from the terminal display.
+    # If the pasted token wrapped, clear every wrapped line. This affects screen display only;
+    # the token is never printed by the script to stdout/logs/marker/summary.
+    cols="$(tput cols 2>/dev/null || echo 80)"
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols="80"
+    [ "$cols" -lt 20 ] && cols="80"
+
+    visible_len=$(( ${#prompt} + 2 + ${#answer} ))
+    lines_to_clear=$(( (visible_len + cols - 1) / cols ))
+    [ "$lines_to_clear" -lt 1 ] && lines_to_clear="1"
+
+    for ((i=0; i<lines_to_clear; i++)); do
+        tty_print "\033[1A\r\033[2K"
+    done
 
     printf '%s' "$answer"
 }
 
 # --- 20. REBOOT COUNTDOWN HELPER ---
-# Shows a two-line wall-clock reboot countdown without creating a new line every second.
-# ENTER/Y = reboot immediately.
-# SPACE/N = stop countdown and do not reboot.
-# Timeout = reboot automatically.
+# Script 1-style reboot countdown.
+# ENTER/Y = reboot immediately. SPACE/N = cancel. Timeout = reboot automatically.
 function timed_reboot_countdown() {
     local seconds="$1"
     local key=""
@@ -578,42 +592,26 @@ function timed_reboot_countdown() {
 
         if [ "$first_draw" == "yes" ]; then
             first_draw="no"
+            tty_println ""
         else
             tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
         fi
 
         tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}\n${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}\n"
 
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                case "$key" in
-                    ""|[Yy])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                        tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
-                        return 0
-                        ;;
-                    " "|[Nn])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                        tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
-                        return 1
-                        ;;
-                esac
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                case "$key" in
-                    ""|[Yy])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                        tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
-                        return 0
-                        ;;
-                    " "|[Nn])
-                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                        tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
-                        return 1
-                        ;;
-                esac
-            fi
+        if [ -r /dev/tty ] && IFS= read -rsn1 -t 1 key < /dev/tty; then
+            case "$key" in
+                ""|[Yy])
+                    tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                    tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
+                    return 0
+                    ;;
+                " "|[Nn])
+                    tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                    tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
+                    return 1
+                    ;;
+            esac
         fi
     done
 }
@@ -1020,7 +1018,7 @@ function handle_ubuntu_pro() {
             unset UBUNTU_PRO_TOKEN
             msg_ok "UBUNTU PRO TOKEN RECEIVED FROM ENVIRONMENT"
         else
-            PRO_TOKEN="$(hidden_input "Enter Ubuntu Pro token")"
+            PRO_TOKEN="$(sensitive_line_input "Enter Ubuntu Pro token")"
 
             if [ -n "$PRO_TOKEN" ]; then
                 msg_ok "UBUNTU PRO TOKEN RECEIVED"
@@ -1525,6 +1523,9 @@ function reboot_prompt() {
     reboot_yn="$(timed_yes_no "Reboot Ubuntu system now?" "$default_reboot")"
 
     if [[ "$reboot_yn" =~ ^[Yy] ]]; then
+        sleep 0.1
+        flush_input_buffer
+
         if timed_reboot_countdown "$REBOOT_T"; then
             if [ -n "$SUDO_CMD" ]; then
                 "$SUDO_CMD" reboot
