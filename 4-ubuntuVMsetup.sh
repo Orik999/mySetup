@@ -567,7 +567,8 @@ function sensitive_line_input() {
 }
 
 # --- 20. REBOOT COUNTDOWN HELPER ---
-# Script 1-style reboot countdown.
+# Script 1-style direct reboot countdown.
+# There is intentionally no separate "Reboot now?" Y/n countdown before this.
 # ENTER/Y = reboot immediately. SPACE/N = cancel. Timeout = reboot automatically.
 function timed_reboot_countdown() {
     local seconds="$1"
@@ -577,6 +578,7 @@ function timed_reboot_countdown() {
     local remaining=""
     local first_draw="yes"
 
+    flush_input_buffer
     deadline=$(( $(date +%s) + seconds ))
 
     while true; do
@@ -592,26 +594,30 @@ function timed_reboot_countdown() {
 
         if [ "$first_draw" == "yes" ]; then
             first_draw="no"
-            tty_println ""
         else
             tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
         fi
 
         tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}\n${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}\n"
 
-        if [ -r /dev/tty ] && IFS= read -rsn1 -t 1 key < /dev/tty; then
-            case "$key" in
-                ""|[Yy])
-                    tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                    tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
-                    return 0
-                    ;;
-                " "|[Nn])
-                    tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
-                    tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
-                    return 1
-                    ;;
-            esac
+        key=""
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                case "$key" in
+                    ""|[Yy])
+                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                        tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
+                        return 0
+                        ;;
+                    " "|[Nn])
+                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                        tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
+                        return 1
+                        ;;
+                esac
+            fi
+        else
+            sleep 1
         fi
     done
 }
@@ -1507,34 +1513,24 @@ function show_final_summary() {
 }
 
 # --- 45. REBOOT PROMPT ---
-# Offers safe reboot using sudo reboot when not root.
-# In LXC/container mode, default is no because host/container policy may control restarts.
+# Final direct reboot countdown.
+# Removes the separate Y/n reboot prompt so there is only one reboot timer.
+# ENTER/Y = reboot immediately. SPACE/N = cancel. Timeout = reboot automatically.
 function reboot_prompt() {
-    local reboot_yn=""
-    local default_reboot="y"
-
     section "REBOOT"
 
     if [ "$IS_CONTAINER" == "yes" ]; then
-        default_reboot="n"
         echo -e "${YW}Container mode detected. Reboot/restart may be controlled from the Proxmox host.${CL}"
+        echo -e "${YW}Reboot skipped. Restart the container from Proxmox host if needed.${CL}"
+        return 0
     fi
 
-    reboot_yn="$(timed_yes_no "Reboot Ubuntu system now?" "$default_reboot")"
-
-    if [[ "$reboot_yn" =~ ^[Yy] ]]; then
-        sleep 0.1
-        flush_input_buffer
-
-        if timed_reboot_countdown "$REBOOT_T"; then
-            if [ -n "$SUDO_CMD" ]; then
-                "$SUDO_CMD" reboot
-            else
-                reboot
-            fi
+    if timed_reboot_countdown "$REBOOT_T"; then
+        if [ -n "$SUDO_CMD" ]; then
+            "$SUDO_CMD" reboot
+        else
+            reboot
         fi
-    else
-        echo -e "${YW}Reboot skipped. Reboot manually when ready.${CL}"
     fi
 
     return 0
