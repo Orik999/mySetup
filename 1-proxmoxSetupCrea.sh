@@ -1255,35 +1255,110 @@ EOF
 }
 
 # --- 44. SSH SECURITY ---
-# Checks for root SSH keys and disables root password login only when keys are present.
+# Preserves root SSH key login while disabling root/password-based SSH login.
+# This is intentionally key-only hardening, not root-login blocking.
+# Proxmox administration commonly uses root SSH keys, so PermitRootLogin must be prohibit-password, not no.
 function apply_ssh_security() {
     local root_keys="/root/.ssh/authorized_keys"
+    local ssh_dropin_dir="/etc/ssh/sshd_config.d"
+    local ssh_dropin_file="${ssh_dropin_dir}/99-pve9-root-key-only.conf"
+    local ssh_file=""
 
     section "SSH SECURITY"
 
-    msg_info "Checking for SSH authorized keys"
+    msg_info "Checking for root SSH authorized keys"
 
-    if [ -s "$root_keys" ]; then
-        msg_ok "SSH KEYS DETECTED"
-
-        msg_info "Hardening root SSH access"
-        chmod 700 /root/.ssh
-        chmod 600 "$root_keys"
-
-        set_or_append_space_config /etc/ssh/sshd_config "AddressFamily" "inet"
-        set_or_append_space_config /etc/ssh/sshd_config "PasswordAuthentication" "no"
-        set_or_append_space_config /etc/ssh/sshd_config "PermitRootLogin" "prohibit-password"
-
-        run_cmd "validating sshd config" sshd -t
-        run_optional systemctl restart ssh.service
-
-        SSH_HARDENING_APPLIED="yes"
-
-        msg_ok "ROOT PASSWORD LOGIN DISABLED"
-    else
+    if [ ! -s "$root_keys" ]; then
         SSH_HARDENING_APPLIED="no"
-        msg_warn "SSH keys not found; root password login not disabled"
+        msg_warn "SSH keys not found; root SSH password login not disabled"
+        return 0
     fi
+
+    if ! grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-)' "$root_keys"; then
+        SSH_HARDENING_APPLIED="no"
+        msg_warn "authorized_keys exists but no valid SSH public key lines were found; SSH hardening skipped"
+        return 0
+    fi
+
+    msg_ok "ROOT SSH KEYS DETECTED"
+
+    msg_info "Fixing root SSH key ownership and permissions"
+    mkdir -p /root/.ssh
+    chown root:root /root /root/.ssh "$root_keys"
+    chmod go-w /root
+    chmod 700 /root/.ssh
+    chmod 600 "$root_keys"
+    msg_ok "ROOT SSH KEY PERMISSIONS VERIFIED"
+
+    msg_info "Removing conflicting root SSH lockout directives"
+
+    for ssh_file in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+        [ -f "$ssh_file" ] || continue
+
+        sed -i -E 's/^[#[:space:]]*PermitRootLogin[[:space:]]+no[[:space:]]*$/PermitRootLogin prohibit-password/' "$ssh_file"
+        sed -i -E 's/^[#[:space:]]*PubkeyAuthentication[[:space:]]+no[[:space:]]*$/PubkeyAuthentication yes/' "$ssh_file"
+        sed -i -E 's/^[#[:space:]]*AuthorizedKeysFile[[:space:]]+none[[:space:]]*$/AuthorizedKeysFile .ssh\/authorized_keys/' "$ssh_file"
+    done
+
+    msg_ok "CONFLICTING ROOT SSH LOCKOUT DIRECTIVES REMOVED"
+
+    msg_info "Writing Proxmox root key-only SSH hardening drop-in"
+    mkdir -p "$ssh_dropin_dir"
+
+    cat <<EOF > "$ssh_dropin_file"
+# PVE9 Post Install SSH hardening
+# Keep root SSH public-key login working.
+# Disable password and keyboard-interactive SSH authentication.
+AddressFamily inet
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin prohibit-password
+EOF
+
+    msg_ok "ROOT KEY-ONLY SSH DROP-IN WRITTEN"
+
+    msg_info "Synchronising main sshd_config with safe root key-only settings"
+    set_or_append_space_config /etc/ssh/sshd_config "AddressFamily" "inet"
+    set_or_append_space_config /etc/ssh/sshd_config "PubkeyAuthentication" "yes"
+    set_or_append_space_config /etc/ssh/sshd_config "AuthorizedKeysFile" ".ssh/authorized_keys"
+    set_or_append_space_config /etc/ssh/sshd_config "PasswordAuthentication" "no"
+    set_or_append_space_config /etc/ssh/sshd_config "KbdInteractiveAuthentication" "no"
+    set_or_append_space_config /etc/ssh/sshd_config "ChallengeResponseAuthentication" "no"
+    set_or_append_space_config /etc/ssh/sshd_config "PermitRootLogin" "prohibit-password"
+    msg_ok "MAIN SSHD CONFIG SYNCHRONISED"
+
+    msg_info "Validating effective SSH configuration"
+    run_cmd "validating sshd config" sshd -t
+
+    if sshd -T 2>/dev/null | grep -q "^permitrootlogin no"; then
+        msg_error "Effective SSH config still blocks root login completely. Aborting before reboot to prevent lockout."
+    fi
+
+    if ! sshd -T 2>/dev/null | grep -Eq "^permitrootlogin (prohibit-password|without-password)"; then
+        msg_error "Effective SSH config does not preserve root key login. Aborting before reboot to prevent lockout."
+    fi
+
+    if ! sshd -T 2>/dev/null | grep -q "^pubkeyauthentication yes"; then
+        msg_error "Effective SSH config does not allow public-key authentication. Aborting before reboot to prevent lockout."
+    fi
+
+    if ! sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then
+        msg_error "Effective SSH config did not disable password authentication."
+    fi
+
+    msg_ok "EFFECTIVE SSH CONFIG VERIFIED"
+
+    msg_info "Restarting SSH service"
+    run_optional systemctl restart ssh.service
+    run_optional systemctl restart sshd.service
+    msg_ok "SSH SERVICE RESTARTED"
+
+    SSH_HARDENING_APPLIED="yes"
+
+    msg_ok "ROOT SSH KEY LOGIN PRESERVED; PASSWORD LOGIN DISABLED"
 }
 
 # --- 45. SYSCTL HARDENING & NETWORK TUNING ---
