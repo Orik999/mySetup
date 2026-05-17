@@ -530,11 +530,21 @@ function timed_text_input() {
 function hidden_input() {
     local prompt="$1"
     local answer=""
+    local old_stty=""
 
-    tty_print "${YW}${prompt}: ${CL}"
+    flush_input_buffer
+
+    tty_print "${YW}${prompt} (paste token, then press ENTER): ${CL}"
 
     if [ -r /dev/tty ]; then
-        IFS= read -rs answer < /dev/tty || true
+        old_stty="$(stty -g < /dev/tty 2>/dev/null || true)"
+        stty -echo < /dev/tty 2>/dev/null || true
+        IFS= read -r answer < /dev/tty || true
+        if [ -n "$old_stty" ]; then
+            stty "$old_stty" < /dev/tty 2>/dev/null || true
+        else
+            stty echo < /dev/tty 2>/dev/null || true
+        fi
     else
         IFS= read -rs answer || true
     fi
@@ -556,9 +566,8 @@ function timed_reboot_countdown() {
     local remaining=""
     local first_draw="yes"
 
+    flush_input_buffer
     deadline=$(( $(date +%s) + seconds ))
-
-    echo ""
 
     while true; do
         now=$(date +%s)
@@ -566,7 +575,7 @@ function timed_reboot_countdown() {
 
         if [ "$remaining" -le 0 ]; then
             if [ "$first_draw" == "no" ]; then
-                tty_print "[2A[2K[1B[2K[1A"
+                tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
             fi
             tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
             return 0
@@ -575,26 +584,24 @@ function timed_reboot_countdown() {
         if [ "$first_draw" == "yes" ]; then
             first_draw="no"
         else
-            tty_print "[2A[2K[1B[2K[1A"
+            tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
         fi
 
-        tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}
-${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}
-"
+        tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}\n${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}\n"
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 case "$key" in
                     ""|[Yy])
                         flush_input_buffer
-                        tty_print "[2A[2K[1B[2K[1A"
+                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
                         tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
                         return 0
                         ;;
                     " "|[Nn])
                         flush_input_buffer
-                        tty_print "[2A[2K[1B[2K[1A"
-                        tty_println "${YW}Reboot countdown stopped. Reboot manually with: sudo reboot${CL}"
+                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                        tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
                         return 1
                         ;;
                 esac
@@ -604,7 +611,6 @@ ${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}
         fi
     done
 }
-
 # =========================================================
 #  VALIDATION HELPERS
 # =========================================================
@@ -980,6 +986,7 @@ function update_system_packages() {
 # The token is read silently and is not written to the log, marker file, or final summary.
 function handle_ubuntu_pro() {
     local pro_yn=""
+    local retry_pro_yn=""
     local err_file=""
 
     section "UBUNTU PRO"
@@ -992,13 +999,26 @@ function handle_ubuntu_pro() {
         return 0
     fi
 
-    PRO_TOKEN="$(hidden_input "Enter Ubuntu Pro token")"
+    while true; do
+        PRO_TOKEN="$(hidden_input "Enter Ubuntu Pro token")"
 
-    if [ -z "$PRO_TOKEN" ]; then
-        UBUNTU_PRO_ATTACHED="no"
-        msg_warn "Ubuntu Pro token was empty. Skipping Ubuntu Pro attachment"
-        return 0
-    fi
+        if [ -n "$PRO_TOKEN" ]; then
+            msg_ok "UBUNTU PRO TOKEN RECEIVED"
+            break
+        fi
+
+        msg_warn "Ubuntu Pro token was empty"
+
+        retry_pro_yn="$(timed_yes_no "Try entering Ubuntu Pro token again?" "y")"
+
+        if [[ "$retry_pro_yn" =~ ^[Nn] ]]; then
+            UBUNTU_PRO_ATTACHED="no"
+            unset PRO_TOKEN
+            PRO_TOKEN=""
+            msg_ok "UBUNTU PRO ATTACHMENT SKIPPED"
+            return 0
+        fi
+    done
 
     msg_info "Installing Ubuntu Pro client"
     run_optional env DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-advantage-tools ubuntu-pro-client
@@ -1470,6 +1490,7 @@ function reboot_prompt() {
     reboot_yn="$(timed_yes_no "Reboot Ubuntu system now?" "$default_reboot")"
 
     if [[ "$reboot_yn" =~ ^[Yy] ]]; then
+        echo ""
         if timed_reboot_countdown "$REBOOT_T"; then
             if [ -n "$SUDO_CMD" ]; then
                 "$SUDO_CMD" reboot
@@ -1478,10 +1499,11 @@ function reboot_prompt() {
             fi
         fi
     else
-        echo -e "${YW}Reboot skipped. Reboot manually with: sudo reboot${CL}"
+        echo -e "${YW}Reboot skipped. Reboot manually when ready.${CL}"
     fi
-}
 
+    return 0
+}
 # =========================================================
 #  MAIN ORCHESTRATION
 # =========================================================
