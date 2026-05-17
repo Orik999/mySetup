@@ -628,9 +628,21 @@ function validate_sudo_access() {
     if [ -n "$SUDO_CMD" ]; then
         msg_info "Validating sudo access"
 
-        "$SUDO_CMD" -v || msg_error "Sudo authentication failed. Script cancelled."
+        # First test the automation path created by script 3.5.
+        # The Ubuntu autoinstall user is intentionally SSH-key-only and may not have a password.
+        # sudo -n true confirms NOPASSWD sudo without ever prompting for a password.
+        if "$SUDO_CMD" -n true >/dev/null 2>&1; then
+            msg_ok "PASSWORDLESS SUDO CONFIRMED"
+            return 0
+        fi
 
-        msg_ok "SUDO ACCESS CONFIRMED"
+        # Fallback for manually-created Ubuntu users that do have a normal sudo password.
+        if "$SUDO_CMD" -v; then
+            msg_ok "SUDO ACCESS CONFIRMED"
+            return 0
+        fi
+
+        msg_error "Sudo authentication failed. Script cancelled."
     fi
 }
 
