@@ -30,6 +30,7 @@ T=15
 REBOOT_T=30
 
 LOG_FILE="/var/log/docker-setup.log"
+RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/docker-setup-verify.log"
 COMPLETED_MARKER="/root/.docker-setup-completed"
 
@@ -104,6 +105,23 @@ function section() {
     echo -e "${BORDER}"
 }
 
+# --- 5A. FLASHING SUCCESS SECTION HEADER HELPER ---
+# Uses the same section layout as script 1, but renders final success headings in bold flashing green.
+function section_flash_success() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${GN}${CLF}$1${CL}"
+    echo -e "${BORDER}"
+}
+
+# --- 5B. DETAIL LINE HELPER ---
+# Prints clean script 1-style detail lines for summaries and audit output.
+function detail_line() {
+    local label="$1"
+    local value="$2"
+    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+}
+
 # --- 6. TTY OUTPUT HELPER ---
 # Prints directly to terminal from prompt functions.
 function tty_print() {
@@ -132,6 +150,14 @@ function tty_println() {
 # Removes temporary files created during repository/key/command handling.
 function cleanup() {
     local exit_code="$?"
+    local file=""
+
+    # When running as a non-root user, write logs to a user-writable temp file first.
+    # This avoids routing interactive prompts through sudo tee, which can break prompt ordering.
+    if [ -n "${SUDO_CMD:-}" ] && [ -n "${RUNTIME_LOG_FILE:-}" ] && [ -s "$RUNTIME_LOG_FILE" ]; then
+        "$SUDO_CMD" cp "$RUNTIME_LOG_FILE" "$LOG_FILE" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$LOG_FILE" 2>/dev/null || true
+    fi
 
     for file in "${TEMP_FILES[@]:-}"; do
         [ -n "$file" ] && [ -f "$file" ] && rm -f "$file" 2>/dev/null || true
@@ -238,11 +264,19 @@ function root_cat_file() {
 # Clears leftover buffered keyboard input between prompts.
 # This prevents ENTER/SPACE from needing to be pressed twice on Ubuntu terminal sessions.
 function flush_input_buffer() {
-    if [ -r /dev/tty ]; then
-        while IFS= read -rsn1 -t 0.001 _ < /dev/tty 2>/dev/null; do :; done
-    else
-        while IFS= read -rsn1 -t 0.001 _ 2>/dev/null; do :; done
-    fi
+    local junk=""
+    local i=""
+
+    # Never flush stdin. Streamed/process-substituted scripts may use stdin for script content.
+    [ -r /dev/tty ] || return 0
+
+    for i in {1..20}; do
+        if ! IFS= read -rsn1 -t 0.02 junk < /dev/tty 2>/dev/null; then
+            break
+        fi
+    done
+
+    return 0
 }
 
 # --- 16. YES/NO LABEL HELPER ---
@@ -572,12 +606,18 @@ function validate_dependencies() {
         cp
         date
         dpkg
+        getent
         grep
+        groupadd
         id
+        install
         mkdir
         mktemp
         rm
         sed
+        swapoff
+        swapon
+        systemctl
         tee
         uname
         usermod
@@ -636,10 +676,21 @@ function validate_sudo_access() {
     if [ -n "$SUDO_CMD" ]; then
         echo -e "${YW}Sudo privileges are required for Docker Setup.${CL}"
 
-        if ! "$SUDO_CMD" -v; then
-            echo -e "${RD}ERROR:${CL} Sudo authentication failed."
-            exit 1
+        # Script 3.5 creates an SSH-key-only user with NOPASSWD sudo.
+        # Test that path first so the script never asks for a password unnecessarily.
+        if "$SUDO_CMD" -n true >/dev/null 2>&1; then
+            echo -e " ${CM} ${GN}PASSWORDLESS SUDO CONFIRMED${CL}"
+            return 0
         fi
+
+        # Fallback for manually-created Ubuntu users that do have a normal sudo password.
+        if "$SUDO_CMD" -v; then
+            echo -e " ${CM} ${GN}SUDO ACCESS CONFIRMED${CL}"
+            return 0
+        fi
+
+        echo -e "${RD}ERROR:${CL} Sudo authentication failed."
+        exit 1
     fi
 }
 
@@ -647,8 +698,13 @@ function validate_sudo_access() {
 # Logs output and reports failing line. Uses sudo tee when not running as root.
 function init_logging() {
     if [ -n "$SUDO_CMD" ]; then
-        exec > >("$SUDO_CMD" tee -a "$LOG_FILE") 2>&1
+        # Avoid piping interactive output through sudo tee.
+        # Prompt functions write to /dev/tty and normal output is logged to a temp file first.
+        RUNTIME_LOG_FILE="$(mktemp /tmp/docker-setup-log.XXXXXX)"
+        TEMP_FILES+=("$RUNTIME_LOG_FILE")
+        exec > >(tee -a "$RUNTIME_LOG_FILE") 2>&1
     else
+        RUNTIME_LOG_FILE="$LOG_FILE"
         exec > >(tee -a "$LOG_FILE") 2>&1
     fi
 }
@@ -805,8 +861,11 @@ function detect_existing_setup() {
 }
 
 # --- 32. START CONFIRMATION ---
-# Starts Docker installation.
+# Starts Docker installation after environment and existing setup checks.
 function start_confirmation() {
+    local lxc_continue_yn=""
+    local start_yn=""
+
     section "START"
 
     echo -e "${YW}This script will install and configure Docker Engine, Docker CLI, containerd, Compose plugin and Buildx plugin.${CL}"
@@ -815,14 +874,23 @@ function start_confirmation() {
         echo ""
         echo -e "${RD}LXC/container mode detected.${CL}"
         echo -e "${YW}Docker inside LXC requires Proxmox host support such as nesting, cgroups and suitable container privileges.${CL}"
-        echo -e "${YW}Swap handling, UFW and reboot default to safer container settings.${CL}"
+        echo -e "${YW}Swap handling, UFW and reboot are skipped/defaulted to safer container settings.${CL}"
         echo ""
+
         lxc_continue_yn="$(timed_yes_no "Continue Docker install inside LXC/container?" "n")"
-        [[ "$lxc_continue_yn" =~ ^[Nn] ]] && exit 0
+
+        if [[ "$lxc_continue_yn" =~ ^[Nn] ]]; then
+            exit 0
+        fi
     fi
 
-    start_yn="$(timed_yes_no "Start the Docker Setup Script?" "y")
-    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+    start_yn="$(timed_yes_no "Start the Docker Setup Script?" "y")"
+
+    if [[ "$start_yn" =~ ^[Nn] ]]; then
+        exit 0
+    fi
+
+    return 0
 }
 
 # =========================================================
@@ -857,17 +925,29 @@ function collect_user_options() {
     else
         swap_yn="$(timed_yes_no "Disable swap in /etc/fstab?" "y")"
     fi
-    [[ "$swap_yn" =~ ^[Nn] ]] && DISABLE_SWAP="n" || DISABLE_SWAP="y"
+    if [[ "$swap_yn" =~ ^[Nn] ]]; then
+        DISABLE_SWAP="n"
+    else
+        DISABLE_SWAP="y"
+    fi
 
     if [ "$IS_CONTAINER" == "yes" ]; then
         ufw_yn="$(timed_yes_no "Configure UFW firewall inside LXC/container?" "n")"
     else
         ufw_yn="$(timed_yes_no "Configure UFW firewall baseline?" "y")"
     fi
-    [[ "$ufw_yn" =~ ^[Nn] ]] && CONFIGURE_UFW="n" || CONFIGURE_UFW="y"
+    if [[ "$ufw_yn" =~ ^[Nn] ]]; then
+        CONFIGURE_UFW="n"
+    else
+        CONFIGURE_UFW="y"
+    fi
 
     gc_yn="$(timed_yes_no "Install docker-gc cleanup helper?" "n")"
-    [[ "$gc_yn" =~ ^[Yy] ]] && INSTALL_DOCKER_GC="y" || INSTALL_DOCKER_GC="n"
+    if [[ "$gc_yn" =~ ^[Yy] ]]; then
+        INSTALL_DOCKER_GC="y"
+    else
+        INSTALL_DOCKER_GC="n"
+    fi
 }
 
 # =========================================================
@@ -1343,9 +1423,9 @@ EOF
 }
 
 # --- 45. FINAL SUMMARY ---
-# Displays installed versions and logout/reboot reminder.
+# Displays installed versions and next step using script 1-style output.
 function show_final_summary() {
-    section "FINISHED"
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
     if [ -n "$SUDO_CMD" ]; then
         "$SUDO_CMD" docker --version || true
@@ -1356,19 +1436,26 @@ function show_final_summary() {
     fi
 
     echo ""
-    echo -e "TARGET USER:             ${GN}${TARGET_USER}${CL}"
-    echo -e "ENVIRONMENT:             ${GN}$([ "$IS_CONTAINER" == "yes" ] && echo "LXC/Container (${VIRT_TYPE})" || echo "VM (${VIRT_TYPE})")${CL}"
-    echo -e "SWAP DISABLED:           ${GN}${SWAP_DISABLED}${CL}"
-    echo -e "DOCKER INSTALLED:        ${GN}${DOCKER_INSTALLED}${CL}"
-    echo -e "DOCKER SERVICE:          ${GN}${DOCKER_SERVICE_ENABLED}${CL}"
-    echo -e "CONTAINERD SERVICE:      ${GN}${CONTAINERD_SERVICE_ENABLED}${CL}"
-    echo -e "DOCKER GROUP READY:      ${GN}${DOCKER_GROUP_READY}${CL}"
-    echo -e "USER ADDED TO DOCKER:    ${GN}${USER_ADDED_TO_DOCKER}${CL}"
-    echo -e "DOCKER-GC HELPER:        ${GN}${DOCKER_GC_INSTALLED}${CL}"
-    echo -e "UFW FIREWALL:            ${GN}${UFW_ENABLED}${CL}"
-    echo -e "DAEMON CONFIG VALID:     ${GN}${DAEMON_CONFIG_VALID}${CL}"
-    echo -e "EXISTING SETUP DETECTED: ${GN}${EXISTING_SETUP}${CL}"
-    echo -e "VERIFY LOG:              ${GN}${VERIFY_LOG}${CL}"
+    detail_line "TARGET USER" "$TARGET_USER"
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        detail_line "ENVIRONMENT" "LXC/Container (${VIRT_TYPE})"
+    else
+        detail_line "ENVIRONMENT" "VM (${VIRT_TYPE})"
+    fi
+
+    detail_line "SWAP DISABLED" "$SWAP_DISABLED"
+    detail_line "DOCKER INSTALLED" "$DOCKER_INSTALLED"
+    detail_line "DOCKER SERVICE" "$DOCKER_SERVICE_ENABLED"
+    detail_line "CONTAINERD SERVICE" "$CONTAINERD_SERVICE_ENABLED"
+    detail_line "DOCKER GROUP READY" "$DOCKER_GROUP_READY"
+    detail_line "USER ADDED TO DOCKER" "$USER_ADDED_TO_DOCKER"
+    detail_line "DOCKER-GC HELPER" "$DOCKER_GC_INSTALLED"
+    detail_line "UFW FIREWALL" "$UFW_ENABLED"
+    detail_line "DAEMON CONFIG VALID" "$DAEMON_CONFIG_VALID"
+    detail_line "EXISTING SETUP DETECTED" "$EXISTING_SETUP"
+    detail_line "VERIFY LOG" "$VERIFY_LOG"
+
     echo ""
     echo -e "${YW}Docker group membership usually requires logout/login or reboot before using Docker without sudo.${CL}"
     echo ""
@@ -1382,33 +1469,29 @@ function show_final_summary() {
 }
 
 # --- 46. REBOOT OPTION ---
-# Offers reboot flow so Docker group membership applies cleanly.
-# LXC/container defaults to no because restart may be host-controlled.
+# Uses the same single-countdown reboot flow as script 1/script 4.
+# ENTER/Y = reboot now. SPACE/N = cancel. Timeout = reboot automatically.
 function reboot_prompt() {
-    local reboot_yn=""
-    local default_reboot="y"
-
     section "REBOOT"
 
     if [ "$IS_CONTAINER" == "yes" ]; then
-        default_reboot="n"
         echo -e "${YW}Container mode detected. Restart may be controlled from the Proxmox host.${CL}"
+        echo -e "${YW}Reboot skipped. Log out/in or restart the container from Proxmox if needed.${CL}"
+        return 0
     fi
 
-    reboot_yn="$(timed_yes_no "Reboot Ubuntu system now so Docker group membership applies?" "$default_reboot")"
+    echo -e "${YW}Docker group membership usually requires logout/login or reboot before using Docker without sudo.${CL}"
+    echo ""
 
-    if [[ "$reboot_yn" =~ ^[Yy] ]]; then
-        if timed_reboot_countdown "$REBOOT_T"; then
-            if [ -n "$SUDO_CMD" ]; then
-                "$SUDO_CMD" reboot
-            else
-                reboot
-            fi
+    if timed_reboot_countdown "$REBOOT_T"; then
+        if [ -n "$SUDO_CMD" ]; then
+            "$SUDO_CMD" reboot
+        else
+            reboot
         fi
-    else
-        msg_skip "REBOOT WAS NOT STARTED BECAUSE USER CHOSE NO"
-        echo -e "${YW}Log out and back in before using Docker without sudo.${CL}"
     fi
+
+    return 0
 }
 
 # =========================================================
