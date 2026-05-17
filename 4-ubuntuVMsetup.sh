@@ -530,54 +530,26 @@ function timed_text_input() {
 function hidden_input() {
     local prompt="$1"
     local answer=""
-    local key=""
-    local old_stty=""
 
-    # Do NOT call flush_input_buffer here.
-    # Tokens are commonly pasted immediately after this prompt appears, and flushing here can consume the paste.
-    # This masked reader gives visible feedback with asterisks while keeping the real token out of stdout/log files.
-    tty_println "${YW}${prompt}${CL}"
-    tty_print "${YW}Paste/type the token, then press ENTER. Input will show as * characters: ${CL}"
+    # Reliability decision:
+    # Do not use stty -echo or character-by-character masked input here.
+    # Some SSH/TTY/process-substitution combinations made hidden/masked input look frozen.
+    # This reads a normal pasted line directly from /dev/tty, then immediately clears that line.
+    # The token is not printed by the script, not stored in logs, not stored in the marker, and is unset after use.
+    tty_print "${YW}${prompt}${CL}\n"
+    tty_print "${YW}Paste/type the token, then press ENTER. It will be cleared from this line immediately after ENTER: ${CL}"
 
     if [ -r /dev/tty ]; then
-        old_stty="$(stty -g < /dev/tty 2>/dev/null || true)"
-        stty -echo < /dev/tty 2>/dev/null || true
-
-        while IFS= read -rsn1 key < /dev/tty; do
-            case "$key" in
-                "")
-                    break
-                    ;;
-                $'\177'|$'\b')
-                    if [ -n "$answer" ]; then
-                        answer="${answer%?}"
-                        tty_print "\b \b"
-                    fi
-                    ;;
-                *)
-                    answer+="$key"
-                    tty_print "*"
-                    ;;
-            esac
-        done
-
-        if [ -n "$old_stty" ]; then
-            stty "$old_stty" < /dev/tty 2>/dev/null || true
-        else
-            stty echo < /dev/tty 2>/dev/null || true
-        fi
+        IFS= read -r answer < /dev/tty || answer=""
     else
-        # Last-resort fallback. This is intentionally hidden but has no masking because there is no direct TTY.
-        if IFS= read -rs answer; then
-            :
-        else
-            answer=""
-        fi
+        IFS= read -r answer || answer=""
     fi
 
-    tty_println ""
+    # Clear the token line from the visible terminal as soon as input is accepted.
+    tty_print "${BFR}"
+    tty_println "${CM} ${GN}UBUNTU PRO TOKEN INPUT ACCEPTED${CL}"
 
-    echo "$answer"
+    printf '%s' "$answer"
 }
 
 # --- 20. REBOOT COUNTDOWN HELPER ---
