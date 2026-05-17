@@ -1271,28 +1271,28 @@ EOF
 }
 
 # --- 44. SSH SECURITY ---
-# Disables SSH password-style authentication only after confirming root SSH keys exist.
-# This intentionally does NOT modify:
+# Performs a non-invasive SSH safety audit only.
+#
+# Root cause from fresh testing:
+# SSH worked before script 1 and failed after every version that modified root SSH policy,
+# AuthorizedKeysFile handling, PermitRootLogin, or root key permissions. Therefore script 1 must not
+# touch SSH authentication policy during the base Proxmox post-install stage.
+#
+# This function intentionally does NOT modify:
+# - /etc/ssh/sshd_config
+# - /etc/ssh/sshd_config.d/*
 # - AuthorizedKeysFile
 # - PermitRootLogin
-# - root authorized_keys ownership
-# - root authorized_keys permissions
+# - PasswordAuthentication
+# - /root/.ssh permissions
+# - /root/.ssh/authorized_keys permissions/ownership
+# - ssh/sshd service state
 #
-# Root cause from testing:
-# Root SSH worked before the script and failed after hardening. Therefore the safest production
-# approach is to preserve the already-working root public-key login path exactly as installed,
-# while disabling password and keyboard-interactive SSH authentication globally.
+# Security hardening for SSH can be revisited later as a separate, dedicated, testable script once
+# the full build chain is stable. The priority here is zero SSH lockout risk on fresh Proxmox tests.
 function apply_ssh_security() {
-    local root_home="/root"
-    local dropin_dir="/etc/ssh/sshd_config.d"
-    local dropin_file="/etc/ssh/sshd_config.d/00-pve9-disable-password-auth.conf"
-    local old_root_policy_00="/etc/ssh/sshd_config.d/00-pve9-root-key-login.conf"
-    local old_root_policy_99="/etc/ssh/sshd_config.d/99-pve9-root-key-login.conf"
-    local effective_authorized_keys=""
-    local key_spec=""
-    local candidate=""
-    local root_key_file=""
     local effective_config=""
+    local effective_authorized_keys=""
     local effective_permit_root=""
     local effective_password_auth=""
     local effective_pubkey_auth=""
@@ -1300,124 +1300,38 @@ function apply_ssh_security() {
 
     section "SSH SECURITY"
 
-    msg_info "Detecting existing root SSH key login path"
+    msg_info "Auditing SSH configuration without modifying it"
 
-    effective_authorized_keys="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) print $i}')"
-
-    while read -r key_spec; do
-        [ -z "$key_spec" ] && continue
-
-        candidate="$key_spec"
-        candidate="${candidate//%h/$root_home}"
-        candidate="${candidate//%u/root}"
-        candidate="${candidate//%U/0}"
-
-        if [[ "$candidate" != /* ]]; then
-            candidate="${root_home}/${candidate}"
-        fi
-
-        if [ -s "$candidate" ] && grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-)' "$candidate"; then
-            root_key_file="$candidate"
-            break
-        fi
-    done <<< "$effective_authorized_keys"
-
-    if [ -z "$root_key_file" ]; then
-        for candidate in \
-            "/root/.ssh/authorized_keys" \
-            "/root/.ssh/authorized_keys2" \
-            "/etc/ssh/authorized_keys/root" \
-            "/etc/ssh/authorized_keys.d/root"
-        do
-            if [ -s "$candidate" ] && grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-)' "$candidate"; then
-                root_key_file="$candidate"
-                break
-            fi
-        done
-    fi
-
-    if [ -z "$root_key_file" ]; then
-        SSH_HARDENING_APPLIED="no"
-        msg_warn "Root SSH key file not found; SSH password login not disabled"
-        return 0
-    fi
-
-    msg_ok "ROOT SSH KEY LOGIN DETECTED"
-    echo -e "  ${DGN}${root_key_file}${CL}"
-
-    msg_info "Preserving existing root SSH key configuration"
-
-    # Important:
-    # Do not chmod/chown the key file.
-    # Do not set AuthorizedKeysFile.
-    # Do not set PermitRootLogin.
-    # The pre-script SSH state already worked, so we preserve it exactly.
-    msg_ok "ROOT SSH KEY CONFIGURATION PRESERVED"
-
-    msg_info "Writing SSH password-auth disable policy"
-
-    mkdir -p "$dropin_dir"
-
-    # Remove old experimental root-login hardening drop-ins if present.
-    # This prevents older test versions from continuing to affect SSH behavior.
-    rm -f "$old_root_policy_00" "$old_root_policy_99"
-
-    cat <<EOF > "$dropin_file"
-# Managed by PVE9 Post Install.
-# Preserves existing root public-key login behavior.
-# Disables password-style SSH authentication globally.
-PubkeyAuthentication yes
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
-EOF
-
-    msg_ok "SSH PASSWORD-AUTH DISABLE POLICY WRITTEN"
-
-    msg_info "Validating effective SSH configuration"
-
-    run_cmd "validating sshd config" sshd -t
+    run_cmd "validating current sshd config" sshd -t
 
     effective_config="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
-
+    effective_authorized_keys="$(awk '$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) printf "%s ", $i}' <<< "$effective_config" | xargs 2>/dev/null || true)"
     effective_permit_root="$(awk '$1=="permitrootlogin" {print $2; exit}' <<< "$effective_config")"
     effective_password_auth="$(awk '$1=="passwordauthentication" {print $2; exit}' <<< "$effective_config")"
     effective_pubkey_auth="$(awk '$1=="pubkeyauthentication" {print $2; exit}' <<< "$effective_config")"
     effective_kbd_auth="$(awk '$1=="kbdinteractiveauthentication" {print $2; exit}' <<< "$effective_config")"
 
-    if [ "$effective_permit_root" == "no" ]; then
-        msg_error "SSH validation failed: effective PermitRootLogin is no, which would block root SSH login"
+    SSH_ROOT_KEY_FILE="not-modified"
+    SSH_EFFECTIVE_AUTHORIZED_KEYS="${effective_authorized_keys:-unknown}"
+    SSH_EFFECTIVE_PERMIT_ROOT="${effective_permit_root:-unknown}"
+    SSH_EFFECTIVE_PASSWORD_AUTH="${effective_password_auth:-unknown}"
+    SSH_EFFECTIVE_PUBKEY_AUTH="${effective_pubkey_auth:-unknown}"
+    SSH_EFFECTIVE_KBD_AUTH="${effective_kbd_auth:-unknown}"
+    SSH_HARDENING_APPLIED="audit-only"
+
+    msg_ok "SSH CONFIG VALIDATED"
+    echo -e "  ${DGN}ROOT SSH CONFIG LEFT UNCHANGED${CL}"
+    echo -e "  ${DGN}SSH LOCKOUT RISK AVOIDED${CL}"
+
+    if [ "${effective_pubkey_auth:-unknown}" != "yes" ]; then
+        msg_warn "PubkeyAuthentication is not currently yes; root key login may depend on existing Proxmox defaults"
     fi
 
-    if [ "$effective_pubkey_auth" != "yes" ]; then
-        msg_error "SSH validation failed: effective PubkeyAuthentication is ${effective_pubkey_auth:-unknown}, expected yes"
+    if [ "${effective_permit_root:-unknown}" == "no" ]; then
+        msg_warn "Effective PermitRootLogin is no; root SSH login may already be disabled by existing config"
     fi
 
-    if [ "$effective_password_auth" != "no" ]; then
-        msg_error "SSH validation failed: effective PasswordAuthentication is ${effective_password_auth:-unknown}, expected no"
-    fi
-
-    if [ -n "$effective_kbd_auth" ] && [ "$effective_kbd_auth" != "no" ]; then
-        msg_error "SSH validation failed: effective KbdInteractiveAuthentication is ${effective_kbd_auth:-unknown}, expected no"
-    fi
-
-    msg_ok "EFFECTIVE SSH CONFIG VERIFIED"
-
-    msg_info "Restarting SSH service"
-
-    if systemctl list-unit-files ssh.service >/dev/null 2>&1; then
-        run_cmd "restarting ssh service" systemctl restart ssh.service
-    elif systemctl list-unit-files sshd.service >/dev/null 2>&1; then
-        run_cmd "restarting sshd service" systemctl restart sshd.service
-    else
-        msg_warn "SSH systemd service not found; SSH config written but service restart skipped"
-    fi
-
-    SSH_HARDENING_APPLIED="yes"
-
-    msg_ok "SSH SECURITY HARDENED"
-    echo -e "  ${DGN}ROOT SSH KEY LOGIN PRESERVED${CL}"
-    echo -e "  ${DGN}ROOT PASSWORD SSH LOGIN DISABLED${CL}"
+    msg_ok "SSH SECURITY AUDIT COMPLETE"
 }
 
 # --- 45. SYSCTL HARDENING & NETWORK TUNING ---
