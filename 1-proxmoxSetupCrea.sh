@@ -1255,14 +1255,19 @@ EOF
 }
 
 # --- 44. SSH SECURITY ---
-# Preserves root SSH key login while disabling root/password-based SSH login.
-# This is intentionally key-only hardening, not root-login blocking.
-# Proxmox administration commonly uses root SSH keys, so PermitRootLogin must be prohibit-password, not no.
+# Checks for root SSH keys and disables root password login only when keys are present.
+# Keeps root SSH key login working by using PermitRootLogin prohibit-password, not PermitRootLogin no.
+# Does not blindly chown authorized_keys because some installer-injected key files can reject ownership changes.
 function apply_ssh_security() {
+    local root_ssh_dir="/root/.ssh"
     local root_keys="/root/.ssh/authorized_keys"
-    local ssh_dropin_dir="/etc/ssh/sshd_config.d"
-    local ssh_dropin_file="${ssh_dropin_dir}/99-pve9-root-key-only.conf"
-    local ssh_file=""
+    local dropin_dir="/etc/ssh/sshd_config.d"
+    local dropin_file="/etc/ssh/sshd_config.d/99-pve9-root-key-login.conf"
+    local key_owner=""
+    local key_group=""
+    local effective_permit_root=""
+    local effective_password_auth=""
+    local effective_pubkey_auth=""
 
     section "SSH SECURITY"
 
@@ -1270,95 +1275,98 @@ function apply_ssh_security() {
 
     if [ ! -s "$root_keys" ]; then
         SSH_HARDENING_APPLIED="no"
-        msg_warn "SSH keys not found; root SSH password login not disabled"
+        msg_warn "SSH keys not found; root password login not disabled"
         return 0
     fi
 
     if ! grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-)' "$root_keys"; then
         SSH_HARDENING_APPLIED="no"
-        msg_warn "authorized_keys exists but no valid SSH public key lines were found; SSH hardening skipped"
+        msg_warn "authorized_keys exists but no valid SSH public key was detected; SSH hardening skipped"
         return 0
     fi
 
     msg_ok "ROOT SSH KEYS DETECTED"
 
-    msg_info "Fixing root SSH key ownership and permissions"
-    mkdir -p /root/.ssh
-    chown root:root /root /root/.ssh "$root_keys"
-    chmod go-w /root
-    chmod 700 /root/.ssh
+    msg_info "Fixing root SSH key permissions"
+
+    mkdir -p "$root_ssh_dir"
+
+    # Permissions are safe and normally required by OpenSSH StrictModes.
+    chmod 700 "$root_ssh_dir"
     chmod 600 "$root_keys"
+
+    # Do not blindly chown. Some installer-injected key files can return:
+    # chown: changing ownership of '/root/.ssh/authorized_keys': Operation not permitted
+    # Only try ownership correction if ownership is actually wrong.
+    key_owner="$(stat -c '%u' "$root_keys" 2>/dev/null || echo "unknown")"
+    key_group="$(stat -c '%g' "$root_keys" 2>/dev/null || echo "unknown")"
+
+    if [ "$key_owner" != "0" ] || [ "$key_group" != "0" ]; then
+        if chown root:root "$root_keys" 2>/dev/null; then
+            msg_ok "ROOT SSH KEY OWNERSHIP CORRECTED"
+        else
+            msg_warn "Root authorized_keys ownership could not be changed; continuing because key file exists and permissions are set"
+        fi
+    else
+        msg_ok "ROOT SSH KEY OWNERSHIP ALREADY CORRECT"
+    fi
+
     msg_ok "ROOT SSH KEY PERMISSIONS VERIFIED"
 
-    msg_info "Removing conflicting root SSH lockout directives"
+    msg_info "Writing root SSH key-only login policy"
 
-    for ssh_file in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
-        [ -f "$ssh_file" ] || continue
+    mkdir -p "$dropin_dir"
 
-        sed -i -E 's/^[#[:space:]]*PermitRootLogin[[:space:]]+no[[:space:]]*$/PermitRootLogin prohibit-password/' "$ssh_file"
-        sed -i -E 's/^[#[:space:]]*PubkeyAuthentication[[:space:]]+no[[:space:]]*$/PubkeyAuthentication yes/' "$ssh_file"
-        sed -i -E 's/^[#[:space:]]*AuthorizedKeysFile[[:space:]]+none[[:space:]]*$/AuthorizedKeysFile .ssh\/authorized_keys/' "$ssh_file"
-    done
-
-    msg_ok "CONFLICTING ROOT SSH LOCKOUT DIRECTIVES REMOVED"
-
-    msg_info "Writing Proxmox root key-only SSH hardening drop-in"
-    mkdir -p "$ssh_dropin_dir"
-
-    cat <<EOF > "$ssh_dropin_file"
-# PVE9 Post Install SSH hardening
-# Keep root SSH public-key login working.
-# Disable password and keyboard-interactive SSH authentication.
+    cat <<EOF > "$dropin_file"
+# Managed by PVE9 Post Install.
+# Allows root SSH login only with public keys.
+# Password and keyboard-interactive login are disabled.
 AddressFamily inet
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
+PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
-PermitRootLogin prohibit-password
 EOF
 
-    msg_ok "ROOT KEY-ONLY SSH DROP-IN WRITTEN"
-
-    msg_info "Synchronising main sshd_config with safe root key-only settings"
-    set_or_append_space_config /etc/ssh/sshd_config "AddressFamily" "inet"
-    set_or_append_space_config /etc/ssh/sshd_config "PubkeyAuthentication" "yes"
-    set_or_append_space_config /etc/ssh/sshd_config "AuthorizedKeysFile" ".ssh/authorized_keys"
-    set_or_append_space_config /etc/ssh/sshd_config "PasswordAuthentication" "no"
-    set_or_append_space_config /etc/ssh/sshd_config "KbdInteractiveAuthentication" "no"
-    set_or_append_space_config /etc/ssh/sshd_config "ChallengeResponseAuthentication" "no"
-    set_or_append_space_config /etc/ssh/sshd_config "PermitRootLogin" "prohibit-password"
-    msg_ok "MAIN SSHD CONFIG SYNCHRONISED"
+    msg_ok "ROOT SSH KEY-ONLY POLICY WRITTEN"
 
     msg_info "Validating effective SSH configuration"
+
     run_cmd "validating sshd config" sshd -t
 
-    if sshd -T 2>/dev/null | grep -q "^permitrootlogin no"; then
-        msg_error "Effective SSH config still blocks root login completely. Aborting before reboot to prevent lockout."
+    effective_permit_root="$(sshd -T 2>/dev/null | awk '$1=="permitrootlogin" {print $2; exit}')"
+    effective_password_auth="$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication" {print $2; exit}')"
+    effective_pubkey_auth="$(sshd -T 2>/dev/null | awk '$1=="pubkeyauthentication" {print $2; exit}')"
+
+    if [ "$effective_permit_root" != "prohibit-password" ] && [ "$effective_permit_root" != "without-password" ]; then
+        msg_error "SSH validation failed: effective PermitRootLogin is ${effective_permit_root:-unknown}, expected prohibit-password"
     fi
 
-    if ! sshd -T 2>/dev/null | grep -Eq "^permitrootlogin (prohibit-password|without-password)"; then
-        msg_error "Effective SSH config does not preserve root key login. Aborting before reboot to prevent lockout."
+    if [ "$effective_password_auth" != "no" ]; then
+        msg_error "SSH validation failed: effective PasswordAuthentication is ${effective_password_auth:-unknown}, expected no"
     fi
 
-    if ! sshd -T 2>/dev/null | grep -q "^pubkeyauthentication yes"; then
-        msg_error "Effective SSH config does not allow public-key authentication. Aborting before reboot to prevent lockout."
-    fi
-
-    if ! sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then
-        msg_error "Effective SSH config did not disable password authentication."
+    if [ "$effective_pubkey_auth" != "yes" ]; then
+        msg_error "SSH validation failed: effective PubkeyAuthentication is ${effective_pubkey_auth:-unknown}, expected yes"
     fi
 
     msg_ok "EFFECTIVE SSH CONFIG VERIFIED"
 
     msg_info "Restarting SSH service"
-    run_optional systemctl restart ssh.service
-    run_optional systemctl restart sshd.service
-    msg_ok "SSH SERVICE RESTARTED"
+
+    if systemctl list-unit-files ssh.service >/dev/null 2>&1; then
+        run_cmd "restarting ssh service" systemctl restart ssh.service
+    elif systemctl list-unit-files sshd.service >/dev/null 2>&1; then
+        run_cmd "restarting sshd service" systemctl restart sshd.service
+    else
+        msg_warn "SSH systemd service not found; SSH config written but service restart skipped"
+    fi
 
     SSH_HARDENING_APPLIED="yes"
 
-    msg_ok "ROOT SSH KEY LOGIN PRESERVED; PASSWORD LOGIN DISABLED"
+    msg_ok "ROOT PASSWORD SSH LOGIN DISABLED; ROOT SSH KEY LOGIN PRESERVED"
 }
 
 # --- 45. SYSCTL HARDENING & NETWORK TUNING ---
