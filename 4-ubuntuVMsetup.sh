@@ -532,21 +532,33 @@ function hidden_input() {
     local answer=""
     local old_stty=""
 
-    flush_input_buffer
-
-    tty_print "${YW}${prompt} (paste token, then press ENTER): ${CL}"
+    # Do NOT flush here.
+    # Ubuntu Pro tokens are commonly pasted immediately after the prompt appears.
+    # Flushing at this point can accidentally consume pasted token characters and make it look like typing/paste is broken.
+    tty_println "${YW}${prompt}${CL}"
+    tty_print "${YW}Input is hidden. Paste/type the token, then press ENTER: ${CL}"
 
     if [ -r /dev/tty ]; then
         old_stty="$(stty -g < /dev/tty 2>/dev/null || true)"
         stty -echo < /dev/tty 2>/dev/null || true
-        IFS= read -r answer < /dev/tty || true
+
+        if IFS= read -r answer < /dev/tty; then
+            :
+        else
+            answer=""
+        fi
+
         if [ -n "$old_stty" ]; then
             stty "$old_stty" < /dev/tty 2>/dev/null || true
         else
             stty echo < /dev/tty 2>/dev/null || true
         fi
     else
-        IFS= read -rs answer || true
+        if IFS= read -rs answer; then
+            :
+        else
+            answer=""
+        fi
     fi
 
     tty_println ""
@@ -999,7 +1011,13 @@ function handle_ubuntu_pro() {
         return 0
     fi
 
-    while true; do
+    if [ -n "${UBUNTU_PRO_TOKEN:-}" ]; then
+        PRO_TOKEN="$UBUNTU_PRO_TOKEN"
+        unset UBUNTU_PRO_TOKEN
+        msg_ok "UBUNTU PRO TOKEN RECEIVED FROM ENVIRONMENT"
+    fi
+
+    while [ -z "${PRO_TOKEN:-}" ]; do
         PRO_TOKEN="$(hidden_input "Enter Ubuntu Pro token")"
 
         if [ -n "$PRO_TOKEN" ]; then
