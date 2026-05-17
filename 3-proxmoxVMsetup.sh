@@ -1720,7 +1720,7 @@ EOF
 # --- 62. FINAL SUMMARY ---
 # Shows final VM configuration and the MAC address to reserve in the router.
 function show_final_summary() {
-    section_flash_success "FINISHED"
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
     echo -e "VM ID: ${GN}${VMID}${CL}"
     echo -e "VM NAME: ${GN}${VM_NAME}${CL}"

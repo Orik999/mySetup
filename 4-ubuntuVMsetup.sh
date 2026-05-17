@@ -100,6 +100,23 @@ function section() {
     echo -e "${BORDER}"
 }
 
+# --- 5A. FLASHING SUCCESS SECTION HEADER HELPER ---
+# Uses the same section layout as script 1, but renders final success headings in bold flashing green.
+function section_flash_success() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${GN}${CLF}$1${CL}"
+    echo -e "${BORDER}"
+}
+
+# --- 5B. DETAIL LINE HELPER ---
+# Prints clean script 1-style detail lines for summaries and audit output.
+function detail_line() {
+    local label="$1"
+    local value="$2"
+    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+}
+
 # --- 6. TTY PRINT HELPER ---
 # Prints directly to terminal even when functions return values through stdout.
 function tty_print() {
@@ -212,6 +229,44 @@ function root_cat_file() {
         "$SUDO_CMD" cat "$path"
     else
         cat "$path"
+    fi
+}
+
+# --- 13A. ROOT GREP HELPER ---
+# Runs grep against root-owned files safely when using sudo.
+function root_grep_quiet() {
+    local pattern="$1"
+    local path="$2"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" grep -Eq "$pattern" "$path"
+    else
+        grep -Eq "$pattern" "$path"
+    fi
+}
+
+# --- 13B. ROOT APPEND HELPER ---
+# Appends one line to a root-owned file without exposing sensitive data.
+function root_append_line() {
+    local path="$1"
+    local line="$2"
+
+    if [ -n "$SUDO_CMD" ]; then
+        printf '%s
+' "$line" | "$SUDO_CMD" tee -a "$path" >/dev/null
+    else
+        printf '%s
+' "$line" >> "$path"
+    fi
+}
+
+# --- 13C. ROOT SSHD EFFECTIVE CONFIG HELPER ---
+# Reads effective sshd config in a sudo-safe way for validation and verification.
+function get_effective_sshd_config() {
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" sshd -T -C user="${USERNAME:-root}",host=localhost,addr=127.0.0.1 2>/dev/null || true
+    else
+        sshd -T -C user="${USERNAME:-root}",host=localhost,addr=127.0.0.1 2>/dev/null || true
     fi
 }
 
@@ -522,14 +577,18 @@ function validate_dependencies() {
         cat
         chmod
         chown
+        cp
         date
         findmnt
         grep
         id
         mkdir
+        mktemp
         passwd
         readlink
+        reboot
         sed
+        sleep
         sshd
         systemctl
         tee
@@ -688,7 +747,12 @@ function start_confirmation() {
     echo ""
 
     start_yn="$(timed_yes_no "Start the Ubuntu VM Setup Script?" "y")"
-    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+
+    if [[ "$start_yn" =~ ^[Nn] ]]; then
+        exit 0
+    fi
+
+    return 0
 }
 
 # =========================================================
@@ -894,6 +958,7 @@ function handle_ubuntu_pro() {
     fi
 
     rm -f "$err_file"
+    unset PRO_TOKEN
     PRO_TOKEN=""
 }
 
@@ -1036,9 +1101,15 @@ function configure_ufw_firewall() {
 
 # --- 40. SSH HARDENING ---
 # Disables SSH password login and root login only if target user SSH keys exist.
-# This avoids lockout on systems where no authorized_keys are present.
+# This is safe in the Ubuntu guest because script 3.5 injects the user's SSH key first.
+# The function validates effective sshd settings before restarting SSH.
 function harden_ssh() {
     local ssh_config="/etc/ssh/sshd_config"
+    local effective_config=""
+    local effective_password_auth=""
+    local effective_pubkey_auth=""
+    local effective_permit_root=""
+    local effective_kbd_auth=""
 
     section "SSH HARDENING"
 
@@ -1054,25 +1125,82 @@ function harden_ssh() {
     run_cmd "setting authorized_keys permissions" chmod 600 "/home/${USERNAME}/.ssh/authorized_keys"
     msg_ok "SSH KEY PERMISSIONS VERIFIED"
 
-    msg_info "Hardening SSH configuration"
+    msg_info "Writing SSH key-only policy"
 
     run_optional sed -i -E 's/^[#[:space:]]*AddressFamily.*/AddressFamily inet/' "$ssh_config"
-    grep -q "^AddressFamily" "$ssh_config" || printf '%s\n' "AddressFamily inet" | $SUDO_CMD tee -a "$ssh_config" >/dev/null
+    if ! root_grep_quiet '^AddressFamily[[:space:]]+' "$ssh_config"; then
+        root_append_line "$ssh_config" "AddressFamily inet"
+    fi
+
+    run_optional sed -i -E 's/^[#[:space:]]*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$ssh_config"
+    if ! root_grep_quiet '^PubkeyAuthentication[[:space:]]+' "$ssh_config"; then
+        root_append_line "$ssh_config" "PubkeyAuthentication yes"
+    fi
 
     run_optional sed -i -E 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/' "$ssh_config"
-    grep -q "^PasswordAuthentication" "$ssh_config" || printf '%s\n' "PasswordAuthentication no" | $SUDO_CMD tee -a "$ssh_config" >/dev/null
+    if ! root_grep_quiet '^PasswordAuthentication[[:space:]]+' "$ssh_config"; then
+        root_append_line "$ssh_config" "PasswordAuthentication no"
+    fi
+
+    run_optional sed -i -E 's/^[#[:space:]]*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' "$ssh_config"
+    if ! root_grep_quiet '^KbdInteractiveAuthentication[[:space:]]+' "$ssh_config"; then
+        root_append_line "$ssh_config" "KbdInteractiveAuthentication no"
+    fi
+
+    run_optional sed -i -E 's/^[#[:space:]]*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$ssh_config"
+    if ! root_grep_quiet '^ChallengeResponseAuthentication[[:space:]]+' "$ssh_config"; then
+        root_append_line "$ssh_config" "ChallengeResponseAuthentication no"
+    fi
 
     run_optional sed -i -E 's/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin no/' "$ssh_config"
-    grep -q "^PermitRootLogin" "$ssh_config" || printf '%s\n' "PermitRootLogin no" | $SUDO_CMD tee -a "$ssh_config" >/dev/null
+    if ! root_grep_quiet '^PermitRootLogin[[:space:]]+' "$ssh_config"; then
+        root_append_line "$ssh_config" "PermitRootLogin no"
+    fi
 
+    msg_ok "SSH KEY-ONLY POLICY WRITTEN"
+
+    msg_info "Validating effective SSH configuration"
     run_cmd "validating sshd configuration" sshd -t
 
+    effective_config="$(get_effective_sshd_config)"
+    effective_password_auth="$(awk '$1=="passwordauthentication" {print $2; exit}' <<< "$effective_config")"
+    effective_pubkey_auth="$(awk '$1=="pubkeyauthentication" {print $2; exit}' <<< "$effective_config")"
+    effective_permit_root="$(awk '$1=="permitrootlogin" {print $2; exit}' <<< "$effective_config")"
+    effective_kbd_auth="$(awk '$1=="kbdinteractiveauthentication" {print $2; exit}' <<< "$effective_config")"
+
+    if [ "${effective_pubkey_auth:-unknown}" != "yes" ]; then
+        msg_error "SSH validation failed: PubkeyAuthentication is ${effective_pubkey_auth:-unknown}, expected yes"
+    fi
+
+    if [ "${effective_password_auth:-unknown}" != "no" ]; then
+        msg_error "SSH validation failed: PasswordAuthentication is ${effective_password_auth:-unknown}, expected no"
+    fi
+
+    case "${effective_permit_root:-unknown}" in
+        no|prohibit-password|without-password)
+            ;;
+        *)
+            msg_error "SSH validation failed: PermitRootLogin is ${effective_permit_root:-unknown}, expected no/prohibit-password/without-password"
+            ;;
+    esac
+
+    if [ -n "$effective_kbd_auth" ] && [ "$effective_kbd_auth" != "no" ]; then
+        msg_error "SSH validation failed: KbdInteractiveAuthentication is ${effective_kbd_auth}, expected no"
+    fi
+
+    msg_ok "EFFECTIVE SSH CONFIG VERIFIED"
+
+    msg_info "Restarting SSH service"
     run_optional systemctl restart ssh
     run_optional systemctl restart sshd
+    msg_ok "SSH SERVICE RESTARTED"
 
     SSH_HARDENING_APPLIED="yes"
 
-    msg_ok "SSH HARDENING APPLIED"
+    msg_ok "SSH SECURITY HARDENED"
+    echo -e "  ${DGN}${USERNAME} SSH KEY LOGIN PRESERVED${CL}"
+    echo -e "  ${DGN}SSH PASSWORD LOGIN DISABLED${CL}"
+    echo -e "  ${DGN}ROOT SSH LOGIN DISABLED${CL}"
 }
 
 # --- 41. SYSTEM CLEANUP ---
@@ -1178,23 +1306,32 @@ EOF
         if [ -s "/home/${USERNAME}/.ssh/authorized_keys" ]; then echo "✓ PASS - SSH authorized_keys present"; else echo "! WARN - SSH authorized_keys missing"; fi
         if sshd -t >/dev/null 2>&1; then echo "✓ PASS - sshd configuration valid"; else echo "✗ FAIL - sshd configuration invalid"; fi
 
+        effective_config="$(get_effective_sshd_config)"
+
         if [ "$SSH_HARDENING_APPLIED" == "yes" ]; then
-            if sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then echo "✓ PASS - SSH password authentication disabled"; else echo "✗ FAIL - SSH password authentication still enabled"; fi
-            if sshd -T 2>/dev/null | grep -Eq "^permitrootlogin (no|prohibit-password|without-password)"; then echo "✓ PASS - Root SSH login disabled or passwordless-only"; else echo "! WARN - Root SSH login not confirmed secure"; fi
+            if grep -q "^passwordauthentication no" <<< "$effective_config"; then echo "✓ PASS - SSH password authentication disabled"; else echo "✗ FAIL - SSH password authentication still enabled"; fi
+            if grep -q "^pubkeyauthentication yes" <<< "$effective_config"; then echo "✓ PASS - SSH public key authentication enabled"; else echo "✗ FAIL - SSH public key authentication not confirmed"; fi
+            if grep -Eq "^permitrootlogin (no|prohibit-password|without-password)" <<< "$effective_config"; then echo "✓ PASS - Root SSH login disabled or passwordless-only"; else echo "! WARN - Root SSH login not confirmed secure"; fi
+            if grep -q "^kbdinteractiveauthentication no" <<< "$effective_config"; then echo "✓ PASS - SSH keyboard-interactive auth disabled"; else echo "! WARN - SSH keyboard-interactive auth not confirmed disabled"; fi
         else
             echo "! WARN - SSH hardening was not applied"
         fi
+
+        if [ -f "/etc/sudoers.d/90-${USERNAME}-nopasswd" ]; then echo "✓ PASS - NOPASSWD sudo rule present"; else echo "! INFO - NOPASSWD sudo rule not present; sudo group membership is being used"; fi
+        if command -v ip >/dev/null 2>&1 && ip -4 addr show | grep -q "inet "; then echo "✓ PASS - IPv4 address detected"; else echo "! WARN - IPv4 address not detected"; fi
 
         if [ "$IS_CONTAINER" == "yes" ]; then
             echo "! INFO - QEMU Guest Agent skipped for container"
             echo "! INFO - Root LVM expansion skipped for container"
         else
+            if systemctl is-enabled --quiet qemu-guest-agent 2>/dev/null; then echo "✓ PASS - QEMU guest agent enabled"; else echo "! WARN - QEMU guest agent not enabled"; fi
             if systemctl is-active --quiet qemu-guest-agent 2>/dev/null; then echo "✓ PASS - QEMU guest agent active"; else echo "! WARN - QEMU guest agent not active"; fi
             df -h / 2>/dev/null || true
         fi
 
         if [ "$UFW_ENABLED" == "yes" ]; then
             if ufw status 2>/dev/null | grep -qi "Status: active"; then echo "✓ PASS - UFW active"; else echo "! WARN - UFW expected active but not confirmed"; fi
+            ufw status numbered 2>/dev/null || true
         else
             echo "! INFO - UFW state: $UFW_ENABLED"
         fi
@@ -1212,22 +1349,29 @@ EOF
 }
 
 # --- 44. FINAL SUMMARY ---
-# Displays clean final setup summary and next step.
+# Displays clean final setup summary and next step using script 1-style output.
 function show_final_summary() {
-    section "UBUNTU VM SETUP SUMMARY"
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
-    echo -e "USERNAME:             ${GN}${USERNAME}${CL}"
-    echo -e "USER CREATED:         ${GN}${SUDO_USER_CREATED}${CL}"
-    echo -e "USER ADDED TO SUDO:   ${GN}${USER_ADDED_TO_SUDO}${CL}"
-    echo -e "PASSWORD LOCKED:      ${GN}${USER_PASSWORD_LOCKED}${CL}"
-    echo -e "ENVIRONMENT:          ${GN}$([ "$IS_CONTAINER" == "yes" ] && echo "LXC/Container (${VIRT_TYPE})" || echo "VM (${VIRT_TYPE})")${CL}"
-    echo -e "UBUNTU PRO ATTACHED:  ${GN}${UBUNTU_PRO_ATTACHED}${CL}"
-    echo -e "QEMU GUEST AGENT:     ${GN}${QEMU_AGENT_INSTALLED}${CL}"
-    echo -e "ROOT EXPANDED:        ${GN}${ROOT_EXPANDED}${CL}"
-    echo -e "UFW FIREWALL:         ${GN}${UFW_ENABLED}${CL}"
-    echo -e "SSH HARDENING:        ${GN}${SSH_HARDENING_APPLIED}${CL}"
-    echo -e "LOG FILE:             ${GN}${LOG_FILE}${CL}"
-    echo -e "VERIFY LOG:           ${GN}${VERIFY_LOG}${CL}"
+    detail_line "USERNAME" "$USERNAME"
+    detail_line "USER CREATED" "$SUDO_USER_CREATED"
+    detail_line "USER ADDED TO SUDO" "$USER_ADDED_TO_SUDO"
+    detail_line "PASSWORD LOCKED" "$USER_PASSWORD_LOCKED"
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        detail_line "ENVIRONMENT" "LXC/Container (${VIRT_TYPE})"
+    else
+        detail_line "ENVIRONMENT" "VM (${VIRT_TYPE})"
+    fi
+
+    detail_line "UBUNTU PRO ATTACHED" "$UBUNTU_PRO_ATTACHED"
+    detail_line "QEMU GUEST AGENT" "$QEMU_AGENT_INSTALLED"
+    detail_line "ROOT EXPANDED" "$ROOT_EXPANDED"
+    detail_line "UFW FIREWALL" "$UFW_ENABLED"
+    detail_line "SSH HARDENING" "$SSH_HARDENING_APPLIED"
+    detail_line "LOG FILE" "$LOG_FILE"
+    detail_line "VERIFY LOG" "$VERIFY_LOG"
+
     echo ""
     echo -e "${GN}Ubuntu setup completed successfully.${CL}"
     echo ""
