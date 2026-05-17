@@ -530,23 +530,36 @@ function timed_text_input() {
 function hidden_input() {
     local prompt="$1"
     local answer=""
+    local key=""
     local old_stty=""
 
-    # Do NOT flush here.
-    # Ubuntu Pro tokens are commonly pasted immediately after the prompt appears.
-    # Flushing at this point can accidentally consume pasted token characters and make it look like typing/paste is broken.
+    # Do NOT call flush_input_buffer here.
+    # Tokens are commonly pasted immediately after this prompt appears, and flushing here can consume the paste.
+    # This masked reader gives visible feedback with asterisks while keeping the real token out of stdout/log files.
     tty_println "${YW}${prompt}${CL}"
-    tty_print "${YW}Input is hidden. Paste/type the token, then press ENTER: ${CL}"
+    tty_print "${YW}Paste/type the token, then press ENTER. Input will show as * characters: ${CL}"
 
     if [ -r /dev/tty ]; then
         old_stty="$(stty -g < /dev/tty 2>/dev/null || true)"
         stty -echo < /dev/tty 2>/dev/null || true
 
-        if IFS= read -r answer < /dev/tty; then
-            :
-        else
-            answer=""
-        fi
+        while IFS= read -rsn1 key < /dev/tty; do
+            case "$key" in
+                "")
+                    break
+                    ;;
+                $'\177'|$'\b')
+                    if [ -n "$answer" ]; then
+                        answer="${answer%?}"
+                        tty_print "\b \b"
+                    fi
+                    ;;
+                *)
+                    answer+="$key"
+                    tty_print "*"
+                    ;;
+            esac
+        done
 
         if [ -n "$old_stty" ]; then
             stty "$old_stty" < /dev/tty 2>/dev/null || true
@@ -554,6 +567,7 @@ function hidden_input() {
             stty echo < /dev/tty 2>/dev/null || true
         fi
     else
+        # Last-resort fallback. This is intentionally hidden but has no masking because there is no direct TTY.
         if IFS= read -rs answer; then
             :
         else
