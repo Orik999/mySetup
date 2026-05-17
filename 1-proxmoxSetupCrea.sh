@@ -1271,23 +1271,28 @@ EOF
 }
 
 # --- 44. SSH SECURITY ---
-# Checks for an existing root SSH key file and disables root password login only when a usable key file is present.
-# Important: this preserves the server's existing AuthorizedKeysFile behavior instead of forcing .ssh/authorized_keys.
-# Some Proxmox/installer/key-injection workflows use a custom AuthorizedKeysFile path, and overriding it can break SSH login.
+# Disables SSH password-style authentication only after confirming root SSH keys exist.
+# This intentionally does NOT modify:
+# - AuthorizedKeysFile
+# - PermitRootLogin
+# - root authorized_keys ownership
+# - root authorized_keys permissions
+#
+# Root cause from testing:
+# Root SSH worked before the script and failed after hardening. Therefore the safest production
+# approach is to preserve the already-working root public-key login path exactly as installed,
+# while disabling password and keyboard-interactive SSH authentication globally.
 function apply_ssh_security() {
     local root_home="/root"
-    local root_ssh_dir="/root/.ssh"
-    local root_keys_default="/root/.ssh/authorized_keys"
     local dropin_dir="/etc/ssh/sshd_config.d"
-    local dropin_file="/etc/ssh/sshd_config.d/00-pve9-root-key-login.conf"
-    local old_dropin_file="/etc/ssh/sshd_config.d/99-pve9-root-key-login.conf"
-    local main_config="/etc/ssh/sshd_config"
+    local dropin_file="/etc/ssh/sshd_config.d/00-pve9-disable-password-auth.conf"
+    local old_root_policy_00="/etc/ssh/sshd_config.d/00-pve9-root-key-login.conf"
+    local old_root_policy_99="/etc/ssh/sshd_config.d/99-pve9-root-key-login.conf"
     local effective_authorized_keys=""
     local key_spec=""
     local candidate=""
     local root_key_file=""
-    local key_owner=""
-    local key_group=""
+    local effective_config=""
     local effective_permit_root=""
     local effective_password_auth=""
     local effective_pubkey_auth=""
@@ -1295,14 +1300,10 @@ function apply_ssh_security() {
 
     section "SSH SECURITY"
 
-    msg_info "Detecting root SSH authorized key file"
+    msg_info "Detecting existing root SSH key login path"
 
-    # Read the currently effective AuthorizedKeysFile setting before writing our hardening drop-in.
-    # We intentionally do not change this setting later, because changing it can break previously working key login.
     effective_authorized_keys="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) print $i}')"
-    SSH_EFFECTIVE_AUTHORIZED_KEYS="$(echo "$effective_authorized_keys" | xargs 2>/dev/null || true)"
 
-    # Test the server's current authorized key paths first, then common Proxmox/OpenSSH paths.
     while read -r key_spec; do
         [ -z "$key_spec" ] && continue
 
@@ -1311,7 +1312,6 @@ function apply_ssh_security() {
         candidate="${candidate//%u/root}"
         candidate="${candidate//%U/0}"
 
-        # Relative AuthorizedKeysFile entries are relative to the user's home directory.
         if [[ "$candidate" != /* ]]; then
             candidate="${root_home}/${candidate}"
         fi
@@ -1324,14 +1324,11 @@ function apply_ssh_security() {
 
     if [ -z "$root_key_file" ]; then
         for candidate in \
-            "$root_keys_default" \
+            "/root/.ssh/authorized_keys" \
             "/root/.ssh/authorized_keys2" \
             "/etc/ssh/authorized_keys/root" \
-            "/etc/ssh/authorized_keys.d/root" \
-            "/etc/ssh/authorized_keys/%u"
+            "/etc/ssh/authorized_keys.d/root"
         do
-            candidate="${candidate//%u/root}"
-
             if [ -s "$candidate" ] && grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-)' "$candidate"; then
                 root_key_file="$candidate"
                 break
@@ -1341,103 +1338,63 @@ function apply_ssh_security() {
 
     if [ -z "$root_key_file" ]; then
         SSH_HARDENING_APPLIED="no"
-        SSH_ROOT_KEY_FILE="not-detected"
-        msg_warn "Root SSH key file not found; root password login not disabled"
+        msg_warn "Root SSH key file not found; SSH password login not disabled"
         return 0
     fi
 
-    SSH_ROOT_KEY_FILE="$root_key_file"
-
-    msg_ok "ROOT SSH KEYS DETECTED"
-
-    msg_info "Preserving root SSH key login path"
-    msg_ok "ROOT SSH KEY FILE DETECTED"
+    msg_ok "ROOT SSH KEY LOGIN DETECTED"
     echo -e "  ${DGN}${root_key_file}${CL}"
 
-    msg_info "Fixing root SSH key permissions"
+    msg_info "Preserving existing root SSH key configuration"
 
-    # Only apply StrictModes-safe permissions to the standard /root/.ssh path when that path is used.
-    # Do not force ownership/path changes on custom Proxmox or installer-managed key locations.
-    if [[ "$root_key_file" == /root/.ssh/* ]]; then
-        mkdir -p "$root_ssh_dir"
+    # Important:
+    # Do not chmod/chown the key file.
+    # Do not set AuthorizedKeysFile.
+    # Do not set PermitRootLogin.
+    # The pre-script SSH state already worked, so we preserve it exactly.
+    msg_ok "ROOT SSH KEY CONFIGURATION PRESERVED"
 
-        if chmod 700 "$root_ssh_dir" 2>/dev/null; then
-            :
-        else
-            msg_warn "Could not chmod /root/.ssh; preserving existing permissions"
-        fi
-
-        if chmod 600 "$root_key_file" 2>/dev/null; then
-            :
-        else
-            msg_warn "Could not chmod root SSH key file; preserving existing permissions"
-        fi
-
-        key_owner="$(stat -c '%u' "$root_key_file" 2>/dev/null || echo "unknown")"
-        key_group="$(stat -c '%g' "$root_key_file" 2>/dev/null || echo "unknown")"
-
-        if [ "$key_owner" != "0" ] || [ "$key_group" != "0" ]; then
-            if chown root:root "$root_key_file" 2>/dev/null; then
-                msg_ok "ROOT SSH KEY OWNERSHIP CORRECTED"
-            else
-                msg_warn "Root SSH key ownership could not be changed; preserving existing key file ownership"
-            fi
-        else
-            msg_ok "ROOT SSH KEY OWNERSHIP ALREADY CORRECT"
-        fi
-    else
-        msg_ok "CUSTOM ROOT SSH KEY PATH PRESERVED"
-    fi
-
-    msg_ok "ROOT SSH KEY PERMISSIONS VERIFIED"
-
-    msg_info "Writing root SSH key-only login policy"
+    msg_info "Writing SSH password-auth disable policy"
 
     mkdir -p "$dropin_dir"
-    rm -f "$old_dropin_file"
 
-    # Comment conflicting global SSH directives in the main config so the drop-in becomes the effective policy.
-    # AuthorizedKeysFile is intentionally not touched.
-    sed -i -E 's/^[[:space:]]*(PermitRootLogin|PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication|PubkeyAuthentication)[[:space:]]+/# PVE9 preserved previous setting: &/' "$main_config" 2>/dev/null || true
+    # Remove old experimental root-login hardening drop-ins if present.
+    # This prevents older test versions from continuing to affect SSH behavior.
+    rm -f "$old_root_policy_00" "$old_root_policy_99"
 
     cat <<EOF > "$dropin_file"
 # Managed by PVE9 Post Install.
-# Keeps root SSH public-key login working while disabling root password login.
-# AuthorizedKeysFile is intentionally not set here so existing key-injection paths remain valid.
-AddressFamily inet
+# Preserves existing root public-key login behavior.
+# Disables password-style SSH authentication globally.
 PubkeyAuthentication yes
-PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 EOF
 
-    msg_ok "ROOT SSH KEY-ONLY POLICY WRITTEN"
+    msg_ok "SSH PASSWORD-AUTH DISABLE POLICY WRITTEN"
 
     msg_info "Validating effective SSH configuration"
 
     run_cmd "validating sshd config" sshd -t
 
-    effective_permit_root="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="permitrootlogin" {print $2; exit}')"
-    effective_password_auth="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="passwordauthentication" {print $2; exit}')"
-    effective_pubkey_auth="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="pubkeyauthentication" {print $2; exit}')"
-    effective_kbd_auth="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="kbdinteractiveauthentication" {print $2; exit}')"
+    effective_config="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
 
-    SSH_EFFECTIVE_PERMIT_ROOT="$effective_permit_root"
-    SSH_EFFECTIVE_PASSWORD_AUTH="$effective_password_auth"
-    SSH_EFFECTIVE_PUBKEY_AUTH="$effective_pubkey_auth"
-    SSH_EFFECTIVE_KBD_AUTH="$effective_kbd_auth"
+    effective_permit_root="$(awk '$1=="permitrootlogin" {print $2; exit}' <<< "$effective_config")"
+    effective_password_auth="$(awk '$1=="passwordauthentication" {print $2; exit}' <<< "$effective_config")"
+    effective_pubkey_auth="$(awk '$1=="pubkeyauthentication" {print $2; exit}' <<< "$effective_config")"
+    effective_kbd_auth="$(awk '$1=="kbdinteractiveauthentication" {print $2; exit}' <<< "$effective_config")"
 
-    if [ "$effective_permit_root" != "prohibit-password" ] && [ "$effective_permit_root" != "without-password" ]; then
-        msg_error "SSH validation failed: effective PermitRootLogin is ${effective_permit_root:-unknown}, expected prohibit-password"
-    fi
-
-    if [ "$effective_password_auth" != "no" ]; then
-        msg_error "SSH validation failed: effective PasswordAuthentication is ${effective_password_auth:-unknown}, expected no"
+    if [ "$effective_permit_root" == "no" ]; then
+        msg_error "SSH validation failed: effective PermitRootLogin is no, which would block root SSH login"
     fi
 
     if [ "$effective_pubkey_auth" != "yes" ]; then
         msg_error "SSH validation failed: effective PubkeyAuthentication is ${effective_pubkey_auth:-unknown}, expected yes"
+    fi
+
+    if [ "$effective_password_auth" != "no" ]; then
+        msg_error "SSH validation failed: effective PasswordAuthentication is ${effective_password_auth:-unknown}, expected no"
     fi
 
     if [ -n "$effective_kbd_auth" ] && [ "$effective_kbd_auth" != "no" ]; then
