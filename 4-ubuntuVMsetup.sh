@@ -137,6 +137,23 @@ function tty_println() {
     fi
 }
 
+# --- 7A. INPUT BUFFER FLUSH HELPER ---
+# Clears leftover keystrokes/newlines from single-key prompts.
+# This prevents y+ENTER from leaking the ENTER into the next prompt.
+function flush_input_buffer() {
+    local junk=""
+
+    if [ -r /dev/tty ]; then
+        while IFS= read -rsn1 -t 0.05 junk < /dev/tty; do
+            :
+        done
+    else
+        while IFS= read -rsn1 -t 0.05 junk; do
+            :
+        done
+    fi
+}
+
 # =========================================================
 #  CLEANUP / ERROR HANDLING
 # =========================================================
@@ -290,6 +307,8 @@ function yes_no_label() {
 # SPACE pauses countdown and waits for Y/N/ENTER.
 # Display style matches Proxmox VM Setup: no "timer stopped" wording.
 function tty_read_yes_no_blocking() {
+    flush_input_buffer
+
     local prompt="$1"
     local default="$2"
     local default_label="Y/n"
@@ -309,10 +328,12 @@ function tty_read_yes_no_blocking() {
         fi
 
         if [[ -z "$key" ]]; then
+            flush_input_buffer
             tty_print "${BFR}"
             echo "$default"
             return 0
         elif [[ "$key" =~ ^[YyNn]$ ]]; then
+            flush_input_buffer
             tty_print "${BFR}"
             echo "$key"
             return 0
@@ -326,6 +347,8 @@ function tty_read_yes_no_blocking() {
 # Timeout accepts default.
 # Final answer stays visible.
 function timed_yes_no() {
+    flush_input_buffer
+
     local prompt="$1"
     local default="$2"
     local answer=""
@@ -357,12 +380,15 @@ function timed_yes_no() {
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 if [[ "$key" == " " ]]; then
                     answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    flush_input_buffer
                     break
                 elif [[ "$key" =~ ^[YyNn]$ ]]; then
                     answer="$key"
+                    flush_input_buffer
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 fi
             fi
@@ -370,12 +396,15 @@ function timed_yes_no() {
             if IFS= read -rsn1 -t 1 key; then
                 if [[ "$key" == " " ]]; then
                     answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    flush_input_buffer
                     break
                 elif [[ "$key" =~ ^[YyNn]$ ]]; then
                     answer="$key"
+                    flush_input_buffer
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 fi
             fi
@@ -395,6 +424,8 @@ function timed_yes_no() {
 # Provides editable text input with backspace support.
 # SPACE starts this same editable mode with no extra wording.
 function editable_input_loop() {
+    flush_input_buffer
+
     local prompt="$1"
     local default="$2"
     local initial_value="${3:-}"
@@ -413,6 +444,7 @@ function editable_input_loop() {
         case "$key" in
             "")
                 [ -z "$answer" ] && answer="$default"
+                flush_input_buffer
                 tty_print "${BFR}"
                 echo "$answer"
                 return 0
@@ -432,6 +464,8 @@ function editable_input_loop() {
 # SPACE pauses countdown and opens editable mode.
 # Any typed character pauses countdown and starts editable mode with that character.
 function timed_text_input() {
+    flush_input_buffer
+
     local prompt="$1"
     local default="$2"
     local answer=""
@@ -457,12 +491,15 @@ function timed_text_input() {
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 if [[ "$key" == " " ]]; then
                     answer="$(editable_input_loop "$prompt" "$default" "")"
+                    flush_input_buffer
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 else
                     answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    flush_input_buffer
                     break
                 fi
             fi
@@ -470,12 +507,15 @@ function timed_text_input() {
             if IFS= read -rsn1 -t 1 key; then
                 if [[ "$key" == " " ]]; then
                     answer="$(editable_input_loop "$prompt" "$default" "")"
+                    flush_input_buffer
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 else
                     answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    flush_input_buffer
                     break
                 fi
             fi
@@ -494,6 +534,8 @@ function timed_text_input() {
 # Reads sensitive input from terminal without echoing it.
 # Used for Ubuntu Pro token so it does not appear on-screen or in logs.
 function hidden_input() {
+    flush_input_buffer
+
     local prompt="$1"
     local answer=""
 
@@ -505,6 +547,7 @@ function hidden_input() {
         IFS= read -rs answer || true
     fi
 
+    flush_input_buffer
     tty_println ""
 
     echo "$answer"
@@ -515,6 +558,8 @@ function hidden_input() {
 # SPACE stops the reboot.
 # Uses sudo reboot when the script is not running as root.
 function timed_reboot_countdown() {
+    flush_input_buffer
+
     local seconds="$1"
     local key=""
     local deadline=""
@@ -528,6 +573,7 @@ function timed_reboot_countdown() {
         remaining=$(( deadline - now ))
 
         if [ "$remaining" -le 0 ]; then
+            flush_input_buffer
             tty_print "${BFR}"
             return 0
         fi
@@ -537,6 +583,7 @@ function timed_reboot_countdown() {
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 if [[ "$key" == " " ]]; then
+                    flush_input_buffer
                     tty_println "${BFR}${YW}Reboot cancelled. Reboot manually with: sudo reboot${CL}"
                     return 1
                 fi
@@ -544,6 +591,7 @@ function timed_reboot_countdown() {
         else
             if IFS= read -rsn1 -t 1 key; then
                 if [[ "$key" == " " ]]; then
+                    flush_input_buffer
                     tty_println "${BFR}${YW}Reboot cancelled. Reboot manually with: sudo reboot${CL}"
                     return 1
                 fi
@@ -746,6 +794,8 @@ function detect_environment() {
 # --- 29. START CONFIRMATION ---
 # Starts Ubuntu setup after environment detection.
 function start_confirmation() {
+    local start_yn=""
+
     echo ""
     echo -e "${YW}This script will configure Ubuntu for Docker workloads.${CL}"
 
