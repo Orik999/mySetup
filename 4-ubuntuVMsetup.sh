@@ -30,6 +30,7 @@ T=15
 REBOOT_T=30
 
 LOG_FILE="/var/log/ubuntu-vm-setup.log"
+RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/ubuntu-vm-setup-verify.log"
 COMPLETED_MARKER="/root/.ubuntu-vm-setup-completed"
 
@@ -138,20 +139,23 @@ function tty_println() {
 }
 
 # --- 7A. INPUT BUFFER FLUSH HELPER ---
-# Clears leftover keystrokes/newlines from single-key prompts.
-# This prevents y+ENTER from leaking the ENTER into the next prompt.
+# Clears only a small bounded amount of already-buffered terminal input.
+# Important: this never reads from stdin, because streamed scripts use stdin for the script body.
 function flush_input_buffer() {
     local junk=""
+    local i=""
 
-    if [ -r /dev/tty ]; then
-        while IFS= read -rsn1 -t 0.05 junk < /dev/tty; do
-            :
-        done
-    else
-        while IFS= read -rsn1 -t 0.05 junk; do
-            :
-        done
+    if [ ! -r /dev/tty ]; then
+        return 0
     fi
+
+    for i in {1..20}; do
+        if ! IFS= read -rsn1 -t 0.02 junk < /dev/tty; then
+            break
+        fi
+    done
+
+    return 0
 }
 
 # =========================================================
@@ -162,6 +166,14 @@ function flush_input_buffer() {
 # Removes temporary files created by run_cmd.
 function cleanup() {
     local exit_code="$?"
+    local file=""
+
+    # When running as a non-root user, logging is written to a temporary user-writable file first.
+    # Copy it to /var/log at exit using passwordless sudo, then remove the temporary copy.
+    if [ -n "${SUDO_CMD:-}" ] && [ -n "${RUNTIME_LOG_FILE:-}" ] && [ -s "$RUNTIME_LOG_FILE" ]; then
+        "$SUDO_CMD" cp "$RUNTIME_LOG_FILE" "$LOG_FILE" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$LOG_FILE" 2>/dev/null || true
+    fi
 
     for file in "${TEMP_FILES[@]:-}"; do
         [ -n "$file" ] && [ -f "$file" ] && rm -f "$file" 2>/dev/null || true
@@ -307,8 +319,6 @@ function yes_no_label() {
 # SPACE pauses countdown and waits for Y/N/ENTER.
 # Display style matches Proxmox VM Setup: no "timer stopped" wording.
 function tty_read_yes_no_blocking() {
-    flush_input_buffer
-
     local prompt="$1"
     local default="$2"
     local default_label="Y/n"
@@ -328,7 +338,6 @@ function tty_read_yes_no_blocking() {
         fi
 
         if [[ -z "$key" ]]; then
-            flush_input_buffer
             tty_print "${BFR}"
             echo "$default"
             return 0
@@ -347,8 +356,6 @@ function tty_read_yes_no_blocking() {
 # Timeout accepts default.
 # Final answer stays visible.
 function timed_yes_no() {
-    flush_input_buffer
-
     local prompt="$1"
     local default="$2"
     local answer=""
@@ -388,7 +395,6 @@ function timed_yes_no() {
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
-                    flush_input_buffer
                     break
                 fi
             fi
@@ -404,7 +410,6 @@ function timed_yes_no() {
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
-                    flush_input_buffer
                     break
                 fi
             fi
@@ -424,8 +429,6 @@ function timed_yes_no() {
 # Provides editable text input with backspace support.
 # SPACE starts this same editable mode with no extra wording.
 function editable_input_loop() {
-    flush_input_buffer
-
     local prompt="$1"
     local default="$2"
     local initial_value="${3:-}"
@@ -444,7 +447,6 @@ function editable_input_loop() {
         case "$key" in
             "")
                 [ -z "$answer" ] && answer="$default"
-                flush_input_buffer
                 tty_print "${BFR}"
                 echo "$answer"
                 return 0
@@ -464,8 +466,6 @@ function editable_input_loop() {
 # SPACE pauses countdown and opens editable mode.
 # Any typed character pauses countdown and starts editable mode with that character.
 function timed_text_input() {
-    flush_input_buffer
-
     local prompt="$1"
     local default="$2"
     local answer=""
@@ -491,15 +491,12 @@ function timed_text_input() {
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 if [[ "$key" == " " ]]; then
                     answer="$(editable_input_loop "$prompt" "$default" "")"
-                    flush_input_buffer
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
-                    flush_input_buffer
                     break
                 else
                     answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    flush_input_buffer
                     break
                 fi
             fi
@@ -507,15 +504,12 @@ function timed_text_input() {
             if IFS= read -rsn1 -t 1 key; then
                 if [[ "$key" == " " ]]; then
                     answer="$(editable_input_loop "$prompt" "$default" "")"
-                    flush_input_buffer
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
-                    flush_input_buffer
                     break
                 else
                     answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    flush_input_buffer
                     break
                 fi
             fi
@@ -534,8 +528,6 @@ function timed_text_input() {
 # Reads sensitive input from terminal without echoing it.
 # Used for Ubuntu Pro token so it does not appear on-screen or in logs.
 function hidden_input() {
-    flush_input_buffer
-
     local prompt="$1"
     local answer=""
 
@@ -547,7 +539,6 @@ function hidden_input() {
         IFS= read -rs answer || true
     fi
 
-    flush_input_buffer
     tty_println ""
 
     echo "$answer"
@@ -558,44 +549,58 @@ function hidden_input() {
 # SPACE stops the reboot.
 # Uses sudo reboot when the script is not running as root.
 function timed_reboot_countdown() {
-    flush_input_buffer
-
     local seconds="$1"
     local key=""
     local deadline=""
     local now=""
     local remaining=""
+    local first_draw="yes"
 
     deadline=$(( $(date +%s) + seconds ))
+
+    echo ""
 
     while true; do
         now=$(date +%s)
         remaining=$(( deadline - now ))
 
         if [ "$remaining" -le 0 ]; then
-            flush_input_buffer
-            tty_print "${BFR}"
+            if [ "$first_draw" == "no" ]; then
+                tty_print "[2A[2K[1B[2K[1A"
+            fi
+            tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
             return 0
         fi
 
-        tty_print "${BFR}${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL} ${YW}(press SPACE to stop)${CL}"
+        if [ "$first_draw" == "yes" ]; then
+            first_draw="no"
+        else
+            tty_print "[2A[2K[1B[2K[1A"
+        fi
+
+        tty_print "${BL}${CLF}REBOOTING IN ${remaining} SECONDS...${CL}
+${YW}(ENTER/Y = Reboot Now, SPACE/N = Cancel)${CL}
+"
 
         if [ -r /dev/tty ]; then
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    flush_input_buffer
-                    tty_println "${BFR}${YW}Reboot cancelled. Reboot manually with: sudo reboot${CL}"
-                    return 1
-                fi
+                case "$key" in
+                    ""|[Yy])
+                        flush_input_buffer
+                        tty_print "[2A[2K[1B[2K[1A"
+                        tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
+                        return 0
+                        ;;
+                    " "|[Nn])
+                        flush_input_buffer
+                        tty_print "[2A[2K[1B[2K[1A"
+                        tty_println "${YW}Reboot countdown stopped. Reboot manually with: sudo reboot${CL}"
+                        return 1
+                        ;;
+                esac
             fi
         else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    flush_input_buffer
-                    tty_println "${BFR}${YW}Reboot cancelled. Reboot manually with: sudo reboot${CL}"
-                    return 1
-                fi
-            fi
+            sleep 1
         fi
     done
 }
@@ -698,8 +703,14 @@ function validate_sudo_access() {
 # Starts logging after sudo validation so non-root users can still write to /var/log through sudo tee.
 function init_logging() {
     if [ -n "$SUDO_CMD" ]; then
-        exec > >("$SUDO_CMD" tee -a "$LOG_FILE") 2>&1
+        # Avoid piping all interactive output through sudo tee.
+        # Direct sudo tee can reorder /dev/tty prompts and make Enter appear inconsistent.
+        # We log to a temporary user-writable file, then copy it to /var/log during cleanup.
+        RUNTIME_LOG_FILE="$(mktemp /tmp/ubuntu-vm-setup-log.XXXXXX)"
+        TEMP_FILES+=("$RUNTIME_LOG_FILE")
+        exec > >(tee -a "$RUNTIME_LOG_FILE") 2>&1
     else
+        RUNTIME_LOG_FILE="$LOG_FILE"
         exec > >(tee -a "$LOG_FILE") 2>&1
     fi
 }
