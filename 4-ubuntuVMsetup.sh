@@ -395,6 +395,7 @@ function timed_yes_no() {
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 fi
             fi
@@ -410,6 +411,7 @@ function timed_yes_no() {
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 fi
             fi
@@ -494,6 +496,7 @@ function timed_text_input() {
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 else
                     answer="$(editable_input_loop "$prompt" "$default" "$key")"
@@ -507,6 +510,7 @@ function timed_text_input() {
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 else
                     answer="$(editable_input_loop "$prompt" "$default" "$key")"
@@ -524,20 +528,15 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- 19. HIDDEN INPUT HELPER ---
-# Reads sensitive input from terminal without echoing it.
-# Used for Ubuntu Pro token so it does not appear on-screen or in logs.
+# --- 19. SENSITIVE LINE INPUT HELPER ---
+# Reads one sensitive line directly from /dev/tty, then immediately clears that terminal line.
+# Used for Ubuntu Pro token. The token is not written by the script to stdout, logs, marker, or summary.
+# It may briefly appear on-screen while typing/pasting, then the full input line is cleared after ENTER.
 function hidden_input() {
     local prompt="$1"
     local answer=""
 
-    # Reliability decision:
-    # Do not use stty -echo or character-by-character masked input here.
-    # Some SSH/TTY/process-substitution combinations made hidden/masked input look frozen.
-    # This reads a normal pasted line directly from /dev/tty, then immediately clears that line.
-    # The token is not printed by the script, not stored in logs, not stored in the marker, and is unset after use.
-    tty_print "${YW}${prompt}${CL}\n"
-    tty_print "${YW}Paste/type the token, then press ENTER. It will be cleared from this line immediately after ENTER: ${CL}"
+    tty_print "${YW}${prompt}: ${CL}"
 
     if [ -r /dev/tty ]; then
         IFS= read -r answer < /dev/tty || answer=""
@@ -545,17 +544,17 @@ function hidden_input() {
         IFS= read -r answer || answer=""
     fi
 
-    # Clear the token line from the visible terminal as soon as input is accepted.
+    # Clear the prompt + token from the current visible terminal line before anything else is printed.
     tty_print "${BFR}"
-    tty_println "${CM} ${GN}UBUNTU PRO TOKEN INPUT ACCEPTED${CL}"
 
     printf '%s' "$answer"
 }
 
 # --- 20. REBOOT COUNTDOWN HELPER ---
-# Shows a safe reboot countdown.
-# SPACE stops the reboot.
-# Uses sudo reboot when the script is not running as root.
+# Shows a two-line wall-clock reboot countdown without creating a new line every second.
+# ENTER/Y = reboot immediately.
+# SPACE/N = stop countdown and do not reboot.
+# Timeout = reboot automatically.
 function timed_reboot_countdown() {
     local seconds="$1"
     local key=""
@@ -564,7 +563,6 @@ function timed_reboot_countdown() {
     local remaining=""
     local first_draw="yes"
 
-    flush_input_buffer
     deadline=$(( $(date +%s) + seconds ))
 
     while true; do
@@ -575,7 +573,6 @@ function timed_reboot_countdown() {
             if [ "$first_draw" == "no" ]; then
                 tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
             fi
-            tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
             return 0
         fi
 
@@ -591,13 +588,11 @@ function timed_reboot_countdown() {
             if IFS= read -rsn1 -t 1 key < /dev/tty; then
                 case "$key" in
                     ""|[Yy])
-                        flush_input_buffer
                         tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
                         tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
                         return 0
                         ;;
                     " "|[Nn])
-                        flush_input_buffer
                         tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
                         tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
                         return 1
@@ -605,10 +600,24 @@ function timed_reboot_countdown() {
                 esac
             fi
         else
-            sleep 1
+            if IFS= read -rsn1 -t 1 key; then
+                case "$key" in
+                    ""|[Yy])
+                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                        tty_println "${BL}${CLF}REBOOTING NOW...${CL}"
+                        return 0
+                        ;;
+                    " "|[Nn])
+                        tty_print "\033[2A\033[2K\r\033[1B\033[2K\r\033[1A"
+                        tty_println "${YW}Reboot countdown stopped. Reboot manually when ready.${CL}"
+                        return 1
+                        ;;
+                esac
+            fi
         fi
     done
 }
+
 # =========================================================
 #  VALIDATION HELPERS
 # =========================================================
@@ -1516,7 +1525,6 @@ function reboot_prompt() {
     reboot_yn="$(timed_yes_no "Reboot Ubuntu system now?" "$default_reboot")"
 
     if [[ "$reboot_yn" =~ ^[Yy] ]]; then
-        echo ""
         if timed_reboot_countdown "$REBOOT_T"; then
             if [ -n "$SUDO_CMD" ]; then
                 "$SUDO_CMD" reboot
