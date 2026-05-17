@@ -29,6 +29,7 @@ BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━�
 T=15
 
 LOG_FILE="/var/log/docker-env-setup.log"
+RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/docker-env-setup-verify.log"
 COMPLETED_MARKER="/root/.docker-env-setup-completed"
 
@@ -114,6 +115,23 @@ function section() {
     echo -e "${BORDER}"
 }
 
+# --- 5A. FLASHING SUCCESS SECTION HEADER HELPER ---
+# Uses the script 1-style final success section with bold flashing green text.
+function section_flash_success() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${GN}${CLF}$1${CL}"
+    echo -e "${BORDER}"
+}
+
+# --- 5B. DETAIL LINE HELPER ---
+# Prints clean script 1-style detail lines for summaries and audit output.
+function detail_line() {
+    local label="$1"
+    local value="$2"
+    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+}
+
 # --- 6. TTY PRINT HELPER ---
 # Prints directly to terminal even when functions return values through stdout.
 function tty_print() {
@@ -134,6 +152,26 @@ function tty_println() {
     fi
 }
 
+# --- 7A. INPUT BUFFER FLUSH HELPER ---
+# Clears only a small bounded amount of already-buffered terminal input.
+# Important: this never reads from stdin, because streamed scripts may use stdin for the script body.
+function flush_input_buffer() {
+    local junk=""
+    local i=""
+
+    if [ ! -r /dev/tty ]; then
+        return 0
+    fi
+
+    for i in {1..20}; do
+        if ! IFS= read -rsn1 -t 0.02 junk < /dev/tty; then
+            break
+        fi
+    done
+
+    return 0
+}
+
 # =========================================================
 #  CLEANUP / ERROR HANDLING
 # =========================================================
@@ -142,6 +180,14 @@ function tty_println() {
 # Removes temporary files created during execution.
 function cleanup() {
     local exit_code="$?"
+    local file=""
+
+    # When running as a non-root user, logging is written to a temporary user-writable file first.
+    # Copy it to /var/log at exit using sudo, then remove the temporary copy.
+    if [ -n "${SUDO_CMD:-}" ] && [ -n "${RUNTIME_LOG_FILE:-}" ] && [ -s "$RUNTIME_LOG_FILE" ]; then
+        "$SUDO_CMD" cp "$RUNTIME_LOG_FILE" "$LOG_FILE" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$LOG_FILE" 2>/dev/null || true
+    fi
 
     for file in "${TEMP_FILES[@]:-}"; do
         [ -n "$file" ] && [ -f "$file" ] && rm -f "$file" 2>/dev/null || true
@@ -285,24 +331,41 @@ function detect_root_or_sudo() {
 # Validates sudo once near the start so authentication failures happen before changes.
 function validate_sudo_access() {
     if [ -n "$SUDO_CMD" ]; then
-        echo -e "${YW}Sudo privileges are required for Docker ENV Setup.${CL}"
+        msg_info "Validating sudo access"
 
-        if ! "$SUDO_CMD" -v; then
-            echo -e "${RD}ERROR:${CL} Sudo authentication failed."
-            exit 1
+        # First test the automation path created by script 3.5.
+        # The Ubuntu autoinstall user is intentionally SSH-key-only and may not have a password.
+        # sudo -n true confirms NOPASSWD sudo without ever prompting for a password.
+        if "$SUDO_CMD" -n true >/dev/null 2>&1; then
+            msg_ok "PASSWORDLESS SUDO CONFIRMED"
+            return 0
         fi
+
+        # Fallback for manually-created Ubuntu users that do have a normal sudo password.
+        if "$SUDO_CMD" -v; then
+            msg_ok "SUDO ACCESS CONFIRMED"
+            return 0
+        fi
+
+        msg_error "Sudo authentication failed. Script cancelled."
     fi
 }
 
 # --- 19. LOGGING INITIALIZATION ---
 # Starts tee logging while keeping original terminal descriptors available.
+# When not root, logging goes to a temporary user-writable file first and is copied to /var/log during cleanup.
 function init_logging() {
     exec 3>&1
     exec 4>&2
 
     if [ -n "$SUDO_CMD" ]; then
-        exec > >("$SUDO_CMD" tee -a "$LOG_FILE") 2>&1
+        # Avoid piping all interactive output through sudo tee.
+        # Direct sudo tee can reorder /dev/tty prompts and make Enter appear inconsistent.
+        RUNTIME_LOG_FILE="$(mktemp /tmp/docker-env-setup-log.XXXXXX)"
+        TEMP_FILES+=("$RUNTIME_LOG_FILE")
+        exec > >(tee -a "$RUNTIME_LOG_FILE") 2>&1
     else
+        RUNTIME_LOG_FILE="$LOG_FILE"
         exec > >(tee -a "$LOG_FILE") 2>&1
     fi
 
@@ -311,7 +374,7 @@ function init_logging() {
 
 # --- 20. DISABLE LOGGING HELPER ---
 # Sends output directly to the terminal, bypassing tee logging.
-# Used for hidden inputs and final secret display.
+# Used for sensitive inputs and final secret display.
 function disable_logging() {
     if [ -w /dev/tty ]; then
         exec > /dev/tty 2> /dev/tty
@@ -325,8 +388,8 @@ function disable_logging() {
 # --- 21. ENABLE LOGGING HELPER ---
 # Re-enables tee logging after sensitive terminal-only sections are complete.
 function enable_logging() {
-    if [ -n "$SUDO_CMD" ]; then
-        exec > >("$SUDO_CMD" tee -a "$LOG_FILE") 2>&1
+    if [ -n "$RUNTIME_LOG_FILE" ]; then
+        exec > >(tee -a "$RUNTIME_LOG_FILE") 2>&1
     else
         exec > >(tee -a "$LOG_FILE") 2>&1
     fi
@@ -375,6 +438,8 @@ function tty_read_yes_no_blocking() {
         default_label="y/N"
     fi
 
+    flush_input_buffer
+
     while true; do
         tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
 
@@ -387,10 +452,12 @@ function tty_read_yes_no_blocking() {
         if [[ -z "$key" ]]; then
             tty_print "${BFR}"
             echo "$default"
+            flush_input_buffer
             return 0
         elif [[ "$key" =~ ^[YyNn]$ ]]; then
             tty_print "${BFR}"
             echo "$key"
+            flush_input_buffer
             return 0
         fi
     done
@@ -416,6 +483,7 @@ function timed_yes_no() {
         default_label="y/N"
     fi
 
+    flush_input_buffer
     deadline=$(( $(date +%s) + T ))
 
     while true; do
@@ -436,9 +504,11 @@ function timed_yes_no() {
                     break
                 elif [[ "$key" =~ ^[YyNn]$ ]]; then
                     answer="$key"
+                    flush_input_buffer
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 fi
             fi
@@ -449,9 +519,11 @@ function timed_yes_no() {
                     break
                 elif [[ "$key" =~ ^[YyNn]$ ]]; then
                     answer="$key"
+                    flush_input_buffer
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 fi
             fi
@@ -463,6 +535,7 @@ function timed_yes_no() {
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    flush_input_buffer
 
     echo "$answer"
 }
@@ -475,6 +548,8 @@ function editable_input_loop() {
     local initial_value="${3:-}"
     local answer="$initial_value"
     local key=""
+
+    flush_input_buffer
 
     while true; do
         tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
@@ -490,6 +565,7 @@ function editable_input_loop() {
                 [ -z "$answer" ] && answer="$default"
                 tty_print "${BFR}"
                 echo "$answer"
+                flush_input_buffer
                 return 0
                 ;;
             $'\177'|$'\b')
@@ -515,6 +591,7 @@ function timed_text_input() {
     local now=""
     local remaining=""
 
+    flush_input_buffer
     deadline=$(( $(date +%s) + T ))
 
     while true; do
@@ -535,6 +612,7 @@ function timed_text_input() {
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 else
                     answer="$(editable_input_loop "$prompt" "$default" "$key")"
@@ -548,6 +626,7 @@ function timed_text_input() {
                     break
                 elif [[ -z "$key" ]]; then
                     answer="$default"
+                    flush_input_buffer
                     break
                 else
                     answer="$(editable_input_loop "$prompt" "$default" "$key")"
@@ -561,6 +640,7 @@ function timed_text_input() {
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    flush_input_buffer
 
     echo "$answer"
 }
@@ -583,6 +663,42 @@ function hidden_input() {
     tty_println ""
 
     echo "$answer"
+}
+
+# --- 28A. SENSITIVE LINE INPUT HELPER ---
+# Reads one sensitive pasted line directly from /dev/tty and clears the visible prompt/token line immediately after ENTER.
+# The value is returned through stdout for command substitution only; prompt/token text is printed only to /dev/tty.
+# Do not call flush_input_buffer here because it can consume pasted token characters.
+function sensitive_line_input() {
+    local prompt="$1"
+    local answer=""
+    local cols="80"
+    local visible_len="0"
+    local lines_to_clear="1"
+    local i=""
+
+    tty_print "${YW}${prompt}: ${CL}"
+
+    if [ -r /dev/tty ]; then
+        IFS= read -r answer < /dev/tty || answer=""
+    else
+        IFS= read -r answer || answer=""
+    fi
+
+    cols="$(tput cols 2>/dev/null || echo 80)"
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols="80"
+    [ "$cols" -lt 20 ] && cols="80"
+
+    visible_len=$(( ${#prompt} + 2 + ${#answer} ))
+    lines_to_clear=$(( (visible_len + cols - 1) / cols ))
+    [ "$lines_to_clear" -lt 1 ] && lines_to_clear="1"
+
+    for ((i=0; i<lines_to_clear; i++)); do
+        tty_print "[1A
+[2K"
+    done
+
+    printf '%s' "$answer"
 }
 
 # --- 29. SECRET SAVE CONFIRMATION HELPER ---
@@ -695,6 +811,7 @@ function validate_dependencies() {
         awk
         cat
         chmod
+        clear
         chown
         command
         cut
@@ -710,6 +827,7 @@ function validate_dependencies() {
         tee
         test
         touch
+        tput
         xargs
     )
 
@@ -809,6 +927,8 @@ function check_previous_marker() {
 # --- 42. START CONFIRMATION ---
 # Starts Docker ENV setup after showing a clear description.
 function start_confirmation() {
+    local start_yn=""
+
     section "START"
 
     echo -e "${YW}This script creates Docker folders, .env and service secrets for the Home-Hosted Social Media SaaS project.${CL}"
@@ -817,7 +937,12 @@ function start_confirmation() {
     echo ""
 
     start_yn="$(timed_yes_no "Start the Docker ENV Setup Script?" "y")"
-    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+
+    if [[ "$start_yn" =~ ^[Nn] ]]; then
+        exit 0
+    fi
+
+    return 0
 }
 
 # --- 43. DOCKER READINESS CHECK ---
@@ -846,8 +971,8 @@ function check_docker_readiness() {
     msg_ok "DOCKER READINESS CHECK COMPLETE"
 
     echo ""
-    echo -e "DOCKER CLI: ${GN}${DOCKER_READY}${CL}"
-    echo -e "DOCKER COMPOSE: ${GN}${DOCKER_COMPOSE_READY}${CL}"
+    detail_line "DOCKER CLI" "$DOCKER_READY"
+    detail_line "DOCKER COMPOSE" "$DOCKER_COMPOSE_READY"
 
     if [ "$DOCKER_READY" != "yes" ] || [ "$DOCKER_COMPOSE_READY" != "yes" ]; then
         msg_warn "Docker or Docker Compose was not detected. Script 5 should normally run before this script."
@@ -915,6 +1040,9 @@ function collect_user_and_path_inputs() {
 # --- 45. EXISTING SETUP DETECTION ---
 # Detects existing .env, secrets folder or marker to prevent accidental secret rotation.
 function detect_existing_setup() {
+    local continue_existing_yn=""
+    local regenerate_yn=""
+
     section "EXISTING SETUP CHECK"
 
     msg_info "Checking for existing Docker ENV setup"
@@ -993,8 +1121,10 @@ function collect_domain_cloudflare_inputs() {
     done
 
     disable_logging
-    CF_API_TOKEN_VALUE="$(hidden_input "Enter Cloudflare API Token, or leave empty")"
+    CF_API_TOKEN_VALUE="$(sensitive_line_input "Enter Cloudflare API Token, or leave empty")"
     enable_logging
+
+    CF_API_TOKEN_VALUE="$(printf '%s' "$CF_API_TOKEN_VALUE" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
     if [ -z "$CF_API_TOKEN_VALUE" ] && root_file_not_empty "$CF_API_TOKEN_FILE"; then
         CF_API_TOKEN_VALUE="$(root_read_file "$CF_API_TOKEN_FILE")"
@@ -1026,8 +1156,10 @@ function collect_htpasswd_inputs() {
 
     if [[ "$has_htpasswd_yn" =~ ^[Yy] ]]; then
         disable_logging
-        HTPASSWD_LINE_VALUE="$(hidden_input "Paste full htpasswd line username:hash")"
+        HTPASSWD_LINE_VALUE="$(sensitive_line_input "Paste full htpasswd line username:hash")"
         enable_logging
+
+        HTPASSWD_LINE_VALUE="$(printf '%s' "$HTPASSWD_LINE_VALUE" | tr -d '\r\n')"
 
         if [ -n "$HTPASSWD_LINE_VALUE" ]; then
             if validate_htpasswd_line "$HTPASSWD_LINE_VALUE"; then
@@ -1484,21 +1616,21 @@ function show_secrets_once_without_logging() {
 # --- 57. CLEAN FINAL SUMMARY ---
 # Prints non-sensitive final summary after secrets have been cleared from the terminal.
 function show_clean_final_summary() {
-    section "FINISHED"
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
-    echo -e "DOCKER DIR:                 ${GN}${DOCKER_DIR}${CL}"
-    echo -e ".ENV FILE:                  ${GN}${DOCKER_DIR}/.env${CL}"
-    echo -e "SECRETS DIR:                ${GN}${DOCKER_SECRETS_DIR}${CL}"
-    echo -e "POSTGRES INIT:              ${GN}${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh${CL}"
-    echo -e "CLOUDFLARE API TOKEN FILE:  ${GN}${CF_API_TOKEN_FILE}${CL}"
-    echo -e "HTPASSWD FILE:              ${GN}${DOCKER_SECRETS_DIR}/htpasswd${CL}"
-    echo -e "DOMAIN:                     ${GN}${DOMAIN_VALUE}${CL}"
-    echo -e "DOCKER USER:                ${GN}${DOCKER_USER}${CL}"
-    echo -e "PUID / PGID:                ${GN}${PUID_VALUE}:${PGID_VALUE}${CL}"
-    echo -e "EXISTING SETUP DETECTED:    ${GN}${EXISTING_SETUP}${CL}"
-    echo -e "SECRETS REGENERATED:        ${GN}${REGENERATE_SECRETS}${CL}"
-    echo -e "SECRET SCREEN CLEARED:      ${GN}${SECRET_SCREEN_CLEARED}${CL}"
-    echo -e "VERIFY LOG:                 ${GN}${VERIFY_LOG}${CL}"
+    detail_line "DOCKER DIR" "$DOCKER_DIR"
+    detail_line ".ENV FILE" "${DOCKER_DIR}/.env"
+    detail_line "SECRETS DIR" "$DOCKER_SECRETS_DIR"
+    detail_line "POSTGRES INIT" "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+    detail_line "CLOUDFLARE TOKEN FILE" "$CF_API_TOKEN_FILE"
+    detail_line "HTPASSWD FILE" "${DOCKER_SECRETS_DIR}/htpasswd"
+    detail_line "DOMAIN" "$DOMAIN_VALUE"
+    detail_line "DOCKER USER" "$DOCKER_USER"
+    detail_line "PUID / PGID" "${PUID_VALUE}:${PGID_VALUE}"
+    detail_line "EXISTING SETUP" "$EXISTING_SETUP"
+    detail_line "SECRETS REGENERATED" "$REGENERATE_SECRETS"
+    detail_line "SECRET SCREEN CLEARED" "$SECRET_SCREEN_CLEARED"
+    detail_line "VERIFY LOG" "$VERIFY_LOG"
     echo ""
     echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
     echo ""
@@ -1531,12 +1663,10 @@ function main() {
     write_env_file
     apply_permissions
 
-    create_verification_report
-    write_completion_marker
-
     show_secrets_once_without_logging
 
     write_completion_marker
+    create_verification_report
     show_clean_final_summary
 
     exit 0
