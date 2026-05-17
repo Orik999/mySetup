@@ -69,6 +69,12 @@ ENABLE_CROWDSEC="y"
 ALLOW_PUBLIC_WEB="n"
 
 SSH_HARDENING_APPLIED="no"
+SSH_ROOT_KEY_FILE=""
+SSH_EFFECTIVE_AUTHORIZED_KEYS=""
+SSH_EFFECTIVE_PERMIT_ROOT=""
+SSH_EFFECTIVE_PASSWORD_AUTH=""
+SSH_EFFECTIVE_PUBKEY_AUTH=""
+SSH_EFFECTIVE_KBD_AUTH=""
 PVE_FIREWALL_APPLIED="no"
 CROWDSEC_BOUNCER_PACKAGE="none"
 NUMLOCK_CONFIGURED="no"
@@ -171,6 +177,7 @@ function run_cmd() {
         echo ""
         echo -e "${RD}Real error:${CL}"
         cat "$err_file"
+        rm -f "$err_file"
         exit 1
     fi
 
@@ -671,14 +678,18 @@ function detect_realtek_iface() {
 # Validates critical commands early so failures happen before changes are made.
 function validate_dependencies() {
     local required_commands=(
+        apt-cache
+        apt-get
         awk
         basename
         cat
         chmod
         cp
+        curl
         cut
         date
         df
+        env
         findmnt
         grep
         hostname
@@ -696,7 +707,10 @@ function validate_dependencies() {
         rm
         sed
         sleep
+        sort
         sshd
+        stat
+        sysctl
         systemctl
         tee
         touch
@@ -951,6 +965,8 @@ function final_start_prompt() {
     echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
     echo -e "ROOT FS: ${GN}${ROOT_FS_TYPE:-unknown}${CL}"
     echo -e "STORAGE: ${GN}${STORAGE_SUMMARY:-unknown}${CL}"
+    echo -e "DEFAULT IFACE: ${GN}${DEFAULT_IFACE:-unknown}${CL}"
+    echo -e "LAN CIDR ALLOWED FOR SSH/WEBUI: ${GN}${LAN_CIDR:-not-detected}${CL}"
     echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_PASSTHROUGH}${CL}"
     echo -e "CPU PERFORMANCE: ${GN}${ENABLE_PERFORMANCE}${CL}"
     echo -e "CROWDSEC: ${GN}${ENABLE_CROWDSEC}${CL}"
@@ -1255,60 +1271,122 @@ EOF
 }
 
 # --- 44. SSH SECURITY ---
-# Checks for root SSH keys and disables root password login only when keys are present.
-# Keeps root SSH key login working by using PermitRootLogin prohibit-password, not PermitRootLogin no.
-# Does not blindly chown authorized_keys because some installer-injected key files can reject ownership changes.
+# Checks for an existing root SSH key file and disables root password login only when a usable key file is present.
+# Important: this preserves the server's existing AuthorizedKeysFile behavior instead of forcing .ssh/authorized_keys.
+# Some Proxmox/installer/key-injection workflows use a custom AuthorizedKeysFile path, and overriding it can break SSH login.
 function apply_ssh_security() {
+    local root_home="/root"
     local root_ssh_dir="/root/.ssh"
-    local root_keys="/root/.ssh/authorized_keys"
+    local root_keys_default="/root/.ssh/authorized_keys"
     local dropin_dir="/etc/ssh/sshd_config.d"
-    local dropin_file="/etc/ssh/sshd_config.d/99-pve9-root-key-login.conf"
+    local dropin_file="/etc/ssh/sshd_config.d/00-pve9-root-key-login.conf"
+    local old_dropin_file="/etc/ssh/sshd_config.d/99-pve9-root-key-login.conf"
+    local main_config="/etc/ssh/sshd_config"
+    local effective_authorized_keys=""
+    local key_spec=""
+    local candidate=""
+    local root_key_file=""
     local key_owner=""
     local key_group=""
     local effective_permit_root=""
     local effective_password_auth=""
     local effective_pubkey_auth=""
+    local effective_kbd_auth=""
 
     section "SSH SECURITY"
 
-    msg_info "Checking for root SSH authorized keys"
+    msg_info "Detecting root SSH authorized key file"
 
-    if [ ! -s "$root_keys" ]; then
+    # Read the currently effective AuthorizedKeysFile setting before writing our hardening drop-in.
+    # We intentionally do not change this setting later, because changing it can break previously working key login.
+    effective_authorized_keys="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) print $i}')"
+    SSH_EFFECTIVE_AUTHORIZED_KEYS="$(echo "$effective_authorized_keys" | xargs 2>/dev/null || true)"
+
+    # Test the server's current authorized key paths first, then common Proxmox/OpenSSH paths.
+    while read -r key_spec; do
+        [ -z "$key_spec" ] && continue
+
+        candidate="$key_spec"
+        candidate="${candidate//%h/$root_home}"
+        candidate="${candidate//%u/root}"
+        candidate="${candidate//%U/0}"
+
+        # Relative AuthorizedKeysFile entries are relative to the user's home directory.
+        if [[ "$candidate" != /* ]]; then
+            candidate="${root_home}/${candidate}"
+        fi
+
+        if [ -s "$candidate" ] && grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-)' "$candidate"; then
+            root_key_file="$candidate"
+            break
+        fi
+    done <<< "$effective_authorized_keys"
+
+    if [ -z "$root_key_file" ]; then
+        for candidate in \
+            "$root_keys_default" \
+            "/root/.ssh/authorized_keys2" \
+            "/etc/ssh/authorized_keys/root" \
+            "/etc/ssh/authorized_keys.d/root" \
+            "/etc/ssh/authorized_keys/%u"
+        do
+            candidate="${candidate//%u/root}"
+
+            if [ -s "$candidate" ] && grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-)' "$candidate"; then
+                root_key_file="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$root_key_file" ]; then
         SSH_HARDENING_APPLIED="no"
-        msg_warn "SSH keys not found; root password login not disabled"
+        SSH_ROOT_KEY_FILE="not-detected"
+        msg_warn "Root SSH key file not found; root password login not disabled"
         return 0
     fi
 
-    if ! grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-|sk-ssh-)' "$root_keys"; then
-        SSH_HARDENING_APPLIED="no"
-        msg_warn "authorized_keys exists but no valid SSH public key was detected; SSH hardening skipped"
-        return 0
-    fi
+    SSH_ROOT_KEY_FILE="$root_key_file"
 
     msg_ok "ROOT SSH KEYS DETECTED"
 
+    msg_info "Preserving root SSH key login path"
+    msg_ok "ROOT SSH KEY FILE DETECTED"
+    echo -e "  ${DGN}${root_key_file}${CL}"
+
     msg_info "Fixing root SSH key permissions"
 
-    mkdir -p "$root_ssh_dir"
+    # Only apply StrictModes-safe permissions to the standard /root/.ssh path when that path is used.
+    # Do not force ownership/path changes on custom Proxmox or installer-managed key locations.
+    if [[ "$root_key_file" == /root/.ssh/* ]]; then
+        mkdir -p "$root_ssh_dir"
 
-    # Permissions are safe and normally required by OpenSSH StrictModes.
-    chmod 700 "$root_ssh_dir"
-    chmod 600 "$root_keys"
-
-    # Do not blindly chown. Some installer-injected key files can return:
-    # chown: changing ownership of '/root/.ssh/authorized_keys': Operation not permitted
-    # Only try ownership correction if ownership is actually wrong.
-    key_owner="$(stat -c '%u' "$root_keys" 2>/dev/null || echo "unknown")"
-    key_group="$(stat -c '%g' "$root_keys" 2>/dev/null || echo "unknown")"
-
-    if [ "$key_owner" != "0" ] || [ "$key_group" != "0" ]; then
-        if chown root:root "$root_keys" 2>/dev/null; then
-            msg_ok "ROOT SSH KEY OWNERSHIP CORRECTED"
+        if chmod 700 "$root_ssh_dir" 2>/dev/null; then
+            :
         else
-            msg_warn "Root authorized_keys ownership could not be changed; continuing because key file exists and permissions are set"
+            msg_warn "Could not chmod /root/.ssh; preserving existing permissions"
+        fi
+
+        if chmod 600 "$root_key_file" 2>/dev/null; then
+            :
+        else
+            msg_warn "Could not chmod root SSH key file; preserving existing permissions"
+        fi
+
+        key_owner="$(stat -c '%u' "$root_key_file" 2>/dev/null || echo "unknown")"
+        key_group="$(stat -c '%g' "$root_key_file" 2>/dev/null || echo "unknown")"
+
+        if [ "$key_owner" != "0" ] || [ "$key_group" != "0" ]; then
+            if chown root:root "$root_key_file" 2>/dev/null; then
+                msg_ok "ROOT SSH KEY OWNERSHIP CORRECTED"
+            else
+                msg_warn "Root SSH key ownership could not be changed; preserving existing key file ownership"
+            fi
+        else
+            msg_ok "ROOT SSH KEY OWNERSHIP ALREADY CORRECT"
         fi
     else
-        msg_ok "ROOT SSH KEY OWNERSHIP ALREADY CORRECT"
+        msg_ok "CUSTOM ROOT SSH KEY PATH PRESERVED"
     fi
 
     msg_ok "ROOT SSH KEY PERMISSIONS VERIFIED"
@@ -1316,14 +1394,18 @@ function apply_ssh_security() {
     msg_info "Writing root SSH key-only login policy"
 
     mkdir -p "$dropin_dir"
+    rm -f "$old_dropin_file"
+
+    # Comment conflicting global SSH directives in the main config so the drop-in becomes the effective policy.
+    # AuthorizedKeysFile is intentionally not touched.
+    sed -i -E 's/^[[:space:]]*(PermitRootLogin|PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication|PubkeyAuthentication)[[:space:]]+/# PVE9 preserved previous setting: &/' "$main_config" 2>/dev/null || true
 
     cat <<EOF > "$dropin_file"
 # Managed by PVE9 Post Install.
-# Allows root SSH login only with public keys.
-# Password and keyboard-interactive login are disabled.
+# Keeps root SSH public-key login working while disabling root password login.
+# AuthorizedKeysFile is intentionally not set here so existing key-injection paths remain valid.
 AddressFamily inet
 PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -1336,9 +1418,15 @@ EOF
 
     run_cmd "validating sshd config" sshd -t
 
-    effective_permit_root="$(sshd -T 2>/dev/null | awk '$1=="permitrootlogin" {print $2; exit}')"
-    effective_password_auth="$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication" {print $2; exit}')"
-    effective_pubkey_auth="$(sshd -T 2>/dev/null | awk '$1=="pubkeyauthentication" {print $2; exit}')"
+    effective_permit_root="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="permitrootlogin" {print $2; exit}')"
+    effective_password_auth="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="passwordauthentication" {print $2; exit}')"
+    effective_pubkey_auth="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="pubkeyauthentication" {print $2; exit}')"
+    effective_kbd_auth="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | awk '$1=="kbdinteractiveauthentication" {print $2; exit}')"
+
+    SSH_EFFECTIVE_PERMIT_ROOT="$effective_permit_root"
+    SSH_EFFECTIVE_PASSWORD_AUTH="$effective_password_auth"
+    SSH_EFFECTIVE_PUBKEY_AUTH="$effective_pubkey_auth"
+    SSH_EFFECTIVE_KBD_AUTH="$effective_kbd_auth"
 
     if [ "$effective_permit_root" != "prohibit-password" ] && [ "$effective_permit_root" != "without-password" ]; then
         msg_error "SSH validation failed: effective PermitRootLogin is ${effective_permit_root:-unknown}, expected prohibit-password"
@@ -1350,6 +1438,10 @@ EOF
 
     if [ "$effective_pubkey_auth" != "yes" ]; then
         msg_error "SSH validation failed: effective PubkeyAuthentication is ${effective_pubkey_auth:-unknown}, expected yes"
+    fi
+
+    if [ -n "$effective_kbd_auth" ] && [ "$effective_kbd_auth" != "no" ]; then
+        msg_error "SSH validation failed: effective KbdInteractiveAuthentication is ${effective_kbd_auth:-unknown}, expected no"
     fi
 
     msg_ok "EFFECTIVE SSH CONFIG VERIFIED"
@@ -1366,7 +1458,9 @@ EOF
 
     SSH_HARDENING_APPLIED="yes"
 
-    msg_ok "ROOT PASSWORD SSH LOGIN DISABLED; ROOT SSH KEY LOGIN PRESERVED"
+    msg_ok "SSH SECURITY HARDENED"
+    echo -e "  ${DGN}ROOT SSH KEY LOGIN PRESERVED${CL}"
+    echo -e "  ${DGN}ROOT PASSWORD SSH LOGIN DISABLED${CL}"
 }
 
 # --- 45. SYSCTL HARDENING & NETWORK TUNING ---
@@ -1733,6 +1827,14 @@ INSTALL_CROWDSEC_BOUNCER_PACKAGE="$CROWDSEC_BOUNCER_PACKAGE"
 INSTALL_REALTEK_IFACE="$REALTEK_IFACE"
 INSTALL_REALTEK_OPTIMIZED="$REALTEK_OPTIMIZED"
 INSTALL_NUMLOCK_CONFIGURED="$NUMLOCK_CONFIGURED"
+INSTALL_DEFAULT_IFACE="$DEFAULT_IFACE"
+INSTALL_LAN_CIDR="$LAN_CIDR"
+INSTALL_SSH_ROOT_KEY_FILE="$SSH_ROOT_KEY_FILE"
+INSTALL_SSH_EFFECTIVE_AUTHORIZED_KEYS="$SSH_EFFECTIVE_AUTHORIZED_KEYS"
+INSTALL_SSH_EFFECTIVE_PERMIT_ROOT="$SSH_EFFECTIVE_PERMIT_ROOT"
+INSTALL_SSH_EFFECTIVE_PASSWORD_AUTH="$SSH_EFFECTIVE_PASSWORD_AUTH"
+INSTALL_SSH_EFFECTIVE_PUBKEY_AUTH="$SSH_EFFECTIVE_PUBKEY_AUTH"
+INSTALL_SSH_EFFECTIVE_KBD_AUTH="$SSH_EFFECTIVE_KBD_AUTH"
 
 PASS() { echo -e "\${GN}✓ PASS\${CL} - \$1"; }
 FAIL() { echo -e "\${RD}✗ FAIL\${CL} - \$1"; }
@@ -1759,6 +1861,10 @@ INFO "Public host 80/443 selected: \$INSTALL_ALLOW_PUBLIC_WEB"
 INFO "Realtek NIC optimized during install: \$INSTALL_REALTEK_OPTIMIZED"
 INFO "Realtek interface: \$INSTALL_REALTEK_IFACE"
 INFO "NumLock service configured: \$INSTALL_NUMLOCK_CONFIGURED"
+INFO "Default network interface during install: \${INSTALL_DEFAULT_IFACE:-unknown}"
+INFO "LAN CIDR allowed for SSH/WebUI during install: \${INSTALL_LAN_CIDR:-not-detected}"
+INFO "Root SSH key file detected during install: \${INSTALL_SSH_ROOT_KEY_FILE:-not-detected}"
+INFO "Effective AuthorizedKeysFile during install: \${INSTALL_SSH_EFFECTIVE_AUTHORIZED_KEYS:-unknown}"
 
 echo ""
 
@@ -1832,8 +1938,20 @@ fi
 
 # SSH hardening checks.
 if [ "\$INSTALL_SSH_HARDENING_APPLIED" == "yes" ]; then
-    if sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled"; else FAIL "SSH password authentication still enabled"; fi
-    if sshd -T 2>/dev/null | grep -Eq "^permitrootlogin (without-password|prohibit-password)"; then PASS "Root SSH password login disabled"; else FAIL "Root SSH password login not hardened"; fi
+    ROOT_SSHD_EFFECTIVE="\$(sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+    ROOT_AUTH_KEYS="\$(echo "\$ROOT_SSHD_EFFECTIVE" | awk '\$1=="authorizedkeysfile" {for (i=2; i<=NF; i++) printf "%s ", \$i}')"
+
+    if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled for root context"; else FAIL "SSH password authentication still enabled for root context"; fi
+    if echo "\$ROOT_SSHD_EFFECTIVE" | grep -Eq "^permitrootlogin (without-password|prohibit-password)"; then PASS "Root SSH password login disabled while key login remains allowed"; else FAIL "Root SSH password login not hardened"; fi
+    if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^pubkeyauthentication yes"; then PASS "Root public-key authentication enabled"; else FAIL "Root public-key authentication not enabled"; fi
+    if echo "\$ROOT_SSHD_EFFECTIVE" | grep -q "^kbdinteractiveauthentication no"; then PASS "Keyboard-interactive SSH authentication disabled"; else WARN "Keyboard-interactive SSH authentication not confirmed disabled"; fi
+    if [ -n "\$ROOT_AUTH_KEYS" ]; then PASS "AuthorizedKeysFile effective path present: \$ROOT_AUTH_KEYS"; else FAIL "AuthorizedKeysFile effective path missing"; fi
+
+    if [ -n "\$INSTALL_SSH_ROOT_KEY_FILE" ] && [ "\$INSTALL_SSH_ROOT_KEY_FILE" != "not-detected" ] && [ -s "\$INSTALL_SSH_ROOT_KEY_FILE" ]; then
+        PASS "Detected root SSH key file still exists"
+    else
+        WARN "Detected root SSH key file not found after reboot: \${INSTALL_SSH_ROOT_KEY_FILE:-unknown}"
+    fi
 else
     WARN "SSH hardening was skipped because root SSH keys were missing"
 fi
@@ -1980,7 +2098,15 @@ GPU Passthrough: $ENABLE_PASSTHROUGH
 CPU Performance: $ENABLE_PERFORMANCE
 CrowdSec: $ENABLE_CROWDSEC
 Allow Public Host 80/443: $ALLOW_PUBLIC_WEB
+Default Interface: ${DEFAULT_IFACE:-unknown}
+LAN CIDR Allowed For SSH/WebUI: ${LAN_CIDR:-not-detected}
 SSH Hardening: $SSH_HARDENING_APPLIED
+Root SSH Key File: ${SSH_ROOT_KEY_FILE:-not-detected}
+Effective AuthorizedKeysFile: ${SSH_EFFECTIVE_AUTHORIZED_KEYS:-unknown}
+Effective PermitRootLogin: ${SSH_EFFECTIVE_PERMIT_ROOT:-unknown}
+Effective PasswordAuthentication: ${SSH_EFFECTIVE_PASSWORD_AUTH:-unknown}
+Effective PubkeyAuthentication: ${SSH_EFFECTIVE_PUBKEY_AUTH:-unknown}
+Effective KbdInteractiveAuthentication: ${SSH_EFFECTIVE_KBD_AUTH:-unknown}
 Proxmox Firewall: $PVE_FIREWALL_APPLIED
 Realtek Optimized: $REALTEK_OPTIMIZED
 NumLock: $NUMLOCK_CONFIGURED
