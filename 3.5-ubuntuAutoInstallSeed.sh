@@ -28,6 +28,7 @@ BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━�
 # Stores defaults, paths, timeout values and runtime state.
 T=15
 LOG_FILE="/var/log/ubuntu-autoinstall-seed.log"
+VERIFY_LOG="/var/log/ubuntu-autoinstall-seed-verify.log"
 COMPLETED_MARKER="/root/.ubuntu-autoinstall-seed-completed"
 
 DEFAULT_USERNAME="orik"
@@ -83,6 +84,7 @@ INSTALL_POWERED_OFF="no"
 
 CLEANUP_INSTALLED_TOOLS="yes"
 INSTALLED_TOOL_PACKAGES=()
+TEMP_FILES=()
 
 BOOT_PARAM='autoinstall ds=nocloud\;s=/cdrom/nocloud/ subiquity.autoinstallpath=cdrom/autoinstall.yaml'
 
@@ -117,6 +119,17 @@ section() {
     echo -e "${BORDER}"
 }
 
+section_flash_success() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${GN}${CLF}$1${CL}"
+    echo -e "${BORDER}"
+}
+
+detail_line() {
+    echo -e "  ${DGN}━━━━━▶${CL} $1"
+}
+
 # --- 5. TTY PRINT HELPERS ---
 # Prints directly to terminal even when functions return values through stdout.
 tty_print() {
@@ -144,6 +157,11 @@ tty_println() {
 cleanup() {
     local exit_code="$?"
     local pkg=""
+    local file=""
+
+    for file in "${TEMP_FILES[@]:-}"; do
+        [ -n "$file" ] && [ -e "$file" ] && rm -rf "$file" 2>/dev/null || true
+    done
 
     if [ "${DEBUG_KEEP_WORKDIR:-0}" != "1" ] && [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
         rm -rf "$WORK_DIR" 2>/dev/null || true
@@ -159,7 +177,7 @@ cleanup() {
         done
 
         DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >/dev/null 2>&1 || true
-        echo -e "${GN}Temporary tool cleanup complete.${CL}"
+        echo -e "${GN}✓ TEMPORARY TOOL CLEANUP COMPLETE${CL}"
     fi
 
     exit "$exit_code"
@@ -180,6 +198,7 @@ run_cmd() {
 
     local err_file=""
     err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
 
     if ! "$@" > /dev/null 2> "$err_file"; then
         echo ""
@@ -797,6 +816,7 @@ patch_grub_file() {
     fi
 
     temp_file="$(mktemp)"
+    TEMP_FILES+=("$temp_file")
 
     if [ "$default_present" == "no" ]; then
         echo "set default=0" >> "$temp_file"
@@ -1017,9 +1037,11 @@ validate_dependencies() {
         base64
         basename
         cat
+        chmod
         cut
         date
         dpkg
+        env
         find
         grep
         head
@@ -1030,6 +1052,7 @@ validate_dependencies() {
         qm
         rm
         sed
+        sleep
         sort
         tee
         tr
@@ -1415,7 +1438,8 @@ prepare_workspace() {
     AUTOINSTALL_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
     AUTOINSTALL_ISO_PATH="/var/lib/vz/template/iso/${AUTOINSTALL_ISO_NAME}"
     AUTOINSTALL_ISO_REF="local:iso/${AUTOINSTALL_ISO_NAME}"
-    WORK_DIR="/tmp/ubuntu-autoinstall-vm${TARGET_VMID}"
+    WORK_DIR="$(mktemp -d "/tmp/ubuntu-autoinstall-vm${TARGET_VMID}.XXXXXX")"
+    TEMP_FILES+=("$WORK_DIR")
 
     if [ -f "$AUTOINSTALL_ISO_PATH" ]; then
         section "GENERATED ISO CONFLICT"
@@ -1428,7 +1452,6 @@ prepare_workspace() {
         fi
     fi
 
-    rm -rf "$WORK_DIR"
     mkdir -p "$WORK_DIR/nocloud"
     mkdir -p "$WORK_DIR/grub"
     mkdir -p "$WORK_DIR/verify"
@@ -1648,6 +1671,7 @@ show_apply_summary() {
     echo -e "UBUNTU USER: ${GN}${TARGET_USERNAME}${CL}"
     echo -e "TIMEZONE: ${GN}${TARGET_TIMEZONE}${CL}"
     echo -e "LOCALE: ${GN}${TARGET_LOCALE}${CL}"
+    echo -e "VERIFY LOG: ${GN}${VERIFY_LOG}${CL}"
     echo -e "KEYBOARD LAYOUT: ${GN}${TARGET_KEYBOARD_LAYOUT}${CL}"
     echo -e "KEYBOARD VARIANT: ${GN}${TARGET_KEYBOARD_VARIANT:-none}${CL}"
     echo -e "NETWORK MODE: ${GN}${NETWORK_MODE}${CL}"
@@ -1773,14 +1797,83 @@ Generated ISO Deleted: $DELETE_GENERATED_ISO_AFTER_INSTALL
 Installed VM Started: $POST_INSTALL_START_VM
 Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
 SSH Command: ${SSH_COMMAND:-not-generated}
+Verify Log: $VERIFY_LOG
 Tools Installed By Script: ${INSTALLED_TOOL_PACKAGES[*]:-none}
 Tools Cleanup Enabled: ${CLEANUP_INSTALLED_TOOLS}
 EOF
 }
 
-# --- 62. FINAL OUTPUT ---
+# --- 62. HOST VERIFICATION REPORT ---
+# Writes a host-side verification report after install cleanup and optional VM start.
+create_host_verification_report() {
+    section "HOST VERIFICATION"
+
+    msg_info "Creating host verification report"
+
+    cat > "$VERIFY_LOG" <<EOF
+--- UBUNTU AUTOINSTALL HOST VERIFICATION REPORT ---
+Date: $(date)
+VMID: $TARGET_VMID
+VM Name: $TARGET_VM_NAME
+VM MAC: $TARGET_VM_MAC
+Source ISO: $INSTALL_ISO_REF
+Generated ISO: $AUTOINSTALL_ISO_REF
+Install Powered Off: $INSTALL_POWERED_OFF
+Post Install Start VM: $POST_INSTALL_START_VM
+Assigned IPv4: ${ASSIGNED_IPV4:-not-detected}
+SSH Command: ${SSH_COMMAND:-not-generated}
+
+Results:
+EOF
+
+    {
+        PASS() { echo "✓ PASS - $1"; }
+        WARN() { echo "! WARN - $1"; }
+        FAIL() { echo "✗ FAIL - $1"; }
+
+        if qm config "$TARGET_VMID" >/dev/null 2>&1; then PASS "VM config exists"; else FAIL "VM config missing"; fi
+        if qm config "$TARGET_VMID" 2>/dev/null | grep -q "^boot: order=scsi0"; then PASS "Boot order is installed disk first"; else WARN "Boot order is not confirmed as scsi0"; fi
+        if ! qm config "$TARGET_VMID" 2>/dev/null | grep -q "^ide2:"; then PASS "Installer ISO is detached"; else FAIL "Installer ISO still attached on ide2"; fi
+
+        if [ "$INSTALL_POWERED_OFF" == "yes" ]; then PASS "VM powered off after autoinstall"; else FAIL "VM did not power off after autoinstall"; fi
+
+        if [ "$DELETE_GENERATED_ISO_AFTER_INSTALL" == "y" ]; then
+            if [ ! -f "$AUTOINSTALL_ISO_PATH" ]; then PASS "Generated autoinstall ISO deleted"; else WARN "Generated autoinstall ISO still exists"; fi
+        else
+            if [ -f "$AUTOINSTALL_ISO_PATH" ]; then PASS "Generated autoinstall ISO kept as requested"; else WARN "Generated autoinstall ISO not found even though keep was selected"; fi
+        fi
+
+        if [ "$POST_INSTALL_START_VM" == "y" ]; then
+            if [ "$(get_vm_status "$TARGET_VMID")" == "running" ]; then PASS "Installed VM is running"; else WARN "Installed VM is not running"; fi
+            if [ -n "${ASSIGNED_IPV4:-}" ]; then PASS "IPv4 detected through QEMU Guest Agent: ${ASSIGNED_IPV4}"; else WARN "IPv4 was not detected through QEMU Guest Agent"; fi
+            if [ -n "${SSH_COMMAND:-}" ]; then PASS "SSH command generated: ${SSH_COMMAND}"; else WARN "SSH command not generated"; fi
+        else
+            WARN "Installed VM start skipped by user"
+        fi
+
+        if [ -f "$COMPLETED_MARKER" ]; then PASS "Completion marker exists"; else WARN "Completion marker missing at verification time"; fi
+    } >> "$VERIFY_LOG"
+
+    msg_ok "HOST VERIFICATION REPORT CREATED"
+}
+
+# --- 63. GENERATED ISO ONLY SUMMARY ---
+# Shows a clean summary when user generated the ISO but chose not to attach/start it.
+show_generated_iso_only_summary() {
+    section "GENERATED ISO READY"
+
+    detail_line "VM: ${TARGET_VMID} / ${TARGET_VM_NAME}"
+    detail_line "Generated ISO: ${AUTOINSTALL_ISO_REF}"
+    detail_line "Host path: ${AUTOINSTALL_ISO_PATH}"
+    echo ""
+    echo -e "${YW}The ISO was generated and verified but was not attached or started.${CL}"
+    echo -e "${YW}Run this script again when you are ready to attach it and start autoinstall.${CL}"
+    echo ""
+}
+
+# --- 64. FINAL OUTPUT ---
 show_final_output() {
-    section "FINISHED"
+    section_flash_success "FINISHED"
 
     echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
     echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
@@ -1791,6 +1884,7 @@ show_final_output() {
     echo -e "INSTALLED VM STARTED: ${GN}${POST_INSTALL_START_VM}${CL}"
     echo -e "KEYBOARD: ${GN}${TARGET_KEYBOARD_LAYOUT}${CL}"
     echo -e "LOCALE: ${GN}${TARGET_LOCALE}${CL}"
+    echo -e "VERIFY LOG: ${GN}${VERIFY_LOG}${CL}"
 
     if [ -n "$ASSIGNED_IPV4" ]; then
         echo -e "ASSIGNED IPV4: ${GN}${ASSIGNED_IPV4}${CL}"
@@ -1826,11 +1920,17 @@ show_final_output() {
 # =========================================================
 
 main() {
+    local start_yn=""
+    local attach_yn=""
+
     init_script
 
     show_start_warning
     start_yn="$(timed_yes_no "Start Ubuntu Auto Install ISO Creator?" "y")"
-    [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+
+    if [[ "$start_yn" =~ ^[Nn] ]]; then
+        exit 0
+    fi
 
     select_vm
     detect_vm_mac
@@ -1845,12 +1945,17 @@ main() {
 
     show_apply_summary
     attach_yn="$(timed_yes_no "Attach generated autoinstall ISO and start VM now?" "y")"
-    [[ "$attach_yn" =~ ^[Nn] ]] && exit 0
+
+    if [[ "$attach_yn" =~ ^[Nn] ]]; then
+        show_generated_iso_only_summary
+        exit 0
+    fi
 
     attach_iso_and_start_install
     post_install_cleanup
     start_installed_vm_and_detect_ip
     write_completion_marker
+    create_host_verification_report
     show_final_output
 }
 

@@ -125,6 +125,15 @@ function section() {
     echo -e "${BORDER}"
 }
 
+# --- 5A. FLASHING SUCCESS SECTION HEADER HELPER ---
+# Uses the same section layout as script 1, but renders final success headings in bold flashing green.
+function section_flash_success() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${GN}${CLF}$1${CL}"
+    echo -e "${BORDER}"
+}
+
 # --- 6. TTY PRINT HELPER ---
 # Prints directly to terminal even when functions return values through stdout.
 function tty_print() {
@@ -1711,7 +1720,7 @@ EOF
 # --- 62. FINAL SUMMARY ---
 # Shows final VM configuration and the MAC address to reserve in the router.
 function show_final_summary() {
-    section "FINISHED"
+    section_flash_success "FINISHED"
 
     echo -e "VM ID: ${GN}${VMID}${CL}"
     echo -e "VM NAME: ${GN}${VM_NAME}${CL}"

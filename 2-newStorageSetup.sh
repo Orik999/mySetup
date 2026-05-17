@@ -1100,7 +1100,11 @@ function first_destructive_confirmation() {
         proceed_yn="$(timed_yes_no "Create Proxmox storage on empty disk ${SELECTED_DISK}?" "y")"
     fi
 
-    [[ "$proceed_yn" =~ ^[Nn] ]] && msg_error "Aborted by user."
+    if [[ "$proceed_yn" =~ ^[Nn] ]]; then
+        msg_error "Aborted by user."
+    fi
+
+    return 0
 }
 
 # =========================================================
@@ -1225,7 +1229,11 @@ function final_destructive_confirmation() {
     echo ""
 
     final_yn="$(timed_yes_no "Proceed with disk wipe and storage creation?" "n")"
-    [[ "$final_yn" =~ ^[Nn] ]] && msg_error "Aborted by user."
+    if [[ "$final_yn" =~ ^[Nn] ]]; then
+        msg_error "Aborted by user."
+    fi
+
+    return 0
 }
 
 
