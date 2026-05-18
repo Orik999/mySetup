@@ -1,11 +1,12 @@
 # 09-cf-companion-compose.yml
 # Project: Traefik Cloudflare Companion
-# Purpose: Automatically creates/updates Cloudflare records from Traefik Docker labels.
+# Purpose: Automatically creates/updates Cloudflare DNS records from Traefik Docker labels.
 #
-# Secret naming is aligned with script 6:
-# - secret name: cf_api_token
-# - secret file: ${CF_API_TOKEN_FILE}
-# - container path: /run/secrets/cf_api_token
+# Public-GitHub-safe:
+# - No Cloudflare token is stored in this file.
+# - Script 6 writes the real token to ${CF_API_TOKEN_FILE}.
+# - Docker mounts it as /run/secrets/cf_api_token.
+# - The entrypoint exports it as CF_API_TOKEN / CLOUDFLARE_API_TOKEN for the companion app.
 
 name: cf-companion
 
@@ -20,21 +21,40 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+
     networks:
       - socket_proxy
+
     secrets:
       - cf_api_token
+
     environment:
       TIMEZONE: ${TZ}
+
+      # Docker provider discovery through socket proxy.
+      DOCKER_HOST: tcp://socket-proxy:2375
+
+      # Traefik label discovery mode.
       TRAEFIK_VERSION: 2
-      ENABLE_TRAEFIK_POLL: "TRUE"
+      ENABLE_TRAEFIK_POLL: "FALSE"
+
+      # Cloudflare zone/domain mapping.
       TARGET_DOMAIN: ${DOMAIN}
       DOMAIN1: ${DOMAIN}
       DOMAIN1_ZONE_ID: ${CF_ZONE_ID}
       DOMAIN1_PROXIED: "true"
       DEFAULT_TTL: 1
-      DOCKER_HOST: tcp://socket-proxy:2375
-      CF_TOKEN__FILE: /run/secrets/cf_api_token
+
+      # Non-secret Cloudflare account metadata.
+      CF_API_EMAIL: ${CF_API_EMAIL}
+
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export CF_API_TOKEN="$$(cat /run/secrets/cf_api_token)"
+        export CLOUDFLARE_API_TOKEN="$${CF_API_TOKEN}"
+        exec /init
 
 networks:
   socket_proxy:

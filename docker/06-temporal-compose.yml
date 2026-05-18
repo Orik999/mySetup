@@ -1,7 +1,10 @@
 # 06-temporal-compose.yml
 # Project: Temporal
-# Purpose: Temporal backend service for Postiz/background workflows.
-# Note: no dynamicconfig host mount by default, so the image built-in config is not hidden.
+# Purpose: Temporal workflow engine backend for Postiz/background workflows.
+# Network note:
+# - database network is created by script 6.5 and reused as external.
+# - PostgreSQL is deployed as a separate Portainer stack, so no depends_on.
+# - Script 6 should pre-create temporal and temporal_visibility databases.
 
 name: temporal
 
@@ -15,18 +18,37 @@ services:
     networks:
       - database
     environment:
-      DB: postgresql
+      TZ: ${TZ}
+
+      # Temporal logging.
+      # warn keeps normal startup/runtime noise down while preserving real warnings/errors.
+      # json avoids the repeated console-style "INF INF INF" formatting in Docker logs.
+      LOG_LEVEL: warn
+      LOG_FORMAT: json
+
+      # Temporal SQL persistence.
+      DB: postgres12
       DB_PORT: 5432
+      POSTGRES_SEEDS: postgres
       POSTGRES_USER: temporal
       POSTGRES_PWD: ${TEMPORAL_POSTGRES_PASSWORD}
-      POSTGRES_SEEDS: postgres
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+
+      # Existing databases pre-created by Script 6 PostgreSQL init.
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+
+      # Prevent auto-setup from trying CREATE DATABASE with the non-superuser temporal account.
+      SKIP_DB_CREATE: "true"
+
+      # Default namespace used by clients/apps.
+      DEFAULT_NAMESPACE: default
+
     healthcheck:
-      test: ["CMD-SHELL", "tctl --address temporal:7233 workflow list >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health | grep -qi SERVING || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 60s
+      start_period: 120s
 
 networks:
   database:

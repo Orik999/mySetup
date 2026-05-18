@@ -1,53 +1,39 @@
 # =========================================================
 #  Traefik Static Configuration Template
-#  Project: Home-Hosted Social Media SaaS
+#  Project: Crea / Home-Hosted Social Media SaaS
 # =========================================================
 #
-# Generated from this public-safe template by script 6.
-# Placeholders are replaced by script 6 before this file is written to:
-#   {{DOCKER_DIR}}/appdata/traefik/traefik.yml
+# Public-GitHub-safe template.
+# Script 6 renders this file locally into:
+# ${DOCKER_DIR}/appdata/traefik/traefik.yml
 #
-# Secrets are NOT stored in this file.
-# Cloudflare API token is provided to Traefik through Docker secrets at:
-#   /run/secrets/cf_api_token
+# Placeholders replaced by Script 6:
+# {{DOMAIN}}
+# {{CF_API_EMAIL}}
 #
-# Certificate strategy:
-#   Browser/Cloudflare -> Traefik uses Let's Encrypt certificates.
-#   Traefik proves domain control via Cloudflare DNS-01 challenge.
+# Sensitive values are NOT stored here.
+# Cloudflare API token is provided to the Traefik container through Docker secret:
+# /run/secrets/cf_api_token
 
-# ---------------------------------------------------------
-# GLOBAL SETTINGS
-# ---------------------------------------------------------
 global:
   checkNewVersion: false
   sendAnonymousUsage: false
 
-# ---------------------------------------------------------
-# LOGGING
-# ---------------------------------------------------------
+api:
+  dashboard: true
+  insecure: false
+
 log:
   level: INFO
 
 accessLog: {}
 
-# ---------------------------------------------------------
-# API / DASHBOARD
-# ---------------------------------------------------------
-# Dashboard is enabled but not exposed insecurely.
-# Expose it through a router in dynamic-config.yml or Docker labels.
-api:
-  dashboard: true
-  insecure: false
-
-# ---------------------------------------------------------
-# ENTRYPOINTS
-# ---------------------------------------------------------
 entryPoints:
   http:
     address: ":80"
     forwardedHeaders:
       trustedIPs: &trustedIps
-        # Local / Docker networks
+        # Localhost / Docker internal networks
         - 127.0.0.1/32
         - 10.0.0.0/8
         - 172.16.0.0/12
@@ -55,8 +41,7 @@ entryPoints:
         - 192.168.90.0/24
         - 192.168.91.0/24
 
-        # Cloudflare public IPv4 ranges
-        # Source: https://www.cloudflare.com/ips/
+        # Cloudflare IPv4 ranges
         - 173.245.48.0/20
         - 103.21.244.0/22
         - 103.22.200.0/22
@@ -73,8 +58,7 @@ entryPoints:
         - 172.64.0.0/13
         - 131.0.72.0/22
 
-        # Cloudflare public IPv6 ranges
-        # Source: https://www.cloudflare.com/ips/
+        # Cloudflare IPv6 ranges
         - 2400:cb00::/32
         - 2606:4700::/32
         - 2803:f800::/32
@@ -83,16 +67,35 @@ entryPoints:
         - 2a06:98c0::/29
         - 2c0f:f248::/32
     http:
+      sanitizePath: true
+      encodedCharacters:
+        allowEncodedSlash: false
+        allowEncodedBackSlash: false
+        allowEncodedNullCharacter: false
+        allowEncodedSemicolon: false
+        allowEncodedPercent: false
+        allowEncodedQuestionMark: false
+        allowEncodedHash: false
       redirections:
         entryPoint:
           to: https
           scheme: https
+          permanent: true
 
   https:
     address: ":443"
     forwardedHeaders:
       trustedIPs: *trustedIps
     http:
+      sanitizePath: true
+      encodedCharacters:
+        allowEncodedSlash: false
+        allowEncodedBackSlash: false
+        allowEncodedNullCharacter: false
+        allowEncodedSemicolon: false
+        allowEncodedPercent: false
+        allowEncodedQuestionMark: false
+        allowEncodedHash: false
       tls:
         certResolver: cloudflare
         domains:
@@ -100,9 +103,6 @@ entryPoints:
             sans:
               - "*.{{DOMAIN}}"
 
-# ---------------------------------------------------------
-# PROVIDERS
-# ---------------------------------------------------------
 providers:
   docker:
     endpoint: "tcp://socket-proxy:2375"
@@ -114,9 +114,6 @@ providers:
     filename: /etc/traefik/dynamic-config.yml
     watch: true
 
-# ---------------------------------------------------------
-# CERTIFICATE RESOLVERS
-# ---------------------------------------------------------
 certificatesResolvers:
   cloudflare:
     acme:
@@ -124,7 +121,8 @@ certificatesResolvers:
       storage: /acme/acme.json
       dnsChallenge:
         provider: cloudflare
-        delayBeforeCheck: 90
         resolvers:
           - "1.1.1.1:53"
           - "1.0.0.1:53"
+        propagation:
+          delayBeforeChecks: 90s

@@ -2,10 +2,13 @@
 # Project: Filebrowser
 # Purpose: Browser file manager for uploads/downloads and safe project-file edits.
 #
-# Security note:
+# Security notes:
 # - compose/shared/backups are mounted read-write so you can upload modified YAML/files.
-# - secrets, .env, and database appdata are intentionally not mounted.
-# - Large-upload Traefik middleware is applied for bigger uploads/downloads.
+# - secrets, .env, PostgreSQL data, Redis data, Authentik data, and acme.json are intentionally not mounted.
+# - Traefik appdata is NOT mounted as a whole because it can contain certificate/private ACME material.
+# - Only selected Traefik config files are mounted for safe editing.
+# - Access is protected by Traefik + Authentik.
+# - No direct host port is published.
 
 name: filebrowser
 
@@ -14,30 +17,58 @@ services:
     image: filebrowser/filebrowser:latest
     container_name: filebrowser
     restart: unless-stopped
+
+    user: "${PUID}:${PGID}"
+
     security_opt:
       - no-new-privileges:true
+
     networks:
       - t2_proxy
+
     volumes:
+      # General safe project work areas.
+      - ${DOCKER_DIR}/compose:/srv/compose
       - ${DOCKER_DIR}/shared:/srv/shared
       - ${DOCKER_DIR}/backups:/srv/backups
-      - ${DOCKER_DIR}/compose:/srv/compose
-      - ${DOCKER_DIR}/appdata/traefik:/srv/traefik-config
+
+      # Selected editable Traefik files only.
+      # Do NOT mount the full ${DOCKER_DIR}/appdata/traefik directory because it may expose acme.json.
+      - ${DOCKER_DIR}/appdata/traefik/traefik.yml:/srv/traefik-config/traefik.yml
+      - ${DOCKER_DIR}/appdata/traefik/dynamic-config.yml:/srv/traefik-config/dynamic-config.yml
+
+      # Filebrowser persistence.
       - ${DOCKER_DIR}/appdata/filebrowser/database:/database
       - ${DOCKER_DIR}/appdata/filebrowser/config:/config
+
     environment:
       TZ: ${TZ}
-      PUID: ${PUID}
-      PGID: ${PGID}
+
     labels:
       traefik.enable: "true"
+
+      # Router.
       traefik.http.routers.filebrowser.rule: Host(`fb.${DOMAIN}`)
       traefik.http.routers.filebrowser.entrypoints: https
       traefik.http.routers.filebrowser.tls: "true"
       traefik.http.routers.filebrowser.tls.certresolver: cloudflare
-      traefik.http.routers.filebrowser.middlewares: chain-authentik-large-upload@file
       traefik.http.routers.filebrowser.service: filebrowser
+
+      # Authentik + large upload/download middleware.
+      # filebrowser-large-upload@docker keeps request/response limits unrestricted.
+      traefik.http.routers.filebrowser.middlewares: chain-authentik@file,filebrowser-large-upload@docker
+
+      # Service.
       traefik.http.services.filebrowser.loadbalancer.server.port: 80
+
+      # Large upload/download buffering.
+      # 0 = no hard maximum body size limit.
+      # memRequestBodyBytes/memResponseBodyBytes keep only 10MB in memory before spooling.
+      traefik.http.middlewares.filebrowser-large-upload.buffering.maxRequestBodyBytes: "0"
+      traefik.http.middlewares.filebrowser-large-upload.buffering.memRequestBodyBytes: "10485760"
+      traefik.http.middlewares.filebrowser-large-upload.buffering.maxResponseBodyBytes: "0"
+      traefik.http.middlewares.filebrowser-large-upload.buffering.memResponseBodyBytes: "10485760"
+      traefik.http.middlewares.filebrowser-large-upload.buffering.retryExpression: "IsNetworkError() && Attempts() <= 2"
 
 networks:
   t2_proxy:

@@ -1,0 +1,200 @@
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 611 ms { sdkComponent: 'worker', taskQueue: 'twitch' }
+1|orchestrator  | 2026-05-18T11:03:40.654Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'twitch', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:41.478Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 532 ms { sdkComponent: 'worker', taskQueue: 'mastodon' }
+1|orchestrator  | 2026-05-18T11:03:41.492Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'mastodon', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:42.361Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 570 ms { sdkComponent: 'worker', taskQueue: 'bluesky' }
+1|orchestrator  | 2026-05-18T11:03:42.372Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'bluesky', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:43.230Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 566 ms { sdkComponent: 'worker', taskQueue: 'lemmy' }
+1|orchestrator  | 2026-05-18T11:03:43.242Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'lemmy', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:44.104Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 558 ms { sdkComponent: 'worker', taskQueue: 'wrapcast' }
+1|orchestrator  | 2026-05-18T11:03:44.118Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'wrapcast', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:45.089Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 644 ms { sdkComponent: 'worker', taskQueue: 'telegram' }
+1|orchestrator  | 2026-05-18T11:03:45.101Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'telegram', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:45.963Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 568 ms { sdkComponent: 'worker', taskQueue: 'nostr' }
+1|orchestrator  | 2026-05-18T11:03:45.976Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'nostr', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:46.802Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 532 ms { sdkComponent: 'worker', taskQueue: 'vk' }
+1|orchestrator  | 2026-05-18T11:03:46.814Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'vk', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:47.694Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 575 ms { sdkComponent: 'worker', taskQueue: 'medium' }
+1|orchestrator  | 2026-05-18T11:03:47.706Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'medium', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:48.543Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 534 ms { sdkComponent: 'worker', taskQueue: 'devto' }
+1|orchestrator  | 2026-05-18T11:03:48.556Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'devto', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:49.499Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 600 ms { sdkComponent: 'worker', taskQueue: 'hashnode' }
+1|orchestrator  | 2026-05-18T11:03:49.510Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'hashnode', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:50.422Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 588 ms { sdkComponent: 'worker', taskQueue: 'wordpress' }
+1|orchestrator  | 2026-05-18T11:03:50.435Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'wordpress', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:51.295Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 556 ms { sdkComponent: 'worker', taskQueue: 'listmonk' }
+1|orchestrator  | 2026-05-18T11:03:51.307Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'listmonk', size: '2.89MB' }
+1|orchestrator  | 2026-05-18T11:03:52.174Z [INFO] asset workflow-bundle-7ae8e233a7ff469d2c8a.js 2.89 MiB [emitted] [immutable] (name: main)
+1|orchestrator  | runtime modules 1010 bytes 5 modules
+1|orchestrator  | modules by path ../../node_modules/ 964 KiB
+1|orchestrator  |   modules by path ../../node_modules/@temporalio/ 332 KiB 55 modules
+1|orchestrator  |   modules by path ../../node_modules/nexus-rpc/lib/ 25.6 KiB 17 modules
+1|orchestrator  |   + 4 modules
+1|orchestrator  | modules by path ./dist/ 29.2 KiB
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/workflows/ 28 KiB 10 modules
+1|orchestrator  |   modules by path ./dist/libraries/nestjs-libraries/src/ 803 bytes 2 modules
+1|orchestrator  |   modules by path ./dist/apps/orchestrator/src/signals/*.js 452 bytes 2 modules
+1|orchestrator  | optional modules 30 bytes [optional]
+1|orchestrator  |   __temporal_custom_payload_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  |   __temporal_custom_failure_converter (ignored) 15 bytes [optional] [built] [code generated]
+1|orchestrator  | webpack 5.105.4 compiled successfully in 550 ms { sdkComponent: 'worker', taskQueue: 'moltbook' }
+1|orchestrator  | 2026-05-18T11:03:52.185Z [INFO] Workflow bundle created { sdkComponent: 'worker', taskQueue: 'moltbook', size: '2.89MB' }
