@@ -1,7 +1,7 @@
 # 00-socket-proxy-compose.yml
-# Project: Socket Proxy
-# Purpose: Controlled Docker API access for trusted admin/automation containers.
-# Network note: socket_proxy is created by script 6.5 and reused as external.
+# Project: Docker Socket Proxy
+# Purpose: Safely exposes selected Docker API endpoints to internal management containers only.
+# Network note: socket_proxy is created by script 6.5 and reused as an external network.
 
 name: socket-proxy
 
@@ -15,6 +15,7 @@ services:
     read_only: true
     tmpfs:
       - /run
+      - /tmp
     networks:
       socket_proxy:
         ipv4_address: 192.168.91.254
@@ -22,17 +23,26 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       LOG_LEVEL: info
+
+      # Core safe/read endpoints
       EVENTS: 1
       PING: 1
       VERSION: 1
       INFO: 1
+
+      # Required by Portainer/bootstrap management
       CONTAINERS: 1
       IMAGES: 1
       NETWORKS: 1
       VOLUMES: 1
       SERVICES: 1
       TASKS: 1
+
+      # Required for Portainer to manage containers/stacks.
+      # Later, we can split read-only and admin socket proxies for tighter security.
       POST: 1
+
+      # Disabled high-risk/unneeded endpoints
       AUTH: 0
       SECRETS: 0
       BUILD: 0
