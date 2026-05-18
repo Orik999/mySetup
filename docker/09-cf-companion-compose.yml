@@ -1,4 +1,12 @@
 # 09-cf-companion-compose.yml
+# Project: Traefik Cloudflare Companion
+# Purpose: Automatically creates/updates Cloudflare records from Traefik Docker labels.
+#
+# Secret naming is aligned with script 6:
+# - secret name: cf_api_token
+# - secret file: ${CF_API_TOKEN_FILE}
+# - container path: /run/secrets/cf_api_token
+
 name: cf-companion
 
 secrets:
@@ -13,7 +21,6 @@ services:
     security_opt:
       - no-new-privileges:true
     networks:
-      - t2_proxy
       - socket_proxy
     secrets:
       - cf_api_token
@@ -30,9 +37,6 @@ services:
       CF_TOKEN__FILE: /run/secrets/cf_api_token
 
 networks:
-  t2_proxy:
-    name: t2_proxy
-    external: true
   socket_proxy:
     name: socket_proxy
     external: true

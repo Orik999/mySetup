@@ -1,4 +1,7 @@
 # 02-postgres-compose.yml
+# Project: PostgreSQL
+# Purpose: Shared internal PostgreSQL service for Authentik, Postiz, Temporal, and future apps.
+
 name: postgres
 
 services:
@@ -31,4 +34,4 @@ services:
 networks:
   database:
     name: database
-    driver: bridge
+    external: true

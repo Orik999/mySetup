@@ -1,4 +1,7 @@
 # 05-authentik-compose.yml
+# Project: Authentik
+# Purpose: SSO/forward-auth provider for protected admin apps behind Traefik.
+
 name: authentik
 
 services:
@@ -36,6 +39,7 @@ services:
       traefik.http.routers.authentik.entrypoints: https
       traefik.http.routers.authentik.tls: "true"
       traefik.http.routers.authentik.tls.certresolver: cloudflare
+      traefik.http.routers.authentik.middlewares: chain-secure@file
       traefik.http.routers.authentik.service: authentik
       traefik.http.services.authentik.loadbalancer.server.port: 9000
       traefik.http.middlewares.authentik.forwardauth.address: http://authentik-server:9000/outpost.goauthentik.io/auth/traefik

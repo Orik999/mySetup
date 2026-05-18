@@ -1,0 +1,130 @@
+# =========================================================
+#  Traefik Static Configuration Template
+#  Project: Home-Hosted Social Media SaaS
+# =========================================================
+#
+# Generated from this public-safe template by script 6.
+# Placeholders are replaced by script 6 before this file is written to:
+#   {{DOCKER_DIR}}/appdata/traefik/traefik.yml
+#
+# Secrets are NOT stored in this file.
+# Cloudflare API token is provided to Traefik through Docker secrets at:
+#   /run/secrets/cf_api_token
+#
+# Certificate strategy:
+#   Browser/Cloudflare -> Traefik uses Let's Encrypt certificates.
+#   Traefik proves domain control via Cloudflare DNS-01 challenge.
+
+# ---------------------------------------------------------
+# GLOBAL SETTINGS
+# ---------------------------------------------------------
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+# ---------------------------------------------------------
+# LOGGING
+# ---------------------------------------------------------
+log:
+  level: INFO
+
+accessLog: {}
+
+# ---------------------------------------------------------
+# API / DASHBOARD
+# ---------------------------------------------------------
+# Dashboard is enabled but not exposed insecurely.
+# Expose it through a router in dynamic-config.yml or Docker labels.
+api:
+  dashboard: true
+  insecure: false
+
+# ---------------------------------------------------------
+# ENTRYPOINTS
+# ---------------------------------------------------------
+entryPoints:
+  http:
+    address: ":80"
+    forwardedHeaders:
+      trustedIPs: &trustedIps
+        # Local / Docker networks
+        - 127.0.0.1/32
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 192.168.90.0/24
+        - 192.168.91.0/24
+
+        # Cloudflare public IPv4 ranges
+        # Source: https://www.cloudflare.com/ips/
+        - 173.245.48.0/20
+        - 103.21.244.0/22
+        - 103.22.200.0/22
+        - 103.31.4.0/22
+        - 141.101.64.0/18
+        - 108.162.192.0/18
+        - 190.93.240.0/20
+        - 188.114.96.0/20
+        - 197.234.240.0/22
+        - 198.41.128.0/17
+        - 162.158.0.0/15
+        - 104.16.0.0/13
+        - 104.24.0.0/14
+        - 172.64.0.0/13
+        - 131.0.72.0/22
+
+        # Cloudflare public IPv6 ranges
+        # Source: https://www.cloudflare.com/ips/
+        - 2400:cb00::/32
+        - 2606:4700::/32
+        - 2803:f800::/32
+        - 2405:b500::/32
+        - 2405:8100::/32
+        - 2a06:98c0::/29
+        - 2c0f:f248::/32
+    http:
+      redirections:
+        entryPoint:
+          to: https
+          scheme: https
+
+  https:
+    address: ":443"
+    forwardedHeaders:
+      trustedIPs: *trustedIps
+    http:
+      tls:
+        certResolver: cloudflare
+        domains:
+          - main: "{{DOMAIN}}"
+            sans:
+              - "*.{{DOMAIN}}"
+
+# ---------------------------------------------------------
+# PROVIDERS
+# ---------------------------------------------------------
+providers:
+  docker:
+    endpoint: "tcp://socket-proxy:2375"
+    exposedByDefault: false
+    network: t2_proxy
+    watch: true
+
+  file:
+    filename: /etc/traefik/dynamic-config.yml
+    watch: true
+
+# ---------------------------------------------------------
+# CERTIFICATE RESOLVERS
+# ---------------------------------------------------------
+certificatesResolvers:
+  cloudflare:
+    acme:
+      email: "{{CF_API_EMAIL}}"
+      storage: /acme/acme.json
+      dnsChallenge:
+        provider: cloudflare
+        delayBeforeCheck: 90
+        resolvers:
+          - "1.1.1.1:53"
+          - "1.0.0.1:53"

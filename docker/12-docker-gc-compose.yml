@@ -1,4 +1,8 @@
 # 12-docker-gc-compose.yml
+# Project: Docker GC
+# Purpose: Optional safe periodic Docker cleanup through socket-proxy.
+# Note: builder prune is intentionally omitted because socket-proxy BUILD is disabled.
+
 name: docker-gc
 
 services:
@@ -18,7 +22,6 @@ services:
       echo 'Docker safe prune running...';
       docker container prune -f;
       docker image prune -f;
-      docker builder prune -f --filter 'until=168h';
       sleep 604800;
       done"
 

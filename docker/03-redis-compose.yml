@@ -1,4 +1,7 @@
 # 03-redis-compose.yml
+# Project: Redis
+# Purpose: Shared internal Redis service for Authentik/Postiz/backend queues.
+
 name: redis
 
 services:
@@ -23,8 +26,11 @@ services:
     volumes:
       - ${DOCKER_DIR}/appdata/redis:/data
       - /etc/localtime:/etc/localtime:ro
+    environment:
+      TZ: ${TZ}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
       interval: 30s
       timeout: 5s
       retries: 5

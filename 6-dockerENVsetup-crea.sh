@@ -33,10 +33,10 @@ RUNTIME_LOG_FILE=""
 VERIFY_LOG="/var/log/docker-env-setup-verify.log"
 COMPLETED_MARKER="/root/.docker-env-setup-completed"
 
-DEFAULT_USER="orik"
+DEFAULT_USER="${DEFAULT_USER:-${SUDO_USER:-${USER:-dockeradmin}}}"
 DEFAULT_TZ="Europe/London"
-DEFAULT_DOMAIN="najafov.co.uk"
-DEFAULT_CF_API_EMAIL="oriknj999@gmail.com"
+DEFAULT_DOMAIN="${DEFAULT_DOMAIN:-example.com}"
+DEFAULT_CF_API_EMAIL="${DEFAULT_CF_API_EMAIL:-}"
 DEFAULT_CF_ZONE_ID=""
 DEFAULT_HTPASSWD_USER="admin"
 
@@ -79,7 +79,24 @@ HTPASSWD_LINE_VALUE=""
 SECRET_DISPLAY_WAS_SHOWN="no"
 SECRET_SCREEN_CLEARED="no"
 
+# Traefik template download defaults. These contain no secrets and can safely live in a public GitHub repo.
+TRAEFIK_TEMPLATE_RAW_BASE="${TRAEFIK_TEMPLATE_RAW_BASE:-https://raw.githubusercontent.com/Orik999/mySetup/main/docker/traefik}"
+TRAEFIK_STATIC_TEMPLATE_URL="${TRAEFIK_STATIC_TEMPLATE_URL:-${TRAEFIK_TEMPLATE_RAW_BASE}/traefik.yml.template}"
+TRAEFIK_DYNAMIC_TEMPLATE_URL="${TRAEFIK_DYNAMIC_TEMPLATE_URL:-${TRAEFIK_TEMPLATE_RAW_BASE}/dynamic-config.yml.template}"
+
+TRAEFIK_DIR=""
+TRAEFIK_ACME_DIR=""
+TRAEFIK_STATIC_CONFIG_FILE=""
+TRAEFIK_DYNAMIC_CONFIG_FILE=""
+TRAEFIK_TEMPLATE_TMP_DIR=""
+
+TRAEFIK_DASHBOARD_HOST=""
+PROXMOX_ROUTE_ENABLED="n"
+PROXMOX_HOST=""
+PROXMOX_URL=""
+
 TEMP_FILES=()
+TEMP_DIRS=()
 
 # =========================================================
 #  OUTPUT / LOGGING FUNCTIONS
@@ -191,6 +208,10 @@ function cleanup() {
 
     for file in "${TEMP_FILES[@]:-}"; do
         [ -n "$file" ] && [ -f "$file" ] && rm -f "$file" 2>/dev/null || true
+    done
+
+    for file in "${TEMP_DIRS[@]:-}"; do
+        [ -n "$file" ] && [ -d "$file" ] && rm -rf "$file" 2>/dev/null || true
     done
 
     exit "$exit_code"
@@ -828,6 +849,7 @@ function validate_dependencies() {
         test
         touch
         tput
+        tr
         xargs
     )
 
@@ -839,6 +861,10 @@ function validate_dependencies() {
 
     if [ -n "$SUDO_CMD" ]; then
         command -v sudo >/dev/null 2>&1 || msg_error "sudo is required when not running as root."
+    fi
+
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        msg_error "Either curl or wget is required to download Traefik template files."
     fi
 }
 
@@ -877,6 +903,112 @@ function write_secret_file_no_newline() {
     else
         printf '%s' "$value" > "$path"
     fi
+}
+
+# --- 39A. DOWNLOAD FILE HELPER ---
+# Downloads a public template file to a temporary path without printing its content.
+# Uses curl when available and falls back to wget.
+function download_file() {
+    local url="$1"
+    local dest="$2"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$dest"
+    else
+        wget -qO "$dest" "$url"
+    fi
+}
+
+# --- 39B. TRAEFIK TEMPLATE RENDER HELPER ---
+# Replaces public-safe placeholders in downloaded Traefik templates.
+# Secret values are never embedded into Traefik config files.
+# Cloudflare and htpasswd credentials remain file-based Docker secrets.
+function render_traefik_template() {
+    local src="$1"
+    local dest="$2"
+    local content=""
+    local proxmox_block=""
+
+    content="$(cat "$src")"
+    proxmox_block="$(build_proxmox_route_block)"
+
+    content="${content//\{\{DOCKER_DIR\}\}/$DOCKER_DIR}"
+    content="${content//\{\{DOMAIN\}\}/$DOMAIN_VALUE}"
+    content="${content//\{\{CF_API_EMAIL\}\}/$CF_API_EMAIL_VALUE}"
+    content="${content//\{\{TRAEFIK_DASHBOARD_HOST\}\}/$TRAEFIK_DASHBOARD_HOST}"
+    content="${content//\{\{TRAEFIK_ACME_EMAIL\}\}/$CF_API_EMAIL_VALUE}"
+    content="${content//\{\{CF_API_TOKEN_SECRET_PATH\}\}//run/secrets/cf_api_token}"
+    content="${content//\{\{HTPASSWD_SECRET_PATH\}\}//run/secrets/htpasswd}"
+    content="${content//\{\{PROXMOX_ROUTE_BLOCK\}\}/$proxmox_block}"
+
+    if grep -q '{{CF_API_TOKEN\|{{CLOUDFLARE_API_TOKEN' <<< "$content"; then
+        msg_error "Traefik template contains a raw token placeholder. Use file-based token placeholders only."
+    fi
+
+    printf '%s\n' "$content" | write_root_file "$dest"
+}
+
+# --- 39C. TRAEFIK DYNAMIC ROUTER BLOCK HELPER ---
+# Builds dynamic file-provider routers/services for Traefik itself and optional Proxmox routing.
+# The Traefik dashboard router is always generated.
+# Proxmox routing is disabled by default and only generated when explicitly selected.
+function build_proxmox_route_block() {
+    cat <<EOF
+  # -------------------------------------------------------
+  # FILE-PROVIDER ROUTERS
+  # -------------------------------------------------------
+  routers:
+    traefik-dashboard:
+      entryPoints:
+        - https
+      rule: Host(\`${TRAEFIK_DASHBOARD_HOST}\`)
+      middlewares:
+        - chain-authentik@file
+      tls:
+        certResolver: cloudflare
+      service: api@internal
+EOF
+
+    if [ "$PROXMOX_ROUTE_ENABLED" != "y" ]; then
+        cat <<'EOF'
+
+  # Proxmox routing was disabled during setup.
+EOF
+        return 0
+    fi
+
+    cat <<EOF
+
+    proxmox:
+      entryPoints:
+        - https
+      rule: Host(\`${PROXMOX_HOST}\`)
+      middlewares:
+        - chain-authentik@file
+      tls:
+        certResolver: cloudflare
+      service: proxmox
+
+  # -------------------------------------------------------
+  # FILE-PROVIDER SERVICES
+  # -------------------------------------------------------
+  services:
+    proxmox:
+      loadBalancer:
+        serversTransport: proxmoxTransport
+        passHostHeader: true
+        servers:
+          - url: "${PROXMOX_URL}"
+
+  # -------------------------------------------------------
+  # TARGETED SERVER TRANSPORTS
+  # -------------------------------------------------------
+  # Only Proxmox gets insecureSkipVerify because Proxmox commonly uses a self-signed local cert.
+  # Do not use global insecureSkipVerify.
+  serversTransports:
+    proxmoxTransport:
+      insecureSkipVerify: true
+EOF
 }
 
 # =========================================================
@@ -991,7 +1123,7 @@ function collect_user_and_path_inputs() {
             break
         fi
 
-        msg_warn "Invalid username. Use lowercase Linux username format, for example: orik"
+        msg_warn "Invalid username. Use lowercase Linux username format, for example: dockeradmin"
     done
 
     if ! id "$DOCKER_USER" >/dev/null 2>&1; then
@@ -1097,7 +1229,7 @@ function collect_domain_cloudflare_inputs() {
             break
         fi
 
-        msg_warn "Invalid domain. Use a bare domain such as najafov.co.uk, without https:// or slashes."
+        msg_warn "Invalid domain. Use a bare domain such as example.com, without https:// or slashes."
     done
 
     while true; do
@@ -1134,6 +1266,57 @@ function collect_domain_cloudflare_inputs() {
     else
         msg_ok "CLOUDFLARE API TOKEN CAPTURED"
     fi
+}
+
+# --- 46A. TRAEFIK CONFIG INPUTS ---
+# Collects non-secret Traefik values used to render template config files.
+# Cloudflare token stays in ${CF_API_TOKEN_FILE}; it is never embedded into Traefik YAML.
+function collect_traefik_inputs() {
+    local default_traefik_host="traefik.${DOMAIN_VALUE}"
+    local proxmox_yn=""
+    local default_proxmox_host="proxmox.${DOMAIN_VALUE}"
+    local default_proxmox_url="https://192.168.1.10:8006"
+
+    section "TRAEFIK CONFIG"
+
+    while true; do
+        TRAEFIK_DASHBOARD_HOST="$(timed_text_input "Enter Traefik dashboard host" "$default_traefik_host")"
+
+        if validate_domain "$TRAEFIK_DASHBOARD_HOST"; then
+            break
+        fi
+
+        msg_warn "Invalid Traefik host. Use a bare hostname such as traefik.${DOMAIN_VALUE}."
+    done
+
+    proxmox_yn="$(timed_yes_no "Create optional Proxmox route in Traefik dynamic config?" "n")"
+
+    if [[ "$proxmox_yn" =~ ^[Yy] ]]; then
+        PROXMOX_ROUTE_ENABLED="y"
+
+        while true; do
+            PROXMOX_HOST="$(timed_text_input "Enter Proxmox hostname" "$default_proxmox_host")"
+
+            if validate_domain "$PROXMOX_HOST"; then
+                break
+            fi
+
+            msg_warn "Invalid Proxmox hostname. Use a bare hostname such as proxmox.${DOMAIN_VALUE}."
+        done
+
+        PROXMOX_URL="$(timed_text_input "Enter Proxmox internal URL" "$default_proxmox_url")"
+        msg_ok "PROXMOX ROUTE WILL BE CREATED"
+    else
+        PROXMOX_ROUTE_ENABLED="n"
+        PROXMOX_HOST=""
+        PROXMOX_URL=""
+        msg_ok "PROXMOX ROUTE SKIPPED"
+    fi
+
+    TRAEFIK_DIR="${DOCKER_DIR}/appdata/traefik"
+    TRAEFIK_ACME_DIR="${TRAEFIK_DIR}/acme"
+    TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_DIR}/traefik.yml"
+    TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DIR}/dynamic-config.yml"
 }
 
 # --- 47. HTPASSWD OPTIONAL INPUT ---
@@ -1215,6 +1398,10 @@ function create_docker_directories() {
     run_cmd "creating PostgreSQL data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
+    run_cmd "creating Traefik config directory" mkdir -p "${TRAEFIK_DIR}"
+    run_cmd "creating Traefik ACME directory" mkdir -p "${TRAEFIK_ACME_DIR}"
+    run_cmd "creating Traefik ACME storage" touch "${TRAEFIK_ACME_DIR}/acme.json"
+
     msg_ok "DOCKER FOLDERS CREATED"
 }
 
@@ -1287,6 +1474,43 @@ EOF
     run_cmd "making PostgreSQL init script executable" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
     msg_ok "POSTGRES INIT SCRIPT CREATED"
+}
+
+# --- 50A. TRAEFIK CONFIG TEMPLATE RENDERING ---
+# Downloads public Traefik template files from GitHub and renders local config files.
+# Only non-secret placeholders are replaced. Cloudflare token remains file-based via Docker secret.
+function create_traefik_config_files() {
+    local static_template=""
+    local dynamic_template=""
+
+    section "TRAEFIK CONFIG FILES"
+
+    msg_info "Preparing temporary Traefik template workspace"
+    TRAEFIK_TEMPLATE_TMP_DIR="$(mktemp -d /tmp/traefik-template-render.XXXXXX)"
+    TEMP_DIRS+=("$TRAEFIK_TEMPLATE_TMP_DIR")
+    static_template="${TRAEFIK_TEMPLATE_TMP_DIR}/traefik.yml.template"
+    dynamic_template="${TRAEFIK_TEMPLATE_TMP_DIR}/dynamic-config.yml.template"
+    msg_ok "TRAEFIK TEMPLATE WORKSPACE READY"
+
+    msg_info "Downloading Traefik static template"
+    download_file "$TRAEFIK_STATIC_TEMPLATE_URL" "$static_template" || msg_error "Failed to download Traefik template: ${TRAEFIK_STATIC_TEMPLATE_URL}"
+    msg_ok "TRAEFIK STATIC TEMPLATE DOWNLOADED"
+
+    msg_info "Downloading Traefik dynamic template"
+    download_file "$TRAEFIK_DYNAMIC_TEMPLATE_URL" "$dynamic_template" || msg_error "Failed to download Traefik template: ${TRAEFIK_DYNAMIC_TEMPLATE_URL}"
+    msg_ok "TRAEFIK DYNAMIC TEMPLATE DOWNLOADED"
+
+    msg_info "Rendering Traefik static config"
+    render_traefik_template "$static_template" "$TRAEFIK_STATIC_CONFIG_FILE"
+    msg_ok "TRAEFIK STATIC CONFIG CREATED"
+
+    msg_info "Rendering Traefik dynamic config"
+    render_traefik_template "$dynamic_template" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
+    msg_ok "TRAEFIK DYNAMIC CONFIG CREATED"
+
+    msg_info "Securing Traefik ACME storage"
+    run_cmd "setting Traefik ACME storage permissions" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
+    msg_ok "TRAEFIK ACME STORAGE READY"
 }
 
 # --- 51. SECRET FILE CREATION ---
@@ -1397,6 +1621,12 @@ function apply_permissions() {
     run_cmd "setting PostgreSQL init directory permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
+    run_cmd "setting Traefik config directory permissions" chmod 750 "${TRAEFIK_DIR}"
+    run_cmd "setting Traefik ACME directory permissions" chmod 700 "${TRAEFIK_ACME_DIR}"
+    run_cmd "setting Traefik static config permissions" chmod 644 "${TRAEFIK_STATIC_CONFIG_FILE}"
+    run_cmd "setting Traefik dynamic config permissions" chmod 644 "${TRAEFIK_DYNAMIC_CONFIG_FILE}"
+    run_cmd "setting Traefik ACME storage permissions" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
+
     run_cmd "setting .env permissions" chmod 600 "${DOCKER_DIR}/.env"
     run_cmd "setting secrets directory permissions" chmod 700 "$DOCKER_SECRETS_DIR"
 
@@ -1474,6 +1704,10 @@ EOF
         if [ -e "$CF_API_TOKEN_FILE" ]; then echo "✓ PASS - Cloudflare token file exists"; else echo "! WARN - Cloudflare token file missing"; fi
         if [ -e "${DOCKER_SECRETS_DIR}/htpasswd" ]; then echo "✓ PASS - htpasswd file exists"; else echo "! WARN - htpasswd file missing"; fi
         if [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ]; then echo "✓ PASS - PostgreSQL init script exists and is executable"; else echo "✗ FAIL - PostgreSQL init script missing or not executable"; fi
+        if [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ]; then echo "✓ PASS - Traefik static config exists"; else echo "✗ FAIL - Traefik static config missing"; fi
+        if [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ]; then echo "✓ PASS - Traefik dynamic config exists"; else echo "✗ FAIL - Traefik dynamic config missing"; fi
+        if [ -f "${TRAEFIK_ACME_DIR}/acme.json" ]; then echo "✓ PASS - Traefik acme.json exists"; else echo "✗ FAIL - Traefik acme.json missing"; fi
+        if [ "$(root_stat_mode "${TRAEFIK_ACME_DIR}/acme.json")" == "600" ]; then echo "✓ PASS - Traefik acme.json mode is 600"; else echo "! WARN - Traefik acme.json mode is not 600"; fi
 
         if command -v docker >/dev/null 2>&1; then echo "✓ PASS - Docker CLI detected"; else echo "! WARN - Docker CLI not detected"; fi
         if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then echo "✓ PASS - Docker Compose plugin detected"; else echo "! WARN - Docker Compose plugin not detected for current shell"; fi
@@ -1506,6 +1740,11 @@ Timezone: $TZ_VALUE
 Existing setup detected: $EXISTING_SETUP
 Secrets regenerated: $REGENERATE_SECRETS
 Cloudflare token file: $CF_API_TOKEN_FILE
+Traefik static config: $TRAEFIK_STATIC_CONFIG_FILE
+Traefik dynamic config: $TRAEFIK_DYNAMIC_CONFIG_FILE
+Traefik ACME storage: ${TRAEFIK_ACME_DIR}/acme.json
+Traefik dashboard host: $TRAEFIK_DASHBOARD_HOST
+Proxmox route enabled: $PROXMOX_ROUTE_ENABLED
 Htpasswd mode: $HTPASSWD_MODE
 Docker ready: $DOCKER_READY
 Docker Compose ready: $DOCKER_COMPOSE_READY
@@ -1527,6 +1766,11 @@ Timezone: $TZ_VALUE
 Existing setup detected: $EXISTING_SETUP
 Secrets regenerated: $REGENERATE_SECRETS
 Cloudflare token file: $CF_API_TOKEN_FILE
+Traefik static config: $TRAEFIK_STATIC_CONFIG_FILE
+Traefik dynamic config: $TRAEFIK_DYNAMIC_CONFIG_FILE
+Traefik ACME storage: ${TRAEFIK_ACME_DIR}/acme.json
+Traefik dashboard host: $TRAEFIK_DASHBOARD_HOST
+Proxmox route enabled: $PROXMOX_ROUTE_ENABLED
 Htpasswd mode: $HTPASSWD_MODE
 Docker ready: $DOCKER_READY
 Docker Compose ready: $DOCKER_COMPOSE_READY
@@ -1572,6 +1816,9 @@ function show_secrets_once_without_logging() {
     echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE}${CL}"
     echo -e "CF_ZONE_ID=${GN}${CF_ZONE_ID_VALUE}${CL}"
     echo -e "CF_API_TOKEN_FILE=${GN}${CF_API_TOKEN_FILE}${CL}"
+    echo -e "TRAEFIK_STATIC_CONFIG=${GN}${TRAEFIK_STATIC_CONFIG_FILE}${CL}"
+    echo -e "TRAEFIK_DYNAMIC_CONFIG=${GN}${TRAEFIK_DYNAMIC_CONFIG_FILE}${CL}"
+    echo -e "TRAEFIK_ACME_STORAGE=${GN}${TRAEFIK_ACME_DIR}/acme.json${CL}"
 
     if [ -n "$CF_API_TOKEN_VALUE" ]; then
         echo -e "CF_API_TOKEN=${GN}${CF_API_TOKEN_VALUE}${CL}"
@@ -1622,6 +1869,10 @@ function show_clean_final_summary() {
     detail_line ".ENV FILE" "${DOCKER_DIR}/.env"
     detail_line "SECRETS DIR" "$DOCKER_SECRETS_DIR"
     detail_line "POSTGRES INIT" "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+    detail_line "TRAEFIK STATIC CONFIG" "$TRAEFIK_STATIC_CONFIG_FILE"
+    detail_line "TRAEFIK DYNAMIC CONFIG" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
+    detail_line "TRAEFIK ACME STORAGE" "${TRAEFIK_ACME_DIR}/acme.json"
+    detail_line "TRAEFIK DASHBOARD HOST" "$TRAEFIK_DASHBOARD_HOST"
     detail_line "CLOUDFLARE TOKEN FILE" "$CF_API_TOKEN_FILE"
     detail_line "HTPASSWD FILE" "${DOCKER_SECRETS_DIR}/htpasswd"
     detail_line "DOMAIN" "$DOMAIN_VALUE"
@@ -1635,7 +1886,7 @@ function show_clean_final_summary() {
     echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Deploy yml 0 and yml 1 first, then continue through the compose stack order in Portainer.${CL}"
+    echo -e "${YW}Run script 6.5 to create Docker networks and bootstrap socket-proxy + Portainer.${CL}"
     echo ""
 }
 
@@ -1654,11 +1905,13 @@ function main() {
     collect_user_and_path_inputs
     detect_existing_setup
     collect_domain_cloudflare_inputs
+    collect_traefik_inputs
     collect_htpasswd_inputs
 
     create_docker_directories
     generate_or_reuse_secrets
     create_postgres_init_script
+    create_traefik_config_files
     write_secret_files
     write_env_file
     apply_permissions

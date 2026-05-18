@@ -1,4 +1,8 @@
 # 08-cf-ddns-compose.yml
+# Project: Cloudflare DDNS
+# Purpose: Updates the root/domain A record with current public IP.
+# Network note: no t2_proxy attachment needed; this container only needs outbound internet.
+
 name: cf-ddns
 
 secrets:
@@ -12,8 +16,6 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
-    networks:
-      - t2_proxy
     secrets:
       - cf_api_token
     environment:
@@ -23,8 +25,3 @@ services:
       RRTYPE: A
       DELETE_ON_STOP: "false"
       DNS_SERVER: 1.1.1.1
-
-networks:
-  t2_proxy:
-    name: t2_proxy
-    external: true

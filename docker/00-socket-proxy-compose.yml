@@ -1,4 +1,8 @@
 # 00-socket-proxy-compose.yml
+# Project: Socket Proxy
+# Purpose: Controlled Docker API access for trusted admin/automation containers.
+# Network note: socket_proxy is created by script 6.5 and reused as external.
+
 name: socket-proxy
 
 services:
@@ -51,7 +55,4 @@ services:
 networks:
   socket_proxy:
     name: socket_proxy
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 192.168.91.0/24
+    external: true

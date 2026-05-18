@@ -1,4 +1,13 @@
 # 07-postiz-compose.yml
+# Project: Postiz
+# Purpose: Social-media posting application with large-upload Traefik middleware.
+#
+# Auth note:
+# - Authentik forward-auth is intentionally not enabled by default because third-party
+#   OAuth/callback routes may need to remain reachable.
+# - After Postiz integrations are confirmed, you can switch to chain-authentik-large-upload@file
+#   or add route exceptions for callbacks/webhooks.
+
 name: postiz
 
 services:
@@ -31,9 +40,11 @@ services:
       traefik.http.routers.postiz.entrypoints: https
       traefik.http.routers.postiz.tls: "true"
       traefik.http.routers.postiz.tls.certresolver: cloudflare
-      traefik.http.routers.postiz.middlewares: authentik@docker
+      traefik.http.routers.postiz.middlewares: chain-large-upload@file
       traefik.http.routers.postiz.service: postiz
       traefik.http.services.postiz.loadbalancer.server.port: 5000
+      # Enable later only if it does not break OAuth/callback routes:
+      # traefik.http.routers.postiz.middlewares: chain-authentik-large-upload@file
 
 networks:
   t2_proxy:

@@ -1,4 +1,8 @@
 # 06-temporal-compose.yml
+# Project: Temporal
+# Purpose: Temporal backend service for Postiz/background workflows.
+# Note: no dynamicconfig host mount by default, so the image built-in config is not hidden.
+
 name: temporal
 
 services:
@@ -17,8 +21,6 @@ services:
       POSTGRES_PWD: ${TEMPORAL_POSTGRES_PASSWORD}
       POSTGRES_SEEDS: postgres
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
-    volumes:
-      - ${DOCKER_DIR}/appdata/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
     healthcheck:
       test: ["CMD-SHELL", "tctl --address temporal:7233 workflow list >/dev/null 2>&1 || exit 1"]
       interval: 30s

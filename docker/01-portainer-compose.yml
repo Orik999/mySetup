@@ -1,4 +1,9 @@
 # 01-portainer-compose.yml
+# Project: Portainer
+# Purpose: Docker management UI through socket-proxy and Traefik.
+# Bootstrap note: script 6.5 may add a local override exposing 9443 temporarily.
+# Production note: keep direct ports removed and access through Traefik/AuthentiK.
+
 name: portainer
 
 services:
@@ -22,7 +27,8 @@ services:
       traefik.http.routers.portainer.rule: Host(`portainer.${DOMAIN}`)
       traefik.http.routers.portainer.entrypoints: https
       traefik.http.routers.portainer.tls: "true"
-      traefik.http.routers.portainer.middlewares: authentik@docker
+      traefik.http.routers.portainer.tls.certresolver: cloudflare
+      traefik.http.routers.portainer.middlewares: chain-authentik@file
       traefik.http.routers.portainer.service: portainer
       traefik.http.services.portainer.loadbalancer.server.port: 9000
 

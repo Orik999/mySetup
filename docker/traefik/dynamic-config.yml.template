@@ -1,0 +1,167 @@
+# =========================================================
+#  Traefik Dynamic Configuration Template
+#  Project: Home-Hosted Social Media SaaS
+# =========================================================
+#
+# Generated from this public-safe template by script 6.
+# Placeholders are replaced locally before this file is written to:
+#   {{DOCKER_DIR}}/appdata/traefik/dynamic-config.yml
+#
+# This file defines reusable routers, services, middlewares and TLS options.
+# It intentionally contains no real secrets.
+
+http:
+{{PROXMOX_ROUTE_BLOCK}}
+
+  # -------------------------------------------------------
+  # REUSABLE MIDDLEWARE CHAINS
+  # -------------------------------------------------------
+  middlewares:
+    chain-secure:
+      chain:
+        middlewares:
+          - middlewares-rate-limit
+          - middlewares-secure-headers
+          - middlewares-compress
+
+    chain-basic-auth:
+      chain:
+        middlewares:
+          - middlewares-rate-limit
+          - middlewares-secure-headers
+          - middlewares-basic-auth
+          - middlewares-compress
+
+    chain-local-only:
+      chain:
+        middlewares:
+          - local-ipwhitelist
+          - middlewares-rate-limit
+          - middlewares-secure-headers
+          - middlewares-compress
+
+    chain-authentik:
+      chain:
+        middlewares:
+          - middlewares-rate-limit
+          - middlewares-secure-headers
+          - authentik@docker
+          - middlewares-compress
+
+    # Use this for upload-heavy apps such as Postiz without Authentik.
+    chain-large-upload:
+      chain:
+        middlewares:
+          - middlewares-rate-limit
+          - middlewares-secure-headers
+          - middlewares-buffering-large-upload
+          - middlewares-compress
+
+    # Use this later for upload-heavy apps that also work correctly behind Authentik.
+    chain-authentik-large-upload:
+      chain:
+        middlewares:
+          - middlewares-rate-limit
+          - middlewares-secure-headers
+          - authentik@docker
+          - middlewares-buffering-large-upload
+          - middlewares-compress
+
+    # -----------------------------------------------------
+    # ACCESS CONTROL
+    # -----------------------------------------------------
+    local-ipwhitelist:
+      ipAllowList:
+        sourceRange:
+          - 127.0.0.1/32
+          - 10.0.0.0/8
+          - 172.16.0.0/12
+          - 192.168.0.0/16
+
+    middlewares-basic-auth:
+      basicAuth:
+        usersFile: /run/secrets/htpasswd
+        realm: "Traefik Basic Auth"
+        removeHeader: true
+
+    # -----------------------------------------------------
+    # RATE LIMITING
+    # -----------------------------------------------------
+    middlewares-rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50
+
+    # -----------------------------------------------------
+    # SECURITY HEADERS
+    # -----------------------------------------------------
+    middlewares-secure-headers:
+      headers:
+        customResponseHeaders:
+          X-Robots-Tag: "none,noarchive,nosnippet,notranslate,noimageindex"
+          server: ""
+        sslProxyHeaders:
+          X-Forwarded-Proto: https
+        customRequestHeaders:
+          X-Forwarded-Proto: "https"
+        referrerPolicy: "strict-origin-when-cross-origin"
+        hostsProxyHeaders:
+          - X-Forwarded-Host
+        permissionsPolicy: "camera=(), microphone=(self), geolocation=(), payment=(), usb=(), vr=()"
+        contentTypeNosniff: true
+        browserXssFilter: true
+        forceSTSHeader: true
+        stsIncludeSubdomains: true
+        stsSeconds: 63072000
+        stsPreload: true
+
+    # -----------------------------------------------------
+    # COMPRESSION
+    # -----------------------------------------------------
+    middlewares-compress:
+      compress: {}
+
+    # -----------------------------------------------------
+    # BUFFERING PROFILES
+    # -----------------------------------------------------
+    # Small/default profile: general dashboards and APIs.
+    middlewares-buffering-small:
+      buffering:
+        maxRequestBodyBytes: 10485760
+        memRequestBodyBytes: 2097152
+        maxResponseBodyBytes: 10485760
+        memResponseBodyBytes: 2097152
+        retryExpression: "IsNetworkError() && Attempts() <= 2"
+
+    # Large upload profile: Postiz/video-heavy workflows.
+    # 1 GiB max body, 32 MiB memory buffer; excess spills to disk.
+    middlewares-buffering-large-upload:
+      buffering:
+        maxRequestBodyBytes: 1073741824
+        memRequestBodyBytes: 33554432
+        maxResponseBodyBytes: 1073741824
+        memResponseBodyBytes: 33554432
+        retryExpression: "IsNetworkError() && Attempts() <= 2"
+
+# ---------------------------------------------------------
+# TLS OPTIONS
+# ---------------------------------------------------------
+tls:
+  options:
+    default:
+      minVersion: VersionTLS12
+      sniStrict: true
+      cipherSuites:
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+      curvePreferences:
+        - CurveP521
+        - CurveP384
+
+    modern:
+      minVersion: VersionTLS13
+      sniStrict: true

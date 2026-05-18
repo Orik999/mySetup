@@ -1,4 +1,12 @@
 # 11-filebrowser-compose.yml
+# Project: Filebrowser
+# Purpose: Browser file manager for uploads/downloads and safe project-file edits.
+#
+# Security note:
+# - compose/shared/backups are mounted read-write so you can upload modified YAML/files.
+# - secrets, .env, and database appdata are intentionally not mounted.
+# - Large-upload Traefik middleware is applied for bigger uploads/downloads.
+
 name: filebrowser
 
 services:
@@ -11,7 +19,10 @@ services:
     networks:
       - t2_proxy
     volumes:
-      - ${DOCKER_DIR}:/srv
+      - ${DOCKER_DIR}/shared:/srv/shared
+      - ${DOCKER_DIR}/backups:/srv/backups
+      - ${DOCKER_DIR}/compose:/srv/compose
+      - ${DOCKER_DIR}/appdata/traefik:/srv/traefik-config
       - ${DOCKER_DIR}/appdata/filebrowser/database:/database
       - ${DOCKER_DIR}/appdata/filebrowser/config:/config
     environment:
@@ -24,7 +35,7 @@ services:
       traefik.http.routers.filebrowser.entrypoints: https
       traefik.http.routers.filebrowser.tls: "true"
       traefik.http.routers.filebrowser.tls.certresolver: cloudflare
-      traefik.http.routers.filebrowser.middlewares: authentik@docker
+      traefik.http.routers.filebrowser.middlewares: chain-authentik-large-upload@file
       traefik.http.routers.filebrowser.service: filebrowser
       traefik.http.services.filebrowser.loadbalancer.server.port: 80
 
