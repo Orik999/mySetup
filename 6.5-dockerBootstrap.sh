@@ -98,6 +98,11 @@ CF_COMPANION_SECRET_OK="skipped"
 FILEBROWSER_FOLDERS_OK="skipped"
 YML_12_RETIRED="no"
 
+POSTIZ_TEMPORAL_GUARD_PATH="/usr/local/sbin/postiz-temporal-guard"
+POSTIZ_TEMPORAL_GUARD_INSTALLED="no"
+POSTIZ_TEMPORAL_GUARD_RUN="not-run"
+POSTIZ_TEMPORAL_GUARD_STATUS="not-run"
+
 SUDO_CMD=""
 DOCKER_NEEDS_SUDO="no"
 TEMP_FILES=()
@@ -1125,6 +1130,277 @@ function retire_yml_12_docker_gc() {
     YML_12_RETIRED="yes"
 }
 
+
+# =========================================================
+#  POSTIZ / TEMPORAL RUNTIME GUARD
+# =========================================================
+
+# --- 33I. POSTIZ TEMPORAL GUARD INSTALLER ---
+# Installs a reusable helper that fixes the known Postiz + Temporal fresh/rerun startup issue.
+# Temporal auto-setup can create default Text search attributes that conflict with Postiz startup.
+# The helper must run after Temporal is fully started and before Postiz starts.
+function install_postiz_temporal_guard() {
+    section "POSTIZ / TEMPORAL GUARD"
+
+    msg_info "Installing Postiz Temporal guard helper"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" tee "$POSTIZ_TEMPORAL_GUARD_PATH" >/dev/null <<'POSTIZ_TEMPORAL_GUARD_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================================================
+#  Postiz Temporal Guard
+# =========================================================
+# Run after Temporal is started and before Postiz is started.
+# It removes Temporal default Text search attributes that can make Postiz fail with:
+# cannot have more than 3 search attribute of type Text
+# Do not restart Temporal after this helper removes the attributes.
+
+TEMPORAL_CONTAINER="${TEMPORAL_CONTAINER:-temporal}"
+POSTIZ_CONTAINER="${POSTIZ_CONTAINER:-postiz}"
+WAIT_SECONDS="${WAIT_SECONDS:-120}"
+SLEEP_SECONDS="${SLEEP_SECONDS:-5}"
+
+cleanup_tmp() {
+    rm -f /tmp/postiz-temporal-search-attributes.$$ /tmp/postiz-temporal-guard-error.$$ 2>/dev/null || true
+}
+trap cleanup_tmp EXIT
+
+if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
+    DOCKER=(docker)
+elif command -v sudo >/dev/null 2>&1 && sudo -n docker ps >/dev/null 2>&1; then
+    DOCKER=(sudo docker)
+else
+    echo "ERROR: Docker is not reachable. Run as a docker user or with sudo." >&2
+    exit 1
+fi
+
+if ! "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$TEMPORAL_CONTAINER"; then
+    echo "SKIP: Temporal container not found: $TEMPORAL_CONTAINER"
+    exit 0
+fi
+
+if "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
+    if "${DOCKER[@]}" ps --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
+        echo "Stopping Postiz before Temporal search-attribute cleanup..."
+        "${DOCKER[@]}" stop "$POSTIZ_CONTAINER" >/dev/null || true
+    fi
+fi
+
+if ! "${DOCKER[@]}" ps --format '{{.Names}}' | grep -qx "$TEMPORAL_CONTAINER"; then
+    echo "Starting Temporal..."
+    "${DOCKER[@]}" start "$TEMPORAL_CONTAINER" >/dev/null
+fi
+
+waited=0
+TEMPORAL_IP=""
+while [ "$waited" -le "$WAIT_SECONDS" ]; do
+    TEMPORAL_IP="$("${DOCKER[@]}" inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TEMPORAL_CONTAINER" 2>/dev/null || true)"
+
+    if [ -n "$TEMPORAL_IP" ]; then
+        if "${DOCKER[@]}" exec "$TEMPORAL_CONTAINER" temporal --address "${TEMPORAL_IP}:7233" operator search-attribute list >/tmp/postiz-temporal-search-attributes.$$ 2>/tmp/postiz-temporal-guard-error.$$; then
+            break
+        fi
+    fi
+
+    sleep "$SLEEP_SECONDS"
+    waited=$((waited + SLEEP_SECONDS))
+done
+
+if [ ! -s /tmp/postiz-temporal-search-attributes.$$ ]; then
+    echo "ERROR: Temporal did not become reachable on port 7233 within ${WAIT_SECONDS}s." >&2
+    cat /tmp/postiz-temporal-guard-error.$$ 2>/dev/null || true
+    exit 1
+fi
+
+attrs="$(cat /tmp/postiz-temporal-search-attributes.$$)"
+
+remove_args=()
+if grep -q '^  CustomTextField[[:space:]]\+Text' <<< "$attrs"; then
+    remove_args+=(--name CustomTextField)
+fi
+if grep -q '^  CustomStringField[[:space:]]\+Text' <<< "$attrs"; then
+    remove_args+=(--name CustomStringField)
+fi
+
+if [ "${#remove_args[@]}" -gt 0 ]; then
+    echo "Removing Temporal Text attributes that conflict with Postiz: ${remove_args[*]}"
+    "${DOCKER[@]}" exec "$TEMPORAL_CONTAINER" temporal --address "${TEMPORAL_IP}:7233" operator search-attribute remove "${remove_args[@]}" --yes
+else
+    echo "No conflicting Temporal Text attributes found."
+fi
+
+# Important: do not restart Temporal after attribute removal.
+# Restarting Temporal can recreate the attributes before Postiz starts.
+if "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
+    echo "Starting Postiz..."
+    "${DOCKER[@]}" start "$POSTIZ_CONTAINER" >/dev/null || true
+
+    sleep 30
+    if "${DOCKER[@]}" exec "$POSTIZ_CONTAINER" sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -qi ':0BB8'"; then
+        echo "PASS: Postiz backend port 3000 is listening."
+    else
+        echo "WARN: Postiz container exists, but backend port 3000 was not confirmed yet. Check: docker logs postiz --tail=180" >&2
+    fi
+else
+    echo "Postiz container is not deployed yet. Run this helper after yml 06 Temporal is up and before yml 07 Postiz, or immediately after yml 07 if Postiz already exists."
+fi
+
+exit 0
+POSTIZ_TEMPORAL_GUARD_EOF
+        "$SUDO_CMD" chmod 0755 "$POSTIZ_TEMPORAL_GUARD_PATH"
+    else
+        cat > "$POSTIZ_TEMPORAL_GUARD_PATH" <<'POSTIZ_TEMPORAL_GUARD_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================================================
+#  Postiz Temporal Guard
+# =========================================================
+# Run after Temporal is started and before Postiz is started.
+# It removes Temporal default Text search attributes that can make Postiz fail with:
+# cannot have more than 3 search attribute of type Text
+# Do not restart Temporal after this helper removes the attributes.
+
+TEMPORAL_CONTAINER="${TEMPORAL_CONTAINER:-temporal}"
+POSTIZ_CONTAINER="${POSTIZ_CONTAINER:-postiz}"
+WAIT_SECONDS="${WAIT_SECONDS:-120}"
+SLEEP_SECONDS="${SLEEP_SECONDS:-5}"
+
+cleanup_tmp() {
+    rm -f /tmp/postiz-temporal-search-attributes.$$ /tmp/postiz-temporal-guard-error.$$ 2>/dev/null || true
+}
+trap cleanup_tmp EXIT
+
+if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
+    DOCKER=(docker)
+elif command -v sudo >/dev/null 2>&1 && sudo -n docker ps >/dev/null 2>&1; then
+    DOCKER=(sudo docker)
+else
+    echo "ERROR: Docker is not reachable. Run as a docker user or with sudo." >&2
+    exit 1
+fi
+
+if ! "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$TEMPORAL_CONTAINER"; then
+    echo "SKIP: Temporal container not found: $TEMPORAL_CONTAINER"
+    exit 0
+fi
+
+if "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
+    if "${DOCKER[@]}" ps --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
+        echo "Stopping Postiz before Temporal search-attribute cleanup..."
+        "${DOCKER[@]}" stop "$POSTIZ_CONTAINER" >/dev/null || true
+    fi
+fi
+
+if ! "${DOCKER[@]}" ps --format '{{.Names}}' | grep -qx "$TEMPORAL_CONTAINER"; then
+    echo "Starting Temporal..."
+    "${DOCKER[@]}" start "$TEMPORAL_CONTAINER" >/dev/null
+fi
+
+waited=0
+TEMPORAL_IP=""
+while [ "$waited" -le "$WAIT_SECONDS" ]; do
+    TEMPORAL_IP="$("${DOCKER[@]}" inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TEMPORAL_CONTAINER" 2>/dev/null || true)"
+
+    if [ -n "$TEMPORAL_IP" ]; then
+        if "${DOCKER[@]}" exec "$TEMPORAL_CONTAINER" temporal --address "${TEMPORAL_IP}:7233" operator search-attribute list >/tmp/postiz-temporal-search-attributes.$$ 2>/tmp/postiz-temporal-guard-error.$$; then
+            break
+        fi
+    fi
+
+    sleep "$SLEEP_SECONDS"
+    waited=$((waited + SLEEP_SECONDS))
+done
+
+if [ ! -s /tmp/postiz-temporal-search-attributes.$$ ]; then
+    echo "ERROR: Temporal did not become reachable on port 7233 within ${WAIT_SECONDS}s." >&2
+    cat /tmp/postiz-temporal-guard-error.$$ 2>/dev/null || true
+    exit 1
+fi
+
+attrs="$(cat /tmp/postiz-temporal-search-attributes.$$)"
+
+remove_args=()
+if grep -q '^  CustomTextField[[:space:]]\+Text' <<< "$attrs"; then
+    remove_args+=(--name CustomTextField)
+fi
+if grep -q '^  CustomStringField[[:space:]]\+Text' <<< "$attrs"; then
+    remove_args+=(--name CustomStringField)
+fi
+
+if [ "${#remove_args[@]}" -gt 0 ]; then
+    echo "Removing Temporal Text attributes that conflict with Postiz: ${remove_args[*]}"
+    "${DOCKER[@]}" exec "$TEMPORAL_CONTAINER" temporal --address "${TEMPORAL_IP}:7233" operator search-attribute remove "${remove_args[@]}" --yes
+else
+    echo "No conflicting Temporal Text attributes found."
+fi
+
+# Important: do not restart Temporal after attribute removal.
+# Restarting Temporal can recreate the attributes before Postiz starts.
+if "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
+    echo "Starting Postiz..."
+    "${DOCKER[@]}" start "$POSTIZ_CONTAINER" >/dev/null || true
+
+    sleep 30
+    if "${DOCKER[@]}" exec "$POSTIZ_CONTAINER" sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -qi ':0BB8'"; then
+        echo "PASS: Postiz backend port 3000 is listening."
+    else
+        echo "WARN: Postiz container exists, but backend port 3000 was not confirmed yet. Check: docker logs postiz --tail=180" >&2
+    fi
+else
+    echo "Postiz container is not deployed yet. Run this helper after yml 06 Temporal is up and before yml 07 Postiz, or immediately after yml 07 if Postiz already exists."
+fi
+
+exit 0
+POSTIZ_TEMPORAL_GUARD_EOF
+        chmod 0755 "$POSTIZ_TEMPORAL_GUARD_PATH"
+    fi
+
+    POSTIZ_TEMPORAL_GUARD_INSTALLED="yes"
+    msg_ok "POSTIZ TEMPORAL GUARD INSTALLED"
+    detail_line "Guard command" "$POSTIZ_TEMPORAL_GUARD_PATH"
+}
+
+# --- 33J. POSTIZ TEMPORAL GUARD RERUN CHECK ---
+# Runs the guard only when Temporal is already deployed during a rerun.
+# On a brand-new deployment, this safely skips and the installed helper is used after yml 06 starts.
+function run_postiz_temporal_guard_if_ready() {
+    section "POSTIZ / TEMPORAL RERUN CHECK"
+
+    if ! docker_cmd ps -a --format '{{.Names}}' | grep -qx 'temporal'; then
+        POSTIZ_TEMPORAL_GUARD_RUN="skipped-temporal-not-present"
+        POSTIZ_TEMPORAL_GUARD_STATUS="helper-installed-for-later"
+        msg_skip "TEMPORAL NOT DEPLOYED YET; GUARD HELPER INSTALLED FOR LATER"
+        echo -e "${YW}After yml 06 Temporal is deployed and before yml 07 Postiz is started, run:${CL}"
+        echo -e " ${GN}${POSTIZ_TEMPORAL_GUARD_PATH}${CL}"
+        return 0
+    fi
+
+    msg_info "Running Postiz Temporal guard against existing Temporal container"
+
+    POSTIZ_TEMPORAL_GUARD_RUN="yes"
+
+    if [ -n "$SUDO_CMD" ]; then
+        if "$SUDO_CMD" "$POSTIZ_TEMPORAL_GUARD_PATH"; then
+            POSTIZ_TEMPORAL_GUARD_STATUS="passed"
+            msg_ok "POSTIZ TEMPORAL GUARD PASSED"
+        else
+            POSTIZ_TEMPORAL_GUARD_STATUS="failed"
+            msg_error "Postiz Temporal guard failed. Check Temporal/Postiz logs before deploying Postiz."
+        fi
+    else
+        if "$POSTIZ_TEMPORAL_GUARD_PATH"; then
+            POSTIZ_TEMPORAL_GUARD_STATUS="passed"
+            msg_ok "POSTIZ TEMPORAL GUARD PASSED"
+        else
+            POSTIZ_TEMPORAL_GUARD_STATUS="failed"
+            msg_error "Postiz Temporal guard failed. Check Temporal/Postiz logs before deploying Postiz."
+        fi
+    fi
+}
+
 # =========================================================
 #  NETWORK BOOTSTRAP
 # =========================================================
@@ -1474,6 +1750,9 @@ VERIFY_LOG_EOF
         echo "Temporal compose: ${TEMPORAL_COMPOSE_OK}"
         echo "CF companion secret: ${CF_COMPANION_SECRET_OK}"
         echo "Filebrowser folders: ${FILEBROWSER_FOLDERS_OK}"
+        echo "Postiz Temporal guard installed: ${POSTIZ_TEMPORAL_GUARD_INSTALLED}"
+        echo "Postiz Temporal guard run: ${POSTIZ_TEMPORAL_GUARD_RUN}"
+        echo "Postiz Temporal guard status: ${POSTIZ_TEMPORAL_GUARD_STATUS}"
         echo ""
         echo "Docker containers:"
         docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
@@ -1527,6 +1806,10 @@ Authentik folders OK: $AUTHENTIK_FOLDERS_OK
 Temporal compose OK: $TEMPORAL_COMPOSE_OK
 CF companion secret OK: $CF_COMPANION_SECRET_OK
 Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
+Postiz Temporal guard installed: $POSTIZ_TEMPORAL_GUARD_INSTALLED
+Postiz Temporal guard run: $POSTIZ_TEMPORAL_GUARD_RUN
+Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
+Postiz Temporal guard path: $POSTIZ_TEMPORAL_GUARD_PATH
 Verify log: $VERIFY_LOG
 MARKER_EOF
     else
@@ -1567,6 +1850,10 @@ Authentik folders OK: $AUTHENTIK_FOLDERS_OK
 Temporal compose OK: $TEMPORAL_COMPOSE_OK
 CF companion secret OK: $CF_COMPANION_SECRET_OK
 Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
+Postiz Temporal guard installed: $POSTIZ_TEMPORAL_GUARD_INSTALLED
+Postiz Temporal guard run: $POSTIZ_TEMPORAL_GUARD_RUN
+Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
+Postiz Temporal guard path: $POSTIZ_TEMPORAL_GUARD_PATH
 Verify log: $VERIFY_LOG
 MARKER_EOF
     fi
@@ -1594,6 +1881,8 @@ function show_final_summary() {
     detail_line "AUTHENTIK FOLDERS" "$AUTHENTIK_FOLDERS_OK"
     detail_line "TEMPORAL COMPOSE" "$TEMPORAL_COMPOSE_OK"
     detail_line "FILEBROWSER FOLDERS" "$FILEBROWSER_FOLDERS_OK"
+    detail_line "POSTIZ TEMPORAL GUARD" "$POSTIZ_TEMPORAL_GUARD_STATUS"
+    detail_line "GUARD COMMAND" "$POSTIZ_TEMPORAL_GUARD_PATH"
     detail_line "Portainer URL" "$PORTAINER_ACCESS_URL"
     detail_line "Bootstrap port" "$PORTAINER_BOOTSTRAP_PORT"
     detail_line "Verify log" "$VERIFY_LOG"
@@ -1607,7 +1896,9 @@ function show_final_summary() {
     fi
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Deploy/verify remaining stacks in order, then run Script 7 for final SSO/hardening.${CL}"
+    echo -e "${YW}Deploy/verify remaining stacks in order. After yml 06 Temporal starts and before yml 07 Postiz, run:${CL}"
+    echo -e "${GN}${POSTIZ_TEMPORAL_GUARD_PATH}${CL}"
+    echo -e "${YW}Do not restart Temporal after the guard runs. Then deploy/start Postiz and finally run Script 7.${CL}"
     echo ""
 }
 
@@ -1633,6 +1924,7 @@ function main() {
     verify_temporal_compose_settings
     verify_cf_companion_secret_file
     verify_filebrowser_folders
+    install_postiz_temporal_guard
 
     create_shared_networks
     verify_shared_networks
@@ -1645,6 +1937,7 @@ function main() {
     deploy_socket_proxy
     deploy_admin_ui
     verify_bootstrap_containers
+    run_postiz_temporal_guard_if_ready
 
     create_verification_report
     write_completion_marker

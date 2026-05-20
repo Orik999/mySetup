@@ -64,6 +64,11 @@ PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
 UFW_PORTAINER_RULE_REMOVED="not-applicable"
 NOPASSWD_HARDENED="no"
 DOCKER_USER_RULES_REVIEWED="no"
+POSTIZ_HEALTH_OK="no"
+POSTIZ_BACKEND_PORT_OK="no"
+POSTIZ_WEB_ROUTE_OK="no"
+POSTIZ_TEMPORAL_GUARD_STATUS="not-found"
+POSTIZ_TEMPORAL_GUARD_STOPPED="not-applicable"
 
 TEMP_FILES=()
 
@@ -667,6 +672,8 @@ function verify_required_containers() {
         authentik-worker
         postgres
         redis
+        temporal
+        postiz
     )
 
     local container=""
@@ -1198,6 +1205,126 @@ function remove_portainer_ufw_rule() {
     msg_ok "TEMPORARY PORTAINER UFW RULE REMOVAL ATTEMPTED"
 }
 
+
+# =========================================================
+#  POSTIZ / TEMPORAL GUARD CLEANUP
+# =========================================================
+
+# --- 19. POSTIZ HEALTH VERIFICATION ---
+# Confirms the real Postiz stack is healthy before stopping the temporary yml 07 guard.
+# The guard exists only to remove Temporal's default Text search attributes before Postiz starts.
+function verify_postiz_health() {
+    section "POSTIZ HEALTH CHECK"
+
+    local postiz_running="no"
+    local temporal_running="no"
+    local backend_port_found=""
+    local auth_url="https://postiz.${DOMAIN}/auth"
+    local auth_code=""
+
+    msg_info "Checking Temporal container"
+    if docker_cmd ps --format '{{.Names}}' | grep -qx 'temporal'; then
+        temporal_running="yes"
+        msg_ok "TEMPORAL RUNNING"
+    else
+        POSTIZ_HEALTH_OK="no"
+        msg_warn "TEMPORAL IS NOT RUNNING; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
+        return 0
+    fi
+
+    msg_info "Checking Postiz container"
+    if docker_cmd ps --format '{{.Names}}' | grep -qx 'postiz'; then
+        postiz_running="yes"
+        msg_ok "POSTIZ RUNNING"
+    else
+        POSTIZ_HEALTH_OK="no"
+        msg_warn "POSTIZ IS NOT RUNNING; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
+        return 0
+    fi
+
+    msg_info "Checking Postiz backend port 3000"
+    backend_port_found="$(docker_cmd exec postiz sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i ':0BB8' || true" 2>/dev/null || true)"
+
+    if [ -n "$backend_port_found" ]; then
+        POSTIZ_BACKEND_PORT_OK="yes"
+        msg_ok "POSTIZ BACKEND PORT 3000 IS LISTENING"
+    else
+        POSTIZ_BACKEND_PORT_OK="no"
+        POSTIZ_HEALTH_OK="no"
+        msg_warn "POSTIZ BACKEND PORT 3000 IS NOT LISTENING; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
+        return 0
+    fi
+
+    msg_info "Checking Postiz web route"
+    auth_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$auth_url" || true)"
+
+    case "$auth_code" in
+        200|301|302|307|308|401|403)
+            POSTIZ_WEB_ROUTE_OK="yes"
+            POSTIZ_HEALTH_OK="yes"
+            msg_ok "POSTIZ WEB ROUTE RESPONDED WITH HTTP ${auth_code}"
+            ;;
+        *)
+            POSTIZ_WEB_ROUTE_OK="no"
+            POSTIZ_HEALTH_OK="no"
+            msg_warn "POSTIZ WEB ROUTE RETURNED HTTP ${auth_code:-none}; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
+            return 0
+            ;;
+    esac
+
+    detail_line "Postiz health" "$POSTIZ_HEALTH_OK"
+    detail_line "Backend port 3000" "$POSTIZ_BACKEND_PORT_OK"
+    detail_line "Web route" "${auth_url} -> ${auth_code}"
+}
+
+# --- 20. POSTIZ TEMPORAL GUARD STOPPER ---
+# Stops the temporary yml 07 guard after Postiz is confirmed healthy.
+# It does not delete Portainer stack definitions or compose files.
+function stop_postiz_temporal_guard_if_safe() {
+    section "POSTIZ TEMPORAL GUARD CLEANUP"
+
+    local guard_container="postiz-temporal-guard"
+    local stop_yn=""
+
+    if ! docker_cmd ps -a --format '{{.Names}}' | grep -qx "$guard_container"; then
+        POSTIZ_TEMPORAL_GUARD_STATUS="not-found"
+        POSTIZ_TEMPORAL_GUARD_STOPPED="not-applicable"
+        msg_ok "NO POSTIZ TEMPORAL GUARD CONTAINER FOUND"
+        return 0
+    fi
+
+    POSTIZ_TEMPORAL_GUARD_STATUS="found"
+
+    if [ "$POSTIZ_HEALTH_OK" != "yes" ]; then
+        POSTIZ_TEMPORAL_GUARD_STOPPED="kept-postiz-not-healthy"
+        msg_warn "POSTIZ IS NOT CONFIRMED HEALTHY; TEMPORAL GUARD WILL BE LEFT RUNNING"
+        return 0
+    fi
+
+    echo -e "${YW}The temporary yml 07 Postiz Temporal guard is no longer needed because Postiz is healthy.${CL}"
+    echo -e "${YW}This will only stop the guard container. It will not delete Portainer stack data or GitHub backup.${CL}"
+    echo ""
+
+    stop_yn="$(timed_yes_no "Stop temporary Postiz Temporal guard now?" "y")"
+
+    if [[ "$stop_yn" =~ ^[Nn] ]]; then
+        POSTIZ_TEMPORAL_GUARD_STOPPED="user-skipped"
+        msg_skip "POSTIZ TEMPORAL GUARD STOP SKIPPED"
+        return 0
+    fi
+
+    msg_info "Stopping Postiz Temporal guard"
+    docker_cmd stop "$guard_container" >/dev/null 2>&1 || true
+
+    if docker_cmd ps --format '{{.Names}}' | grep -qx "$guard_container"; then
+        POSTIZ_TEMPORAL_GUARD_STOPPED="failed"
+        msg_warn "POSTIZ TEMPORAL GUARD STILL APPEARS RUNNING"
+    else
+        POSTIZ_TEMPORAL_GUARD_STOPPED="yes"
+        msg_ok "POSTIZ TEMPORAL GUARD STOPPED"
+    fi
+}
+
 # =========================================================
 #  SYSTEM HARDENING
 # =========================================================
@@ -1334,6 +1461,11 @@ Komodo OIDC status: $KOMODO_OIDC_STATUS
 Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
 UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
+Postiz health OK: $POSTIZ_HEALTH_OK
+Postiz backend port OK: $POSTIZ_BACKEND_PORT_OK
+Postiz web route OK: $POSTIZ_WEB_ROUTE_OK
+Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
+Postiz Temporal guard stopped: $POSTIZ_TEMPORAL_GUARD_STOPPED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 EOF2
     else
@@ -1360,6 +1492,11 @@ Komodo OIDC status: $KOMODO_OIDC_STATUS
 Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
 UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
+Postiz health OK: $POSTIZ_HEALTH_OK
+Postiz backend port OK: $POSTIZ_BACKEND_PORT_OK
+Postiz web route OK: $POSTIZ_WEB_ROUTE_OK
+Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
+Postiz Temporal guard stopped: $POSTIZ_TEMPORAL_GUARD_STOPPED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 EOF2
     fi
@@ -1451,6 +1588,10 @@ function show_final_summary() {
     detail_line "PORTAINER BOOTSTRAP CLOSED" "$PORTAINER_BOOTSTRAP_CLOSED"
     detail_line "UFW PORTAINER RULE REMOVED" "$UFW_PORTAINER_RULE_REMOVED"
     detail_line "NOPASSWD HARDENED" "$NOPASSWD_HARDENED"
+    detail_line "POSTIZ HEALTH" "$POSTIZ_HEALTH_OK"
+    detail_line "POSTIZ BACKEND 3000" "$POSTIZ_BACKEND_PORT_OK"
+    detail_line "POSTIZ WEB ROUTE" "$POSTIZ_WEB_ROUTE_OK"
+    detail_line "POSTIZ TEMPORAL GUARD" "$POSTIZ_TEMPORAL_GUARD_STOPPED"
     detail_line "DOCKER-USER REVIEW" "$DOCKER_USER_RULES_REVIEWED"
     detail_line "VERIFY LOG" "$VERIFY_LOG"
 
@@ -1461,6 +1602,12 @@ function show_final_summary() {
         echo -e "${YW}Authentik outpost verification did not pass. Attach the Traefik Forward Auth app/provider to the existing authentik Embedded Outpost, then rerun Script 7.${CL}"
     else
         echo -e "${GN}Authentik forward-auth outpost route is responding with true HTTP 302.${CL}"
+    fi
+
+    if [ "$POSTIZ_TEMPORAL_GUARD_STOPPED" == "yes" ]; then
+        echo -e "${GN}Temporary Postiz Temporal guard was stopped because Postiz is healthy.${CL}"
+    elif [ "$POSTIZ_TEMPORAL_GUARD_STATUS" == "found" ]; then
+        echo -e "${YW}Postiz Temporal guard was found but not stopped. Keep it until Postiz health is confirmed.${CL}"
     fi
 
     echo ""
@@ -1491,6 +1638,9 @@ function main() {
     configure_admin_ui_sso
     close_portainer_bootstrap_exposure
     remove_portainer_ufw_rule
+
+    verify_postiz_health
+    stop_postiz_temporal_guard_if_safe
 
     harden_sudo_nopasswd
     docker_user_firewall_review

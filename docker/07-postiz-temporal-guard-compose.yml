@@ -1,0 +1,51 @@
+name: postiz-temporal-guard
+
+services:
+  postiz-temporal-guard:
+    image: temporalio/admin-tools:latest
+    container_name: postiz-temporal-guard
+    restart: "no"
+    networks:
+      - database
+    entrypoint:
+      - /bin/sh
+      - -c
+    command: |
+      set -eu
+
+      echo "Waiting for Temporal at temporal:7233..."
+      ready="no"
+
+      for i in $(seq 1 90); do
+        if temporal --address temporal:7233 operator search-attribute list >/tmp/temporal-search-attributes.txt 2>/tmp/temporal-search-attributes.err; then
+          ready="yes"
+          break
+        fi
+        echo "Temporal not ready yet... attempt ${i}/90"
+        sleep 2
+      done
+
+      if [ "$ready" != "yes" ]; then
+        echo "Temporal did not become ready. Last error:"
+        cat /tmp/temporal-search-attributes.err || true
+        exit 1
+      fi
+
+      echo "Temporal is reachable. Current custom attributes:"
+      temporal --address temporal:7233 operator search-attribute list | grep Custom || true
+
+      echo "Removing Temporal default Text attributes that break Postiz startup if present..."
+      temporal --address temporal:7233 operator search-attribute remove \
+        --name CustomTextField \
+        --name CustomStringField \
+        --yes || true
+
+      echo "Post-removal custom attributes:"
+      temporal --address temporal:7233 operator search-attribute list | grep Custom || true
+
+      echo "Postiz Temporal guard completed. Do NOT restart Temporal before starting Postiz."
+
+networks:
+  database:
+    name: database
+    external: true

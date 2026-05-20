@@ -1,0 +1,39 @@
+Recommended fresh-build order
+=============================
+
+Script flow:
+1. Run Script 6: Docker ENV Setup
+2. Run Script 6.5: Docker Bootstrap Setup
+   - creates networks
+   - deploys socket-proxy
+   - deploys selected admin UI/bootstrap UI
+3. Deploy remaining stacks manually in this order.
+
+Manual stack order after Script 6.5:
+
+02-postgres-compose.yml
+03-redis-compose.yml
+04-traefik-compose.yml
+05-authentik-compose.yml
+06-temporal-compose.yml
+07-postiz-temporal-guard-compose.yml
+08-postiz-compose.yml
+09-cf-ddns-compose.yml
+10-cf-companion-compose.yml
+11-vscode-compose.yml
+12-filebrowser-compose.yml
+
+Important Postiz rule:
+- Deploy 06-temporal-compose.yml first.
+- Wait until Temporal is running.
+- Deploy 07-postiz-temporal-guard-compose.yml.
+- Do NOT restart Temporal after the guard runs.
+- Then deploy 08-postiz-compose.yml.
+
+Admin UI alternatives:
+- 01-portainer-compose.yml + 01-portainer-bootstrap-override.yml are for Portainer CE bootstrap.
+- 90-dockge-compose.yml is an alternative admin UI, not part of the normal manual stack if Portainer is selected.
+- 91-komodo-compose.yml is an alternative admin UI, not part of the normal manual stack if Portainer/Dockge is selected.
+
+Retired:
+- Docker-GC compose container should stay retired. Use host-side docker-gc-safe from Script 5 instead.
