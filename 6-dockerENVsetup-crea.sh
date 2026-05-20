@@ -77,6 +77,11 @@ HTPASSWD_PASSWORD_VALUE=""
 HTPASSWD_HASH_VALUE=""
 HTPASSWD_LINE_VALUE=""
 
+ADMIN_UI="portainer"
+ADMIN_UI_DISPLAY_NAME="Portainer"
+ADMIN_UI_HOST=""
+ADMIN_UI_URL=""
+
 SECRET_DISPLAY_WAS_SHOWN="no"
 SECRET_SCREEN_CLEARED="no"
 
@@ -1379,6 +1384,98 @@ function collect_htpasswd_inputs() {
     fi
 }
 
+
+# --- 47AA. ADMIN UI DETAIL HELPER ---
+# Derives the formal admin UI display name, hostname and URL from the selected admin UI key.
+# Script 6 owns this configuration and writes it into .env so Script 6.5 can deploy consistently.
+function set_admin_ui_details() {
+    case "$ADMIN_UI" in
+        dockge)
+            ADMIN_UI_DISPLAY_NAME="Dockge"
+            ADMIN_UI_HOST="dockge.${DOMAIN_VALUE}"
+            ;;
+        portainer|portainer-ce)
+            ADMIN_UI="portainer"
+            ADMIN_UI_DISPLAY_NAME="Portainer"
+            ADMIN_UI_HOST="portainer.${DOMAIN_VALUE}"
+            ;;
+        komodo)
+            ADMIN_UI_DISPLAY_NAME="Komodo"
+            ADMIN_UI_HOST="komodo.${DOMAIN_VALUE}"
+            ;;
+        *)
+            ADMIN_UI="dockge"
+            ADMIN_UI_DISPLAY_NAME="Dockge"
+            ADMIN_UI_HOST="dockge.${DOMAIN_VALUE}"
+            ;;
+    esac
+
+    ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
+}
+
+# --- 47A. ADMIN UI SELECTION ---
+# Selects the container management interface once during configuration generation.
+# Script 6 owns this choice and writes it into .env; Script 6.5 only reads and deploys it.
+function collect_admin_ui_selection() {
+    local choice=""
+    local default_choice="2"
+
+    section "ADMIN UI SELECTION"
+
+    echo -e "${BL}Choose the Docker administration interface for this deployment:${CL}"
+    echo "1) Dockge - lightweight Compose-focused admin UI"
+    echo "2) Portainer CE - full Docker management UI"
+    echo "3) Komodo - Git/server-oriented deployment UI"
+    echo ""
+
+    while true; do
+        choice="$(timed_text_input "Select admin UI option" "$default_choice")"
+
+        case "$choice" in
+            1)
+                ADMIN_UI="dockge"
+                ADMIN_UI_DISPLAY_NAME="Dockge"
+                break
+                ;;
+            2)
+                ADMIN_UI="portainer"
+                ADMIN_UI_DISPLAY_NAME="Portainer"
+                break
+                ;;
+            3)
+                ADMIN_UI="komodo"
+                ADMIN_UI_DISPLAY_NAME="Komodo"
+                break
+                ;;
+            dockge|Dockge)
+                ADMIN_UI="dockge"
+                ADMIN_UI_DISPLAY_NAME="Dockge"
+                break
+                ;;
+            portainer|Portainer|portainer-ce|PortainerCE)
+                ADMIN_UI="portainer"
+                ADMIN_UI_DISPLAY_NAME="Portainer"
+                break
+                ;;
+            komodo|Komodo)
+                ADMIN_UI="komodo"
+                ADMIN_UI_DISPLAY_NAME="Komodo"
+                break
+                ;;
+            *)
+                msg_warn "Invalid admin UI selection. Choose 1, 2, or 3."
+                ;;
+        esac
+    done
+
+    set_admin_ui_details
+
+    msg_ok "ADMIN UI SELECTED: ${ADMIN_UI_DISPLAY_NAME}"
+    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
+    detail_line "Admin UI host" "$ADMIN_UI_HOST"
+    detail_line "Admin UI URL" "$ADMIN_UI_URL"
+}
+
 # =========================================================
 #  FILE / SECRET CREATION
 # =========================================================
@@ -1409,6 +1506,18 @@ function create_docker_directories() {
 
     run_cmd "creating Filebrowser database directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
     run_cmd "creating Filebrowser config directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
+
+    case "$ADMIN_UI" in
+        dockge)
+            run_cmd "creating Dockge appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockge"
+            ;;
+        portainer)
+            run_cmd "creating Portainer appdata directory" mkdir -p "${DOCKER_DIR}/appdata/portainer"
+            ;;
+        komodo)
+            run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
+            ;;
+    esac
 
     run_cmd "creating Traefik config directory" mkdir -p "${TRAEFIK_DIR}"
     run_cmd "creating Traefik ACME directory" mkdir -p "${TRAEFIK_ACME_DIR}"
@@ -1562,7 +1671,7 @@ function write_secret_files() {
 }
 
 # --- 52. ENV FILE CREATION ---
-# Creates /updates Docker .env used by docker compose CLI and Portainer stacks.
+# Creates /updates Docker .env used by docker compose CLI and the selected admin UI stack.
 # This file contains secrets and is locked down to 600 later.
 function write_env_file() {
     section "DOCKER .ENV"
@@ -1585,6 +1694,12 @@ PGID="${PGID_VALUE}"
 
 # --- Localisation ---
 TZ="${TZ_VALUE}"
+
+# --- Admin UI ---
+ADMIN_UI="${ADMIN_UI}"
+ADMIN_UI_DISPLAY_NAME="${ADMIN_UI_DISPLAY_NAME}"
+ADMIN_UI_HOST="${ADMIN_UI_HOST}"
+ADMIN_UI_URL="${ADMIN_UI_URL}"
 
 # --- Domain / Cloudflare ---
 DOMAIN="${DOMAIN_VALUE}"
@@ -1649,6 +1764,18 @@ function apply_permissions() {
     run_cmd "setting Filebrowser database permissions" chmod 750 "${DOCKER_DIR}/appdata/filebrowser/database"
     run_cmd "setting Filebrowser config permissions" chmod 750 "${DOCKER_DIR}/appdata/filebrowser/config"
 
+    case "$ADMIN_UI" in
+        dockge)
+            run_cmd "setting Dockge appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/dockge"
+            ;;
+        portainer)
+            run_cmd "setting Portainer appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/portainer"
+            ;;
+        komodo)
+            run_cmd "setting Komodo appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/komodo"
+            ;;
+    esac
+
     run_cmd "setting Traefik config directory permissions" chmod 750 "${TRAEFIK_DIR}"
     run_cmd "setting Traefik ACME directory permissions" chmod 700 "${TRAEFIK_ACME_DIR}"
     run_cmd "setting Traefik static config permissions" chmod 644 "${TRAEFIK_STATIC_CONFIG_FILE}"
@@ -1704,6 +1831,9 @@ EOF
         if id "$DOCKER_USER" >/dev/null 2>&1; then echo "✓ PASS - Docker user exists"; else echo "✗ FAIL - Docker user missing"; fi
         if [ -d "$DOCKER_DIR" ]; then echo "✓ PASS - Docker directory exists"; else echo "✗ FAIL - Docker directory missing"; fi
         if [ -f "${DOCKER_DIR}/.env" ]; then echo "✓ PASS - .env exists"; else echo "✗ FAIL - .env missing"; fi
+        if grep -q '^ADMIN_UI=' "${DOCKER_DIR}/.env"; then echo "✓ PASS - Admin UI selection present in .env"; else echo "✗ FAIL - Admin UI selection missing from .env"; fi
+        if grep -q '^ADMIN_UI_HOST=' "${DOCKER_DIR}/.env"; then echo "✓ PASS - Admin UI host present in .env"; else echo "✗ FAIL - Admin UI host missing from .env"; fi
+        if grep -q '^ADMIN_UI_URL=' "${DOCKER_DIR}/.env"; then echo "✓ PASS - Admin UI URL present in .env"; else echo "✗ FAIL - Admin UI URL missing from .env"; fi
         if [ "$(root_stat_mode "${DOCKER_DIR}/.env")" == "600" ]; then echo "✓ PASS - .env mode is 600"; else echo "! WARN - .env mode is not 600"; fi
         if [ -d "$DOCKER_SECRETS_DIR" ]; then echo "✓ PASS - secrets directory exists"; else echo "✗ FAIL - secrets directory missing"; fi
         if [ "$(root_stat_mode "$DOCKER_SECRETS_DIR")" == "700" ]; then echo "✓ PASS - secrets directory mode is 700"; else echo "! WARN - secrets directory mode is not 700"; fi
@@ -1775,6 +1905,10 @@ Docker ENV Setup completed on: $(date)
 Docker dir: $DOCKER_DIR
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
+Admin UI: $ADMIN_UI
+Admin UI display name: $ADMIN_UI_DISPLAY_NAME
+Admin UI host: $ADMIN_UI_HOST
+Admin UI URL: $ADMIN_UI_URL
 User: $DOCKER_USER
 PUID: $PUID_VALUE
 PGID: $PGID_VALUE
@@ -1801,6 +1935,10 @@ Docker ENV Setup completed on: $(date)
 Docker dir: $DOCKER_DIR
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
+Admin UI: $ADMIN_UI
+Admin UI display name: $ADMIN_UI_DISPLAY_NAME
+Admin UI host: $ADMIN_UI_HOST
+Admin UI URL: $ADMIN_UI_URL
 User: $DOCKER_USER
 PUID: $PUID_VALUE
 PGID: $PGID_VALUE
@@ -1849,6 +1987,10 @@ function show_secrets_once_without_logging() {
 
     echo -e "${BL}LINUX USER / IDS:${CL}"
     echo -e "DOCKER_USER=${GN}${DOCKER_USER}${CL}"
+    echo -e "ADMIN_UI=${GN}${ADMIN_UI}${CL}"
+    echo -e "ADMIN_UI_DISPLAY_NAME=${GN}${ADMIN_UI_DISPLAY_NAME}${CL}"
+    echo -e "ADMIN_UI_HOST=${GN}${ADMIN_UI_HOST}${CL}"
+    echo -e "ADMIN_UI_URL=${GN}${ADMIN_UI_URL}${CL}"
     echo -e "PUID=${GN}${PUID_VALUE}${CL}"
     echo -e "PGID=${GN}${PGID_VALUE}${CL}"
     echo ""
@@ -1920,6 +2062,9 @@ function show_clean_final_summary() {
     detail_line "HTPASSWD FILE" "${DOCKER_SECRETS_DIR}/htpasswd"
     detail_line "DOMAIN" "$DOMAIN_VALUE"
     detail_line "DOCKER USER" "$DOCKER_USER"
+    detail_line "ADMIN UI" "$ADMIN_UI_DISPLAY_NAME"
+    detail_line "ADMIN UI HOST" "$ADMIN_UI_HOST"
+    detail_line "ADMIN UI URL" "$ADMIN_UI_URL"
     detail_line "PUID / PGID" "${PUID_VALUE}:${PGID_VALUE}"
     detail_line "EXISTING SETUP" "$EXISTING_SETUP"
     detail_line "SECRETS REGENERATED" "$REGENERATE_SECRETS"
@@ -1929,7 +2074,7 @@ function show_clean_final_summary() {
     echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Run script 6.5 to create Docker networks and bootstrap socket-proxy + Portainer.${CL}"
+    echo -e "${YW}Run script 6.5 to create Docker networks and bootstrap Socket Proxy plus the selected admin UI.${CL}"
     echo ""
 }
 
@@ -1950,6 +2095,7 @@ function main() {
     collect_domain_cloudflare_inputs
     collect_traefik_inputs
     collect_htpasswd_inputs
+    collect_admin_ui_selection
 
     create_docker_directories
     generate_or_reuse_secrets
