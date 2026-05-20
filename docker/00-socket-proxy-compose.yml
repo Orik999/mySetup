@@ -2,6 +2,12 @@
 # Project: Docker Socket Proxy
 # Purpose: Safely exposes selected Docker API endpoints to internal management containers only.
 # Network note: socket_proxy is created by script 6.5 and reused as an external network.
+#
+# Final fixes applied:
+# - read_only:true is kept because tmpfs mounts are provided for writable runtime paths.
+# - /tmp and /run are writable tmpfs mounts for container runtime compatibility.
+# - Docker socket is mounted read-only.
+# - Docker API permissions remain restricted to the minimum practical set for bootstrap/admin UI use.
 
 name: socket-proxy
 
@@ -10,27 +16,35 @@ services:
     image: tecnativa/docker-socket-proxy:latest
     container_name: socket-proxy
     restart: unless-stopped
+
     security_opt:
       - no-new-privileges:true
+
+    # Safe because writable runtime paths are provided below via tmpfs.
     read_only: true
+
+    # Required writable paths for runtime/temp files while keeping the root filesystem read-only.
     tmpfs:
       - /run
       - /tmp
+
     networks:
       socket_proxy:
         ipv4_address: 192.168.91.254
+
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+
     environment:
       LOG_LEVEL: info
 
-      # Core safe/read endpoints
+      # Core safe/read endpoints.
       EVENTS: 1
       PING: 1
       VERSION: 1
       INFO: 1
 
-      # Required by Portainer/bootstrap management
+      # Management endpoints required by Portainer/bootstrap tooling.
       CONTAINERS: 1
       IMAGES: 1
       NETWORKS: 1
@@ -38,11 +52,11 @@ services:
       SERVICES: 1
       TASKS: 1
 
-      # Required for Portainer to manage containers/stacks.
-      # Later, we can split read-only and admin socket proxies for tighter security.
+      # Required for Portainer CE to manage containers/stacks through socket-proxy.
+      # If using Dockge-only later, this can be reviewed against Dockge's actual needs.
       POST: 1
 
-      # Disabled high-risk/unneeded endpoints
+      # Disabled high-risk/unneeded endpoints.
       AUTH: 0
       SECRETS: 0
       BUILD: 0
@@ -55,6 +69,7 @@ services:
       SESSION: 0
       SWARM: 0
       SYSTEM: 0
+
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:2375/version || exit 1"]
       interval: 30s

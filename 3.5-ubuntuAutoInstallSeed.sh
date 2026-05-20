@@ -83,8 +83,14 @@ STATIC_DNS="1.1.1.1,1.0.0.1"
 INSTALL_POWERED_OFF="no"
 
 CLEANUP_INSTALLED_TOOLS="yes"
+CLEANUP_TEMP_WORKFILES="yes"
 INSTALLED_TOOL_PACKAGES=()
 TEMP_FILES=()
+
+REUSE_EXISTING_AUTOINSTALL_ISO="no"
+GENERATED_ISO_EXISTS="no"
+TOOLS_CHECKED="no"
+MISSING_TOOL_PACKAGES=()
 
 BOOT_PARAM='autoinstall ds=nocloud\;s=/cdrom/nocloud/ subiquity.autoinstallpath=cdrom/autoinstall.yaml'
 
@@ -127,7 +133,11 @@ section_flash_success() {
 }
 
 detail_line() {
-    echo -e "  ${DGN}━━━━━▶${CL} $1"
+    if [ "$#" -ge 2 ]; then
+        echo -e "  ${DGN}━━━━━▶${CL} $1: ${GN}$2${CL}"
+    else
+        echo -e "  ${DGN}━━━━━▶${CL} $1"
+    fi
 }
 
 # --- 5. TTY PRINT HELPERS ---
@@ -159,12 +169,22 @@ cleanup() {
     local pkg=""
     local file=""
 
+    # Always remove small internal temporary files such as captured stderr logs.
+    # The larger ISO build workspace is controlled separately by CLEANUP_TEMP_WORKFILES.
     for file in "${TEMP_FILES[@]:-}"; do
-        [ -n "$file" ] && [ -e "$file" ] && rm -rf "$file" 2>/dev/null || true
+        if [ -n "$file" ] && [ -e "$file" ]; then
+            if [ -n "${WORK_DIR:-}" ] && [ "$file" == "$WORK_DIR" ]; then
+                continue
+            fi
+            rm -rf "$file" 2>/dev/null || true
+        fi
     done
 
-    if [ "${DEBUG_KEEP_WORKDIR:-0}" != "1" ] && [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+    if [ "$CLEANUP_TEMP_WORKFILES" == "yes" ] && [ "${DEBUG_KEEP_WORKDIR:-0}" != "1" ] && [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
         rm -rf "$WORK_DIR" 2>/dev/null || true
+    elif [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+        echo ""
+        echo -e "${YW}Temporary ISO workspace kept for inspection:${CL} ${GN}${WORK_DIR}${CL}"
     fi
 
     if [ "$CLEANUP_INSTALLED_TOOLS" == "yes" ] && [ "${#INSTALLED_TOOL_PACKAGES[@]}" -gt 0 ]; then
@@ -1088,7 +1108,7 @@ ensure_tools() {
     local pkg=""
     local install_yn=""
 
-    section "TOOL CHECK"
+    section "ISO TOOL CHECK"
 
     msg_info "Checking required ISO tools"
 
@@ -1098,12 +1118,20 @@ ensure_tools() {
         fi
     done
 
+    MISSING_TOOL_PACKAGES=("${missing_packages[@]}")
+    TOOLS_CHECKED="yes"
+
     if [ "${#missing_packages[@]}" -gt 0 ]; then
         msg_warn "Missing required tools: ${missing_packages[*]}"
+        echo ""
+        echo -e "${YW}These packages are required only when creating or verifying a generated autoinstall ISO.${CL}"
+        echo -e "${YW}Packages already installed before this script will not be removed by cleanup.${CL}"
+        echo ""
+
         install_yn="$(timed_yes_no "Install missing ISO tools now?" "y")"
 
         if [[ "$install_yn" =~ ^[Nn] ]]; then
-            msg_error "Required ISO tools are missing. Cannot continue."
+            msg_error "Required ISO tools are missing. Cannot create a new autoinstall ISO."
         fi
 
         msg_info "Installing missing ISO tools"
@@ -1117,9 +1145,100 @@ ensure_tools() {
         msg_ok "MISSING ISO TOOLS INSTALLED"
     else
         msg_ok "REQUIRED ISO TOOLS ALREADY INSTALLED"
+        detail_line "Tool cleanup" "not needed; no packages installed by this script"
     fi
 
     command -v xorriso >/dev/null 2>&1 || msg_error "xorriso is required."
+}
+
+# --- 35A. EARLY CLEANUP PREFERENCES ---
+# Collects cleanup decisions before package installation, work directories, ISO writes, or VM changes.
+# This keeps reruns predictable and ensures the user decides cleanup behaviour at the beginning.
+collect_early_cleanup_preferences() {
+    local tool_cleanup_yn=""
+    local temp_cleanup_yn=""
+    local iso_cleanup_yn=""
+
+    section "CLEANUP PREFERENCES"
+
+    echo -e "${YW}These choices are collected before any package install, temporary workspace, generated ISO, or VM change.${CL}"
+    echo -e "${YW}Already-installed ISO tools will never be removed. Only tools installed by this run are eligible for cleanup.${CL}"
+    echo ""
+
+    tool_cleanup_yn="$(timed_yes_no "Remove ISO tools installed by this script when finished?" "y")"
+    if [[ "$tool_cleanup_yn" =~ ^[Nn] ]]; then
+        CLEANUP_INSTALLED_TOOLS="no"
+    else
+        CLEANUP_INSTALLED_TOOLS="yes"
+    fi
+
+    temp_cleanup_yn="$(timed_yes_no "Remove temporary ISO build workspace when finished?" "y")"
+    if [[ "$temp_cleanup_yn" =~ ^[Nn] ]]; then
+        CLEANUP_TEMP_WORKFILES="no"
+    else
+        CLEANUP_TEMP_WORKFILES="yes"
+    fi
+
+    iso_cleanup_yn="$(timed_yes_no "Delete generated autoinstall ISO after successful install?" "y")"
+    if [[ "$iso_cleanup_yn" =~ ^[Nn] ]]; then
+        DELETE_GENERATED_ISO_AFTER_INSTALL="n"
+    else
+        DELETE_GENERATED_ISO_AFTER_INSTALL="y"
+    fi
+
+    detail_line "Cleanup installed tools" "$CLEANUP_INSTALLED_TOOLS"
+    detail_line "Cleanup temporary workspace" "$CLEANUP_TEMP_WORKFILES"
+    detail_line "Delete generated ISO after install" "$DELETE_GENERATED_ISO_AFTER_INSTALL"
+}
+
+# --- 35B. GENERATED ISO PATH PREPARATION ---
+# Calculates the generated ISO path before any work directory or file changes are made.
+set_autoinstall_iso_paths() {
+    AUTOINSTALL_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
+    AUTOINSTALL_ISO_PATH="/var/lib/vz/template/iso/${AUTOINSTALL_ISO_NAME}"
+    AUTOINSTALL_ISO_REF="local:iso/${AUTOINSTALL_ISO_NAME}"
+}
+
+# --- 35C. GENERATED ISO REUSE / RECREATE PREFLIGHT ---
+# Handles reruns before work directories, ISO writes, VM shutdowns, or VM config changes.
+precheck_generated_iso_reuse() {
+    local reuse_yn=""
+    local recreate_yn=""
+
+    set_autoinstall_iso_paths
+
+    section "RERUN / GENERATED ISO PREFLIGHT"
+
+    detail_line "Expected generated ISO" "$AUTOINSTALL_ISO_PATH"
+
+    if [ -f "$AUTOINSTALL_ISO_PATH" ]; then
+        GENERATED_ISO_EXISTS="yes"
+        msg_warn "Generated autoinstall ISO already exists"
+        echo ""
+        echo -e "${YW}You can reuse it to redeploy the VM without rebuilding the ISO, or recreate it with the current answers.${CL}"
+        echo ""
+
+        reuse_yn="$(timed_yes_no "Reuse existing generated ISO?" "y")"
+
+        if [[ "$reuse_yn" =~ ^[Yy] ]]; then
+            REUSE_EXISTING_AUTOINSTALL_ISO="yes"
+            msg_ok "EXISTING GENERATED ISO WILL BE REUSED"
+            return 0
+        fi
+
+        recreate_yn="$(timed_yes_no "Recreate and replace existing generated ISO?" "y")"
+
+        if [[ "$recreate_yn" =~ ^[Nn] ]]; then
+            msg_error "Existing generated ISO was not reused or replaced. Script cancelled before changes."
+        fi
+
+        REUSE_EXISTING_AUTOINSTALL_ISO="no"
+        msg_ok "EXISTING GENERATED ISO WILL BE REPLACED DURING ISO BUILD"
+    else
+        GENERATED_ISO_EXISTS="no"
+        REUSE_EXISTING_AUTOINSTALL_ISO="no"
+        msg_ok "NO EXISTING GENERATED ISO FOUND"
+    fi
 }
 
 # --- 36. PREVIOUS RUN MARKER CHECK ---
@@ -1159,8 +1278,6 @@ init_script() {
 
     validate_dependencies
     validate_proxmox
-    ensure_tools
-    check_previous_marker
 }
 
 # =========================================================
@@ -1186,7 +1303,6 @@ select_vm() {
     local default_vm_index="1"
     local highest_vmid="0"
     local vm_index=""
-    local shutdown_yn=""
 
     section "VM SELECTION"
 
@@ -1227,17 +1343,45 @@ select_vm() {
     qm config "$TARGET_VMID" >/dev/null 2>&1 || msg_error "Selected VM ${TARGET_VMID} does not exist."
 
     if [ "$TARGET_VM_STATUS" == "running" ]; then
-        msg_warn "VM ${TARGET_VMID} is currently running"
-        shutdown_yn="$(timed_yes_no "Shutdown VM before continuing?" "y")"
+        msg_warn "VM ${TARGET_VMID} is running; it will not be stopped until final apply."
+    fi
 
-        if [[ "$shutdown_yn" =~ ^[Yy] ]]; then
-            msg_info "Shutting down VM ${TARGET_VMID}"
-            run_cmd "shutting down VM ${TARGET_VMID}" qm shutdown "$TARGET_VMID" --timeout 60 || run_cmd "stopping VM ${TARGET_VMID}" qm stop "$TARGET_VMID"
-            msg_ok "VM STOPPED"
-            TARGET_VM_STATUS="stopped"
+    detail_line "Selected VM" "${TARGET_VMID} / ${TARGET_VM_NAME} / ${TARGET_VM_STATUS}"
+}
+
+# --- 39A. VM STOP SAFETY BEFORE APPLY ---
+# Stops the selected VM only after all prechecks, ISO decisions and final confirmation are complete.
+ensure_vm_stopped_before_apply() {
+    local shutdown_yn=""
+    local current_status=""
+
+    current_status="$(get_vm_status "$TARGET_VMID")"
+    TARGET_VM_STATUS="${current_status:-unknown}"
+
+    if [ "$TARGET_VM_STATUS" != "running" ]; then
+        return 0
+    fi
+
+    section "VM SHUTDOWN BEFORE APPLY"
+
+    msg_warn "VM ${TARGET_VMID} is currently running"
+    echo -e "${YW}The VM must be stopped before attaching installer media safely.${CL}"
+    echo ""
+
+    shutdown_yn="$(timed_yes_no "Shutdown VM now?" "y")"
+
+    if [[ "$shutdown_yn" =~ ^[Yy] ]]; then
+        msg_info "Shutting down VM ${TARGET_VMID}"
+        if qm shutdown "$TARGET_VMID" --timeout 60 >/dev/null 2>&1; then
+            msg_ok "VM SHUTDOWN COMPLETE"
         else
-            msg_error "VM must be stopped before attaching install media safely."
+            msg_warn "Graceful shutdown failed or timed out; forcing stop"
+            run_cmd "stopping VM ${TARGET_VMID}" qm stop "$TARGET_VMID"
+            msg_ok "VM STOPPED"
         fi
+        TARGET_VM_STATUS="stopped"
+    else
+        msg_error "VM must be stopped before attaching install media safely."
     fi
 }
 
@@ -1372,15 +1516,14 @@ collect_network_inputs() {
 
 # --- 44. POST-INSTALL INPUTS ---
 collect_post_install_options() {
-    local cleanup_yn=""
     local start_installed_yn=""
 
     section "POST-INSTALL OPTIONS"
 
     INSTALL_WAIT_MINUTES="$(timed_number_input "Enter autoinstall wait timeout in minutes" "$DEFAULT_INSTALL_WAIT_MINUTES" "10" "240")"
 
-    cleanup_yn="$(timed_yes_no "Delete generated autoinstall ISO after successful poweroff?" "y")"
-    [[ "$cleanup_yn" =~ ^[Nn] ]] && DELETE_GENERATED_ISO_AFTER_INSTALL="n" || DELETE_GENERATED_ISO_AFTER_INSTALL="y"
+    echo -e "${YW}Generated ISO deletion was already selected during early cleanup preferences:${CL} ${GN}${DELETE_GENERATED_ISO_AFTER_INSTALL}${CL}"
+    echo ""
 
     start_installed_yn="$(timed_yes_no "Start installed Ubuntu VM after cleanup?" "y")"
     [[ "$start_installed_yn" =~ ^[Nn] ]] && POST_INSTALL_START_VM="n" || POST_INSTALL_START_VM="y"
@@ -1433,28 +1576,36 @@ show_ubuntu_pro_note() {
 
 # --- 47. PREPARE WORKSPACE ---
 prepare_workspace() {
-    local replace_yn=""
-
-    AUTOINSTALL_ISO_NAME="ubuntu-26.04-autoinstall-vm${TARGET_VMID}.iso"
-    AUTOINSTALL_ISO_PATH="/var/lib/vz/template/iso/${AUTOINSTALL_ISO_NAME}"
-    AUTOINSTALL_ISO_REF="local:iso/${AUTOINSTALL_ISO_NAME}"
     WORK_DIR="$(mktemp -d "/tmp/ubuntu-autoinstall-vm${TARGET_VMID}.XXXXXX")"
     TEMP_FILES+=("$WORK_DIR")
-
-    if [ -f "$AUTOINSTALL_ISO_PATH" ]; then
-        section "GENERATED ISO CONFLICT"
-
-        echo -e "${YW}Generated autoinstall ISO already exists:${CL} ${GN}${AUTOINSTALL_ISO_PATH}${CL}"
-        replace_yn="$(timed_yes_no "Replace existing generated ISO?" "y")"
-
-        if [[ "$replace_yn" =~ ^[Nn] ]]; then
-            msg_error "Existing generated ISO was not replaced. Script cancelled."
-        fi
-    fi
 
     mkdir -p "$WORK_DIR/nocloud"
     mkdir -p "$WORK_DIR/grub"
     mkdir -p "$WORK_DIR/verify"
+}
+
+# --- 47A. EXISTING GENERATED ISO VALIDATION ---
+# Lightweight validation for reuse mode. It avoids modifying files or VM config.
+verify_reused_generated_iso() {
+    section "REUSED ISO CHECK"
+
+    if [ ! -s "$AUTOINSTALL_ISO_PATH" ]; then
+        msg_error "Selected reuse ISO is missing or empty: ${AUTOINSTALL_ISO_PATH}"
+    fi
+
+    msg_ok "EXISTING GENERATED ISO FOUND"
+    detail_line "Generated ISO" "$AUTOINSTALL_ISO_REF"
+
+    if command -v xorriso >/dev/null 2>&1; then
+        msg_info "Quick-checking reused ISO boot data"
+        if xorriso -indev "$AUTOINSTALL_ISO_PATH" -report_el_torito plain >/dev/null 2>&1; then
+            msg_ok "REUSED ISO BOOT DATA READABLE"
+        else
+            msg_warn "Could not read reused ISO boot data with xorriso. You may recreate it if boot fails."
+        fi
+    else
+        msg_warn "xorriso not installed; reused ISO was not deep-verified. This is acceptable for reuse mode."
+    fi
 }
 
 # --- 48. BUILD SSH KEY YAML ---
@@ -1645,6 +1796,11 @@ verify_generated_iso() {
 
 # --- 56. GENERATE AUTOINSTALL ISO ---
 generate_autoinstall_iso() {
+    if [ "$REUSE_EXISTING_AUTOINSTALL_ISO" == "yes" ]; then
+        verify_reused_generated_iso
+        return 0
+    fi
+
     prepare_workspace
     write_nocloud_network_config
     write_metadata
@@ -1684,8 +1840,11 @@ show_apply_summary() {
 
     echo -e "SOURCE ISO: ${GN}${INSTALL_ISO_REF}${CL}"
     echo -e "GENERATED AUTOINSTALL ISO: ${GN}${AUTOINSTALL_ISO_REF}${CL}"
+    echo -e "REUSE EXISTING ISO: ${GN}${REUSE_EXISTING_AUTOINSTALL_ISO}${CL}"
     echo -e "WAIT TIMEOUT: ${GN}${INSTALL_WAIT_MINUTES} minutes${CL}"
     echo -e "DELETE GENERATED ISO AFTER INSTALL: ${GN}${DELETE_GENERATED_ISO_AFTER_INSTALL}${CL}"
+    echo -e "CLEANUP TEMP WORKSPACE: ${GN}${CLEANUP_TEMP_WORKFILES}${CL}"
+    echo -e "CLEANUP INSTALLED TOOLS: ${GN}${CLEANUP_INSTALLED_TOOLS}${CL}"
     echo -e "START INSTALLED VM AFTER CLEANUP: ${GN}${POST_INSTALL_START_VM}${CL}"
     echo -e "IP DETECTION TIMEOUT: ${GN}${SSH_IP_DETECT_TIMEOUT_SECONDS}s${CL}"
     echo ""
@@ -1697,6 +1856,8 @@ show_apply_summary() {
 
 # --- 58. ATTACH AND START INSTALL ---
 attach_iso_and_start_install() {
+    ensure_vm_stopped_before_apply
+
     section "ATTACH INSTALLER AND START VM"
 
     msg_info "Attaching generated Ubuntu autoinstall ISO"
@@ -1800,6 +1961,7 @@ SSH Command: ${SSH_COMMAND:-not-generated}
 Verify Log: $VERIFY_LOG
 Tools Installed By Script: ${INSTALLED_TOOL_PACKAGES[*]:-none}
 Tools Cleanup Enabled: ${CLEANUP_INSTALLED_TOOLS}
+Temporary Workspace Cleanup Enabled: ${CLEANUP_TEMP_WORKFILES}
 EOF
 }
 
@@ -1925,12 +2087,15 @@ main() {
 
     init_script
 
+    check_previous_marker
     show_start_warning
     start_yn="$(timed_yes_no "Start Ubuntu Auto Install ISO Creator?" "y")"
 
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
+
+    collect_early_cleanup_preferences
 
     select_vm
     detect_vm_mac
@@ -1940,6 +2105,12 @@ main() {
     collect_post_install_options
     select_ubuntu_iso
     show_ubuntu_pro_note
+
+    precheck_generated_iso_reuse
+
+    if [ "$REUSE_EXISTING_AUTOINSTALL_ISO" != "yes" ]; then
+        ensure_tools
+    fi
 
     generate_autoinstall_iso
 

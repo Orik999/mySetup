@@ -43,15 +43,22 @@ GITHUB_RAW_BASE="${GITHUB_RAW_BASE:-https://raw.githubusercontent.com/Orik999/my
 YML_00_NAME="00-socket-proxy-compose.yml"
 YML_01_NAME="01-portainer-compose.yml"
 YML_01_OVERRIDE_NAME="01-portainer-bootstrap-override.yml"
+YML_DOCKGE_NAME="12-dockge-compose.yml"
+YML_KOMODO_NAME="13-komodo-compose.yml"
+YML_12_NAME="12-docker-gc-compose.yml"
 
 # Optional environment overrides for advanced/testing workflows.
 # If these are not set, URLs are rebuilt from GITHUB_RAW_BASE after user input.
 YML_00_URL_OVERRIDE="${YML_00_URL:-}"
 YML_01_URL_OVERRIDE="${YML_01_URL:-}"
 YML_01_OVERRIDE_URL_OVERRIDE="${YML_01_OVERRIDE_URL:-}"
+YML_DOCKGE_URL_OVERRIDE="${YML_DOCKGE_URL:-}"
+YML_KOMODO_URL_OVERRIDE="${YML_KOMODO_URL:-}"
 YML_00_URL="${YML_00_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_00_NAME}}"
 YML_01_URL="${YML_01_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_01_NAME}}"
 YML_01_OVERRIDE_URL="${YML_01_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_01_OVERRIDE_NAME}}"
+YML_DOCKGE_URL="${YML_DOCKGE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_DOCKGE_NAME}}"
+YML_KOMODO_URL="${YML_KOMODO_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_KOMODO_NAME}}"
 
 SOCKET_PROXY_SUBNET_EXPECTED="192.168.91.0/24"
 T2_PROXY_SUBNET_EXPECTED="192.168.90.0/24"
@@ -65,6 +72,32 @@ PORTAINER_OVERRIDE_FILE="${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
 PORTAINER_ACCESS_IP=""
 PORTAINER_ACCESS_URL=""
 
+ADMIN_UI="${ADMIN_UI:-portainer}"
+ADMIN_UI_SERVICE_NAME="portainer"
+ADMIN_UI_COMPOSE_FILE=""
+ADMIN_UI_PROJECT_NAME="portainer"
+ADMIN_UI_HOST=""
+ADMIN_UI_DEPLOYED="no"
+ADMIN_UI_VALIDATED="no"
+
+DOMAIN_VALUE=""
+DOCKER_SECRETS_DIR=""
+CF_API_TOKEN_FILE=""
+TRAEFIK_STATIC_CONFIG_FILE=""
+TRAEFIK_DYNAMIC_CONFIG_FILE=""
+TRAEFIK_ACME_STORAGE=""
+
+SYSCTL_REDIS_OK="no"
+TRAEFIK_PLACEHOLDERS_OK="no"
+TRAEFIK_DNS_DELAY_OK="no"
+TRAEFIK_ENCODED_CHARS_OK="no"
+TRAEFIK_AUTHENTIK_REFERENCES_OK="no"
+AUTHENTIK_FOLDERS_OK="no"
+TEMPORAL_COMPOSE_OK="skipped"
+CF_COMPANION_SECRET_OK="skipped"
+FILEBROWSER_FOLDERS_OK="skipped"
+YML_12_RETIRED="no"
+
 SUDO_CMD=""
 DOCKER_NEEDS_SUDO="no"
 TEMP_FILES=()
@@ -74,6 +107,8 @@ NETWORKS_VERIFIED="no"
 YML_00_DOWNLOADED="no"
 YML_01_DOWNLOADED="no"
 YML_01_OVERRIDE_DOWNLOADED="no"
+YML_DOCKGE_DOWNLOADED="no"
+YML_KOMODO_DOWNLOADED="no"
 SOCKET_PROXY_DEPLOYED="no"
 PORTAINER_DEPLOYED="no"
 PORTAINER_BOOTSTRAP_OVERRIDE_WRITTEN="no"
@@ -667,6 +702,51 @@ function run_docker_cmd() {
     rm -f "$err_file"
 }
 
+
+# --- 29A. ENV VALUE HELPER ---
+# Reads a variable from the generated .env without printing secret values.
+function env_value() {
+    local key="$1"
+
+    awk -F= -v k="$key" '
+        $1 == k {
+            val=$0
+            sub("^[^=]*=", "", val)
+            gsub(/^"|"$/, "", val)
+            print val
+            exit
+        }
+    ' "$ENV_FILE" 2>/dev/null || true
+}
+
+# --- 29B. FILE WRITABILITY HELPER ---
+# Verifies that the selected Docker user can create and remove a test file in a folder.
+function verify_user_writable_dir() {
+    local path="$1"
+    local test_file="${path}/.bootstrap-write-test-$$"
+
+    [ -d "$path" ] || return 1
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" -u "$DOCKER_USER" sh -c "touch '$test_file' && rm -f '$test_file'" >/dev/null 2>&1
+    else
+        su -s /bin/sh "$DOCKER_USER" -c "touch '$test_file' && rm -f '$test_file'" >/dev/null 2>&1
+    fi
+}
+
+# --- 29C. COMPOSE FILE VALIDATION HELPER ---
+# Validates an optional compose file only if it exists.
+function validate_optional_compose_file() {
+    local project="$1"
+    local file="$2"
+
+    if [ ! -f "$file" ]; then
+        return 2
+    fi
+
+    run_docker_cmd "validating ${file}" compose --env-file "$ENV_FILE" -p "$project" -f "$file" config -q
+}
+
 # =========================================================
 #  INPUT / PRECHECKS
 # =========================================================
@@ -705,9 +785,9 @@ function start_confirmation() {
 
     section "START"
 
-    echo -e "${YW}This script creates shared Docker networks, downloads yml 00/yml 01 plus the Portainer bootstrap override, and deploys socket-proxy + Portainer.${CL}"
-    echo -e "${YW}Portainer will be temporarily exposed on direct port ${PORTAINER_BOOTSTRAP_PORT} for bootstrap access.${CL}"
-    echo -e "${YW}Script 7 should later remove the temporary Portainer port and leave Traefik/AuthentiK access only.${CL}"
+    echo -e "${YW}This script creates shared Docker networks, validates Script 6 output, downloads bootstrap compose files, and deploys socket-proxy plus the selected admin UI.${CL}"
+    echo -e "${YW}Selected admin UI is read from ${ENV_FILE}: Dockge, Portainer CE, or Komodo.${CL}"
+    echo -e "${YW}The retired yml 12 Docker-GC container is intentionally skipped; Script 5 now owns host-side cleanup.${CL}"
     echo ""
 
     start_yn="$(timed_yes_no "Start Docker Bootstrap Setup?" "y")"
@@ -759,6 +839,14 @@ function collect_bootstrap_settings() {
         YML_01_OVERRIDE_URL="${GITHUB_RAW_BASE}/${YML_01_OVERRIDE_NAME}"
     fi
 
+    if [ -z "$YML_DOCKGE_URL_OVERRIDE" ]; then
+        YML_DOCKGE_URL="${GITHUB_RAW_BASE}/${YML_DOCKGE_NAME}"
+    fi
+
+    if [ -z "$YML_KOMODO_URL_OVERRIDE" ]; then
+        YML_KOMODO_URL="${GITHUB_RAW_BASE}/${YML_KOMODO_NAME}"
+    fi
+
     PORTAINER_OVERRIDE_FILE="${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
 
     detail_line "Docker user" "$DOCKER_USER"
@@ -787,11 +875,254 @@ function validate_project_paths() {
     run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
     run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$COMPOSE_DIR"
 
+    DOMAIN_VALUE="$(env_value DOMAIN)"
+    DOCKER_SECRETS_DIR="$(env_value DOCKER_SECRETS_DIR)"
+    CF_API_TOKEN_FILE="$(env_value CF_API_TOKEN_FILE)"
+    ADMIN_UI="$(env_value ADMIN_UI)"
+    ADMIN_UI="${ADMIN_UI:-portainer}"
+
+    TRAEFIK_STATIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/traefik.yml"
+    TRAEFIK_DYNAMIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/dynamic-config.yml"
+    TRAEFIK_ACME_STORAGE="${DOCKER_DIR}/appdata/traefik/acme/acme.json"
+
     msg_ok "PROJECT PATHS READY"
 
     detail_line "Docker dir" "$DOCKER_DIR"
     detail_line "Compose dir" "$COMPOSE_DIR"
     detail_line ".env" "$ENV_FILE"
+    detail_line "Domain" "${DOMAIN_VALUE:-missing}"
+    detail_line "Selected admin UI" "$ADMIN_UI"
+}
+
+
+# =========================================================
+#  SCRIPT 6 OUTPUT VALIDATION
+# =========================================================
+
+# --- 33A. REDIS HOST TUNING VERIFICATION ---
+# Confirms Script 5 applied the Redis-recommended overcommit setting before Redis deployment.
+function verify_redis_host_tuning() {
+    section "REDIS HOST TUNING"
+
+    local value=""
+    value="$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo "")"
+
+    if [ "$value" == "1" ]; then
+        SYSCTL_REDIS_OK="yes"
+        msg_ok "VM.OVERCOMMIT_MEMORY IS 1"
+    else
+        msg_error "vm.overcommit_memory is ${value:-unknown}. Run fixed Script 5 before deploying Redis."
+    fi
+
+    if [ -f /etc/sysctl.d/99-redis-overcommit.conf ] || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" test -f /etc/sysctl.d/99-redis-overcommit.conf 2>/dev/null; }; then
+        msg_ok "REDIS SYSCTL PERSISTENCE FILE FOUND"
+    else
+        msg_warn "Redis sysctl persistence file not found. Runtime value is correct, but reboot persistence should be fixed."
+    fi
+}
+
+# --- 33B. TRAEFIK TEMPLATE RENDER VERIFICATION ---
+# Ensures no unreplaced placeholders remain and final Traefik v3.7 settings exist.
+function verify_traefik_rendered_configs() {
+    section "TRAEFIK TEMPLATE VERIFICATION"
+
+    [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || msg_error "Traefik static config missing: ${TRAEFIK_STATIC_CONFIG_FILE}"
+    [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || msg_error "Traefik dynamic config missing: ${TRAEFIK_DYNAMIC_CONFIG_FILE}"
+    [ -f "$TRAEFIK_ACME_STORAGE" ] || msg_error "Traefik acme.json missing: ${TRAEFIK_ACME_STORAGE}"
+
+    msg_info "Checking for unreplaced template placeholders"
+    if grep -R '{{[^}]*}}' "$TRAEFIK_STATIC_CONFIG_FILE" "$TRAEFIK_DYNAMIC_CONFIG_FILE" >/dev/null 2>&1; then
+        msg_error "Unrendered {{PLACEHOLDER}} values remain in Traefik config. Fix Script 6 render logic/templates."
+    fi
+    TRAEFIK_PLACEHOLDERS_OK="yes"
+    msg_ok "TRAEFIK PLACEHOLDERS FULLY RENDERED"
+
+    msg_info "Checking Traefik v3.7 DNS propagation syntax"
+    if grep -q 'delayBeforeChecks' "$TRAEFIK_STATIC_CONFIG_FILE" && ! grep -q 'delayBeforeCheck:' "$TRAEFIK_STATIC_CONFIG_FILE"; then
+        TRAEFIK_DNS_DELAY_OK="yes"
+        msg_ok "TRAEFIK DNS PROPAGATION SYNTAX IS V3.7 COMPATIBLE"
+    else
+        msg_error "Traefik DNS challenge must use propagation.delayBeforeChecks, not deprecated delayBeforeCheck."
+    fi
+
+    msg_info "Checking Traefik encoded-character options"
+    if grep -q 'encodedCharacters' "$TRAEFIK_STATIC_CONFIG_FILE"; then
+        TRAEFIK_ENCODED_CHARS_OK="yes"
+        msg_ok "TRAEFIK ENCODED-CHARACTER CONFIG FOUND"
+    else
+        msg_error "Traefik encoded-character options missing from static config. Fix Script 6 template."
+    fi
+
+    msg_info "Checking for stale authentik@docker references"
+    if grep -q 'authentik@docker' "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then
+        msg_error "Stale authentik@docker reference found in dynamic config. Use authentik file-provider middleware."
+    fi
+    TRAEFIK_AUTHENTIK_REFERENCES_OK="yes"
+    msg_ok "NO STALE AUTHENTIK@DOCKER REFERENCES"
+
+    msg_info "Checking acme.json permissions"
+    local acme_mode=""
+    acme_mode="$(stat -c '%a' "$TRAEFIK_ACME_STORAGE" 2>/dev/null || true)"
+    if [ "$acme_mode" == "600" ]; then
+        msg_ok "TRAEFIK ACME STORAGE PERMISSIONS ARE 600"
+    else
+        msg_error "Traefik acme.json mode is ${acme_mode:-unknown}; expected 600."
+    fi
+}
+
+# --- 33C. AUTHENTIK FOLDER VERIFICATION ---
+# Confirms host bind mounts exist and are writable by the non-root Authentik container user.
+function verify_authentik_folders() {
+    section "AUTHENTIK FOLDER VERIFICATION"
+
+    local folders=(
+        "${DOCKER_DIR}/appdata/authentik"
+        "${DOCKER_DIR}/appdata/authentik/media"
+        "${DOCKER_DIR}/appdata/authentik/custom-templates"
+        "${DOCKER_DIR}/appdata/authentik/certs"
+    )
+    local folder=""
+
+    for folder in "${folders[@]}"; do
+        msg_info "Checking ${folder}"
+        [ -d "$folder" ] || msg_error "Required Authentik folder missing: ${folder}"
+
+        if [ -n "$SUDO_CMD" ]; then
+            "$SUDO_CMD" -u '#1000' sh -c "touch '${folder}/.ak-write-test-$$' && rm -f '${folder}/.ak-write-test-$$'" >/dev/null 2>&1 || msg_error "Authentik UID 1000 cannot write to ${folder}"
+        else
+            touch "${folder}/.ak-write-test-$$" && rm -f "${folder}/.ak-write-test-$$" || msg_error "Cannot verify Authentik write access to ${folder}"
+        fi
+
+        msg_ok "AUTHENTIK FOLDER READY: ${folder}"
+    done
+
+    AUTHENTIK_FOLDERS_OK="yes"
+}
+
+# --- 33D. TEMPORAL COMPOSE VERIFICATION ---
+# Checks Temporal settings before yml 06 deployment when the file is present.
+function verify_temporal_compose_settings() {
+    section "TEMPORAL COMPOSE VERIFICATION"
+
+    local file="${COMPOSE_DIR}/06-temporal-compose.yml"
+
+    if [ ! -f "$file" ]; then
+        TEMPORAL_COMPOSE_OK="not-present-yet"
+        msg_skip "YML 06 NOT PRESENT YET; TEMPORAL CHECK WILL BE RUN AFTER DOWNLOAD/BEFORE DEPLOYMENT"
+        return 0
+    fi
+
+    grep -q 'DB=postgres12\|DB:.*postgres12' "$file" || msg_error "Temporal compose must use DB=postgres12."
+    grep -q 'DBNAME=temporal\|DBNAME:.*temporal' "$file" || msg_error "Temporal compose must set DBNAME=temporal."
+    grep -q 'VISIBILITY_DBNAME=temporal_visibility\|VISIBILITY_DBNAME:.*temporal_visibility' "$file" || msg_error "Temporal compose must set VISIBILITY_DBNAME=temporal_visibility."
+    grep -q 'SKIP_DB_CREATE=true\|SKIP_DB_CREATE:.*true' "$file" || msg_error "Temporal compose must set SKIP_DB_CREATE=true."
+
+    if grep -q 'DYNAMIC_CONFIG_FILE_PATH' "$file"; then
+        if ! grep -q 'development-sql.yaml' "$file" || [ ! -f "${DOCKER_DIR}/appdata/temporal/dynamicconfig/development-sql.yaml" ]; then
+            msg_error "DYNAMIC_CONFIG_FILE_PATH is set but the required dynamic config file is not present. Remove the override or create the file."
+        fi
+    fi
+
+    TEMPORAL_COMPOSE_OK="yes"
+    msg_ok "TEMPORAL COMPOSE SETTINGS VERIFIED"
+}
+
+# --- 33E. ADMIN UI SELECTION VERIFICATION ---
+# Maps .env ADMIN_UI to expected compose template and service.
+function verify_admin_ui_selection() {
+    section "ADMIN UI SELECTION"
+
+    case "$ADMIN_UI" in
+        dockge)
+            ADMIN_UI_PROJECT_NAME="dockge"
+            ADMIN_UI_SERVICE_NAME="dockge"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${YML_DOCKGE_NAME}"
+            ADMIN_UI_HOST="dockge.${DOMAIN_VALUE}"
+            ;;
+        portainer|portainer-ce)
+            ADMIN_UI="portainer"
+            ADMIN_UI_PROJECT_NAME="portainer"
+            ADMIN_UI_SERVICE_NAME="portainer"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${YML_01_NAME}"
+            ADMIN_UI_HOST="portainer.${DOMAIN_VALUE}"
+            ;;
+        komodo)
+            ADMIN_UI_PROJECT_NAME="komodo"
+            ADMIN_UI_SERVICE_NAME="komodo-core"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${YML_KOMODO_NAME}"
+            ADMIN_UI_HOST="komodo.${DOMAIN_VALUE}"
+            ;;
+        *)
+            msg_error "Invalid ADMIN_UI value in .env: ${ADMIN_UI}. Expected dockge, portainer, or komodo."
+            ;;
+    esac
+
+    msg_ok "ADMIN UI SELECTION VERIFIED"
+    detail_line "Admin UI" "$ADMIN_UI"
+    detail_line "Expected host" "$ADMIN_UI_HOST"
+    detail_line "Compose file" "$ADMIN_UI_COMPOSE_FILE"
+}
+
+# --- 33F. CLOUDFLARE COMPANION SECRET VERIFICATION ---
+# Ensures cf-companion can read Cloudflare token from a local secret file.
+function verify_cf_companion_secret_file() {
+    section "CF-COMPANION SECRET VERIFICATION"
+
+    if [ -z "$CF_API_TOKEN_FILE" ]; then
+        CF_COMPANION_SECRET_OK="missing-env"
+        msg_warn "CF_API_TOKEN_FILE missing from .env"
+        return 0
+    fi
+
+    if [ -s "$CF_API_TOKEN_FILE" ]; then
+        CF_COMPANION_SECRET_OK="yes"
+        msg_ok "CLOUDFLARE TOKEN FILE EXISTS AND IS NON-EMPTY"
+    else
+        CF_COMPANION_SECRET_OK="empty-or-missing"
+        msg_warn "Cloudflare token file is empty or missing: ${CF_API_TOKEN_FILE}"
+    fi
+}
+
+# --- 33G. FILEBROWSER FOLDER VERIFICATION ---
+# Confirms Filebrowser-safe writable folders exist before yml 11 deployment.
+function verify_filebrowser_folders() {
+    section "FILEBROWSER FOLDER VERIFICATION"
+
+    local folders=(
+        "${DOCKER_DIR}/appdata/filebrowser/database"
+        "${DOCKER_DIR}/appdata/filebrowser/config"
+        "${DOCKER_DIR}/shared"
+        "${DOCKER_DIR}/backups"
+        "${DOCKER_DIR}/compose"
+    )
+    local folder=""
+
+    for folder in "${folders[@]}"; do
+        msg_info "Checking ${folder}"
+        [ -d "$folder" ] || msg_error "Required Filebrowser folder missing: ${folder}"
+        verify_user_writable_dir "$folder" || msg_error "Docker user ${DOCKER_USER} cannot write to ${folder}"
+        msg_ok "FILEBROWSER FOLDER WRITABLE: ${folder}"
+    done
+
+    FILEBROWSER_FOLDERS_OK="yes"
+}
+
+# --- 33H. YML 12 RETIREMENT CHECK ---
+# Prevents deployment of the retired Docker-GC container stack.
+function retire_yml_12_docker_gc() {
+    section "YML 12 RETIREMENT"
+
+    local file="${COMPOSE_DIR}/${YML_12_NAME}"
+
+    if [ -f "$file" ]; then
+        msg_warn "Retired yml 12 Docker-GC compose file found. It will not be deployed."
+        run_cmd "renaming retired yml 12" mv "$file" "${file}.retired"
+        detail_line "Retired file" "${file}.retired"
+    else
+        msg_ok "NO YML 12 DOCKER-GC CONTAINER COMPOSE FOUND"
+    fi
+
+    YML_12_RETIRED="yes"
 }
 
 # =========================================================
@@ -863,31 +1194,59 @@ function download_bootstrap_compose_files() {
     YML_00_DOWNLOADED="yes"
     msg_ok "YML 00 DOWNLOADED"
 
-    msg_info "Downloading ${YML_01_NAME}"
-    curl -fsSL "$YML_01_URL" -o "${COMPOSE_DIR}/${YML_01_NAME}"
-    YML_01_DOWNLOADED="yes"
-    msg_ok "YML 01 DOWNLOADED"
+    if [ "$ADMIN_UI" == "portainer" ]; then
+        msg_info "Downloading ${YML_01_NAME}"
+        curl -fsSL "$YML_01_URL" -o "${COMPOSE_DIR}/${YML_01_NAME}"
+        YML_01_DOWNLOADED="yes"
+        msg_ok "YML 01 DOWNLOADED"
 
-    msg_info "Downloading ${YML_01_OVERRIDE_NAME}"
-    curl -fsSL "$YML_01_OVERRIDE_URL" -o "${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
-    YML_01_OVERRIDE_DOWNLOADED="yes"
-    PORTAINER_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
-    msg_ok "PORTAINER BOOTSTRAP OVERRIDE DOWNLOADED"
+        msg_info "Downloading ${YML_01_OVERRIDE_NAME}"
+        curl -fsSL "$YML_01_OVERRIDE_URL" -o "${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
+        YML_01_OVERRIDE_DOWNLOADED="yes"
+        PORTAINER_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
+        msg_ok "PORTAINER BOOTSTRAP OVERRIDE DOWNLOADED"
 
-    run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}"         "${COMPOSE_DIR}/${YML_00_NAME}"         "${COMPOSE_DIR}/${YML_01_NAME}"         "${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
+        run_cmd "setting Portainer compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" \
+            "${COMPOSE_DIR}/${YML_01_NAME}" \
+            "${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
+        run_cmd "setting Portainer compose file permissions" chmod 640 \
+            "${COMPOSE_DIR}/${YML_01_NAME}" \
+            "${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
+    elif [ "$ADMIN_UI" == "dockge" ]; then
+        msg_info "Downloading ${YML_DOCKGE_NAME}"
+        curl -fsSL "$YML_DOCKGE_URL" -o "${COMPOSE_DIR}/${YML_DOCKGE_NAME}"
+        YML_DOCKGE_DOWNLOADED="yes"
+        msg_ok "DOCKGE COMPOSE DOWNLOADED"
+        run_cmd "setting Dockge compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${COMPOSE_DIR}/${YML_DOCKGE_NAME}"
+        run_cmd "setting Dockge compose file permissions" chmod 640 "${COMPOSE_DIR}/${YML_DOCKGE_NAME}"
+    elif [ "$ADMIN_UI" == "komodo" ]; then
+        msg_info "Downloading ${YML_KOMODO_NAME}"
+        curl -fsSL "$YML_KOMODO_URL" -o "${COMPOSE_DIR}/${YML_KOMODO_NAME}"
+        YML_KOMODO_DOWNLOADED="yes"
+        msg_ok "KOMODO COMPOSE DOWNLOADED"
+        run_cmd "setting Komodo compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${COMPOSE_DIR}/${YML_KOMODO_NAME}"
+        run_cmd "setting Komodo compose file permissions" chmod 640 "${COMPOSE_DIR}/${YML_KOMODO_NAME}"
+    fi
 
-    run_cmd "setting compose file permissions" chmod 640         "${COMPOSE_DIR}/${YML_00_NAME}"         "${COMPOSE_DIR}/${YML_01_NAME}"         "${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
+    run_cmd "setting socket-proxy compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${COMPOSE_DIR}/${YML_00_NAME}"
+    run_cmd "setting socket-proxy compose file permissions" chmod 640 "${COMPOSE_DIR}/${YML_00_NAME}"
+
+    retire_yml_12_docker_gc
 
     detail_line "YML 00" "${COMPOSE_DIR}/${YML_00_NAME}"
-    detail_line "YML 01" "${COMPOSE_DIR}/${YML_01_NAME}"
-    detail_line "YML 01 override" "${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
+    detail_line "Admin UI compose" "$ADMIN_UI_COMPOSE_FILE"
 }
-
 # --- 37. PORTAINER BOOTSTRAP OVERRIDE CHECK ---
 # Confirms the downloaded Portainer bootstrap override exists locally.
 # Script 7 should later redeploy Portainer without this override to close the bootstrap port.
 function verify_portainer_bootstrap_override_file() {
     section "PORTAINER BOOTSTRAP OVERRIDE"
+
+    if [ "$ADMIN_UI" != "portainer" ]; then
+        PORTAINER_BOOTSTRAP_OVERRIDE_WRITTEN="not-applicable"
+        msg_skip "PORTAINER NOT SELECTED; BOOTSTRAP OVERRIDE SKIPPED"
+        return 0
+    fi
 
     msg_info "Checking downloaded Portainer bootstrap override"
 
@@ -911,13 +1270,19 @@ function validate_bootstrap_compose_files() {
     run_docker_cmd "validating socket-proxy compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${YML_00_NAME}" config -q
     msg_ok "YML 00 COMPOSE VALID"
 
-    export PORTAINER_BOOTSTRAP_BIND PORTAINER_BOOTSTRAP_PORT
+    if [ "$ADMIN_UI" == "portainer" ]; then
+        export PORTAINER_BOOTSTRAP_BIND PORTAINER_BOOTSTRAP_PORT
+        msg_info "Validating Portainer compose"
+        run_docker_cmd "validating Portainer compose" compose --env-file "$ENV_FILE" -p portainer -f "${COMPOSE_DIR}/${YML_01_NAME}" -f "$PORTAINER_OVERRIDE_FILE" config -q
+        msg_ok "PORTAINER COMPOSE VALID"
+    else
+        msg_info "Validating ${ADMIN_UI} compose"
+        run_docker_cmd "validating ${ADMIN_UI} compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" config -q
+        msg_ok "${ADMIN_UI} COMPOSE VALID"
+    fi
 
-    msg_info "Validating Portainer compose"
-    run_docker_cmd "validating Portainer compose" compose --env-file "$ENV_FILE" -p portainer -f "${COMPOSE_DIR}/${YML_01_NAME}" -f "$PORTAINER_OVERRIDE_FILE" config -q
-    msg_ok "YML 01 COMPOSE VALID"
+    ADMIN_UI_VALIDATED="yes"
 }
-
 # --- 39. SOCKET-PROXY DEPLOYMENT ---
 # Deploys yml 00 using Docker CLI.
 function deploy_socket_proxy() {
@@ -931,21 +1296,35 @@ function deploy_socket_proxy() {
 
 # --- 40. PORTAINER DEPLOYMENT ---
 # Deploys yml 01 using Docker CLI with temporary bootstrap port override.
-function deploy_portainer() {
-    section "DEPLOY YML 01 - PORTAINER"
+function deploy_admin_ui() {
+    section "DEPLOY ADMIN UI - ${ADMIN_UI}"
 
-    export PORTAINER_BOOTSTRAP_BIND PORTAINER_BOOTSTRAP_PORT
+    if [ "$ADMIN_UI" == "portainer" ]; then
+        export PORTAINER_BOOTSTRAP_BIND PORTAINER_BOOTSTRAP_PORT
+        msg_info "Deploying Portainer with bootstrap port"
+        run_docker_cmd "deploying Portainer" compose --env-file "$ENV_FILE" -p portainer -f "${COMPOSE_DIR}/${YML_01_NAME}" -f "$PORTAINER_OVERRIDE_FILE" up -d
+        PORTAINER_DEPLOYED="yes"
+        ADMIN_UI_DEPLOYED="yes"
+        msg_ok "PORTAINER DEPLOYED"
+        return 0
+    fi
 
-    msg_info "Deploying Portainer with bootstrap port"
-    run_docker_cmd "deploying Portainer" compose --env-file "$ENV_FILE" -p portainer -f "${COMPOSE_DIR}/${YML_01_NAME}" -f "$PORTAINER_OVERRIDE_FILE" up -d
-    PORTAINER_DEPLOYED="yes"
-    msg_ok "PORTAINER DEPLOYED"
+    msg_info "Deploying ${ADMIN_UI}"
+    run_docker_cmd "deploying ${ADMIN_UI}" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" up -d
+    ADMIN_UI_DEPLOYED="yes"
+    msg_ok "${ADMIN_UI} DEPLOYED"
 }
 
 # --- 41. UFW BOOTSTRAP PORT HELPER ---
 # Opens temporary Portainer bootstrap port if UFW is active.
 function configure_bootstrap_firewall() {
     section "BOOTSTRAP FIREWALL"
+
+    if [ "$ADMIN_UI" != "portainer" ]; then
+        UFW_BOOTSTRAP_PORT_OPENED="not-applicable"
+        msg_skip "PORTAINER NOT SELECTED; TEMPORARY BOOTSTRAP PORT NOT NEEDED"
+        return 0
+    fi
 
     if ! command -v ufw >/dev/null 2>&1; then
         msg_skip "UFW NOT FOUND; BOOTSTRAP PORT RULE SKIPPED"
@@ -1002,28 +1381,30 @@ function verify_bootstrap_containers() {
         msg_error "socket-proxy container is not running."
     fi
 
-    msg_info "Checking Portainer container"
-    if docker_cmd ps --format '{{.Names}}' | grep -qx 'portainer'; then
-        msg_ok "PORTAINER RUNNING"
+    msg_info "Checking ${ADMIN_UI_SERVICE_NAME} container"
+    if docker_cmd ps --format '{{.Names}}' | grep -qx "$ADMIN_UI_SERVICE_NAME"; then
+        msg_ok "${ADMIN_UI_SERVICE_NAME} RUNNING"
     else
-        msg_error "portainer container is not running."
+        msg_error "${ADMIN_UI_SERVICE_NAME} container is not running."
     fi
 
-    detect_portainer_access_ip
-
-    msg_info "Checking Portainer bootstrap port"
-    if docker_cmd port portainer 9443/tcp 2>/dev/null | grep -q ":${PORTAINER_BOOTSTRAP_PORT}$"; then
-        PORTAINER_BOOTSTRAP_PORT_EXPOSED="yes"
-        msg_ok "PORTAINER BOOTSTRAP PORT EXPOSED"
+    if [ "$ADMIN_UI" == "portainer" ]; then
+        detect_portainer_access_ip
+        msg_info "Checking Portainer bootstrap port"
+        if docker_cmd port portainer 9443/tcp 2>/dev/null | grep -q ":${PORTAINER_BOOTSTRAP_PORT}$"; then
+            PORTAINER_BOOTSTRAP_PORT_EXPOSED="yes"
+            msg_ok "PORTAINER BOOTSTRAP PORT EXPOSED"
+        else
+            PORTAINER_BOOTSTRAP_PORT_EXPOSED="not-confirmed"
+            msg_warn "Portainer is running, but bootstrap port ${PORTAINER_BOOTSTRAP_PORT} was not confirmed"
+        fi
+        detail_line "Portainer URL" "$PORTAINER_ACCESS_URL"
+        detail_line "Bootstrap port" "$PORTAINER_BOOTSTRAP_PORT"
     else
-        PORTAINER_BOOTSTRAP_PORT_EXPOSED="not-confirmed"
-        msg_warn "Portainer is running, but bootstrap port ${PORTAINER_BOOTSTRAP_PORT} was not confirmed"
+        PORTAINER_BOOTSTRAP_PORT_EXPOSED="not-applicable"
+        detail_line "Admin UI host" "$ADMIN_UI_HOST"
     fi
-
-    detail_line "Portainer URL" "$PORTAINER_ACCESS_URL"
-    detail_line "Bootstrap port" "$PORTAINER_BOOTSTRAP_PORT"
 }
-
 # --- 44. VERIFICATION REPORT ---
 # Writes a small Docker bootstrap verification report to /var/log.
 function create_verification_report() {
@@ -1067,14 +1448,32 @@ VERIFY_LOG_EOF
         echo "${YML_00_NAME}: ${YML_00_DOWNLOADED}"
         echo "${YML_01_NAME}: ${YML_01_DOWNLOADED}"
         echo "${YML_01_OVERRIDE_NAME}: ${YML_01_OVERRIDE_DOWNLOADED}"
+        echo "${YML_DOCKGE_NAME}: ${YML_DOCKGE_DOWNLOADED}"
+        echo "${YML_KOMODO_NAME}: ${YML_KOMODO_DOWNLOADED}"
         echo "Portainer override: ${PORTAINER_BOOTSTRAP_OVERRIDE_WRITTEN}"
+        echo "Retired yml 12: ${YML_12_RETIRED}"
         echo ""
         echo "Deployments:"
         echo "socket-proxy deployed: ${SOCKET_PROXY_DEPLOYED}"
+        echo "admin UI: ${ADMIN_UI}"
+        echo "admin UI validated: ${ADMIN_UI_VALIDATED}"
+        echo "admin UI deployed: ${ADMIN_UI_DEPLOYED}"
         echo "portainer deployed: ${PORTAINER_DEPLOYED}"
         echo "Portainer bootstrap port exposed: ${PORTAINER_BOOTSTRAP_PORT_EXPOSED}"
         echo "UFW bootstrap port opened: ${UFW_BOOTSTRAP_PORT_OPENED}"
         echo "Portainer URL: ${PORTAINER_ACCESS_URL}"
+        echo "Admin UI host: ${ADMIN_UI_HOST}"
+        echo ""
+        echo "Preflight checks:"
+        echo "vm.overcommit_memory=1: ${SYSCTL_REDIS_OK}"
+        echo "Traefik placeholders rendered: ${TRAEFIK_PLACEHOLDERS_OK}"
+        echo "Traefik DNS v3.7 syntax: ${TRAEFIK_DNS_DELAY_OK}"
+        echo "Traefik encoded characters: ${TRAEFIK_ENCODED_CHARS_OK}"
+        echo "Traefik authentik references: ${TRAEFIK_AUTHENTIK_REFERENCES_OK}"
+        echo "Authentik folders: ${AUTHENTIK_FOLDERS_OK}"
+        echo "Temporal compose: ${TEMPORAL_COMPOSE_OK}"
+        echo "CF companion secret: ${CF_COMPANION_SECRET_OK}"
+        echo "Filebrowser folders: ${FILEBROWSER_FOLDERS_OK}"
         echo ""
         echo "Docker containers:"
         docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
@@ -1106,13 +1505,28 @@ database network: $DATABASE_NETWORK_NAME
 YML 00 downloaded: $YML_00_DOWNLOADED
 YML 01 downloaded: $YML_01_DOWNLOADED
 YML 01 override downloaded: $YML_01_OVERRIDE_DOWNLOADED
+Dockge compose downloaded: $YML_DOCKGE_DOWNLOADED
+Komodo compose downloaded: $YML_KOMODO_DOWNLOADED
+YML 12 retired: $YML_12_RETIRED
 Socket proxy deployed: $SOCKET_PROXY_DEPLOYED
+Admin UI: $ADMIN_UI
+Admin UI validated: $ADMIN_UI_VALIDATED
+Admin UI deployed: $ADMIN_UI_DEPLOYED
 Portainer deployed: $PORTAINER_DEPLOYED
 Portainer bootstrap override: $PORTAINER_BOOTSTRAP_OVERRIDE_WRITTEN
 Portainer bootstrap port: $PORTAINER_BOOTSTRAP_PORT
 Portainer bootstrap port exposed: $PORTAINER_BOOTSTRAP_PORT_EXPOSED
 UFW bootstrap port opened: $UFW_BOOTSTRAP_PORT_OPENED
 Portainer URL: $PORTAINER_ACCESS_URL
+vm.overcommit_memory OK: $SYSCTL_REDIS_OK
+Traefik placeholders OK: $TRAEFIK_PLACEHOLDERS_OK
+Traefik DNS v3.7 OK: $TRAEFIK_DNS_DELAY_OK
+Traefik encoded characters OK: $TRAEFIK_ENCODED_CHARS_OK
+Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
+Authentik folders OK: $AUTHENTIK_FOLDERS_OK
+Temporal compose OK: $TEMPORAL_COMPOSE_OK
+CF companion secret OK: $CF_COMPANION_SECRET_OK
+Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
 Verify log: $VERIFY_LOG
 MARKER_EOF
     else
@@ -1131,13 +1545,28 @@ database network: $DATABASE_NETWORK_NAME
 YML 00 downloaded: $YML_00_DOWNLOADED
 YML 01 downloaded: $YML_01_DOWNLOADED
 YML 01 override downloaded: $YML_01_OVERRIDE_DOWNLOADED
+Dockge compose downloaded: $YML_DOCKGE_DOWNLOADED
+Komodo compose downloaded: $YML_KOMODO_DOWNLOADED
+YML 12 retired: $YML_12_RETIRED
 Socket proxy deployed: $SOCKET_PROXY_DEPLOYED
+Admin UI: $ADMIN_UI
+Admin UI validated: $ADMIN_UI_VALIDATED
+Admin UI deployed: $ADMIN_UI_DEPLOYED
 Portainer deployed: $PORTAINER_DEPLOYED
 Portainer bootstrap override: $PORTAINER_BOOTSTRAP_OVERRIDE_WRITTEN
 Portainer bootstrap port: $PORTAINER_BOOTSTRAP_PORT
 Portainer bootstrap port exposed: $PORTAINER_BOOTSTRAP_PORT_EXPOSED
 UFW bootstrap port opened: $UFW_BOOTSTRAP_PORT_OPENED
 Portainer URL: $PORTAINER_ACCESS_URL
+vm.overcommit_memory OK: $SYSCTL_REDIS_OK
+Traefik placeholders OK: $TRAEFIK_PLACEHOLDERS_OK
+Traefik DNS v3.7 OK: $TRAEFIK_DNS_DELAY_OK
+Traefik encoded characters OK: $TRAEFIK_ENCODED_CHARS_OK
+Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
+Authentik folders OK: $AUTHENTIK_FOLDERS_OK
+Temporal compose OK: $TEMPORAL_COMPOSE_OK
+CF companion secret OK: $CF_COMPANION_SECRET_OK
+Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
 Verify log: $VERIFY_LOG
 MARKER_EOF
     fi
@@ -1154,19 +1583,31 @@ function show_final_summary() {
     detail_line "t2_proxy" "$T2_PROXY_SUBNET_ACTUAL"
     detail_line "database" "$DATABASE_NETWORK_NAME"
     detail_line "YML 00" "${COMPOSE_DIR}/${YML_00_NAME}"
-    detail_line "YML 01" "${COMPOSE_DIR}/${YML_01_NAME}"
-    detail_line "YML 01 override" "${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
+    detail_line "ADMIN UI" "$ADMIN_UI"
+    detail_line "ADMIN UI COMPOSE" "$ADMIN_UI_COMPOSE_FILE"
+    detail_line "ADMIN UI HOST" "$ADMIN_UI_HOST"
+    detail_line "YML 12 RETIRED" "$YML_12_RETIRED"
+    detail_line "REDIS SYSCTL" "$SYSCTL_REDIS_OK"
+    detail_line "TRAEFIK PLACEHOLDERS" "$TRAEFIK_PLACEHOLDERS_OK"
+    detail_line "TRAEFIK DNS V3.7" "$TRAEFIK_DNS_DELAY_OK"
+    detail_line "TRAEFIK ENCODED CHARS" "$TRAEFIK_ENCODED_CHARS_OK"
+    detail_line "AUTHENTIK FOLDERS" "$AUTHENTIK_FOLDERS_OK"
+    detail_line "TEMPORAL COMPOSE" "$TEMPORAL_COMPOSE_OK"
+    detail_line "FILEBROWSER FOLDERS" "$FILEBROWSER_FOLDERS_OK"
     detail_line "Portainer URL" "$PORTAINER_ACCESS_URL"
     detail_line "Bootstrap port" "$PORTAINER_BOOTSTRAP_PORT"
     detail_line "Verify log" "$VERIFY_LOG"
 
     echo ""
-    echo -e "${YW}Portainer is temporarily exposed directly for bootstrap access.${CL}"
-    echo -e "${YW}After Traefik/AuthentiK deployment is stable, run Script 7 to close this direct port and harden sudo/Docker access.${CL}"
+    if [ "$ADMIN_UI" == "portainer" ]; then
+        echo -e "${YW}Portainer is temporarily exposed directly for bootstrap access.${CL}"
+        echo -e "${YW}After Traefik/AuthentiK deployment is stable, run Script 7 to close this direct port and harden sudo/Docker access.${CL}"
+    else
+        echo -e "${YW}${ADMIN_UI} is deployed behind Traefik/AuthentiK labels with no direct bootstrap port.${CL}"
+    fi
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Open Portainer at:${CL} ${GN}${PORTAINER_ACCESS_URL}${CL}"
-    echo -e "${YW}Then deploy the remaining compose stacks through Portainer in order.${CL}"
+    echo -e "${YW}Deploy/verify remaining stacks in order, then run Script 7 for final SSO/hardening.${CL}"
     echo ""
 }
 
@@ -1184,6 +1625,14 @@ function main() {
     start_confirmation
     collect_bootstrap_settings
     validate_project_paths
+    verify_admin_ui_selection
+
+    verify_redis_host_tuning
+    verify_traefik_rendered_configs
+    verify_authentik_folders
+    verify_temporal_compose_settings
+    verify_cf_companion_secret_file
+    verify_filebrowser_folders
 
     create_shared_networks
     verify_shared_networks
@@ -1194,7 +1643,7 @@ function main() {
 
     configure_bootstrap_firewall
     deploy_socket_proxy
-    deploy_portainer
+    deploy_admin_ui
     verify_bootstrap_containers
 
     create_verification_report

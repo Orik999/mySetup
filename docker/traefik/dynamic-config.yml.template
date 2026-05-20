@@ -7,11 +7,36 @@
 # Placeholders are replaced locally before this file is written to:
 #   {{DOCKER_DIR}}/appdata/traefik/dynamic-config.yml
 #
-# This file defines reusable routers, services, middlewares and TLS options.
+# This file defines file-provider routers, services, middlewares and TLS options.
 # It intentionally contains no real secrets.
 
 http:
-{{PROXMOX_ROUTE_BLOCK}}
+  # -------------------------------------------------------
+  # FILE-PROVIDER ROUTERS
+  # -------------------------------------------------------
+  routers:
+    traefik-dashboard:
+      entryPoints:
+        - https
+      rule: Host(`{{TRAEFIK_DASHBOARD_HOST}}`)
+      middlewares:
+        - chain-authentik@file
+      tls:
+        certResolver: cloudflare
+      service: api@internal
+
+    # Authentik outpost callback routing for all protected subdomains.
+    # This route must have a higher priority than app routers so that
+    # /outpost.goauthentik.io/* reaches Authentik directly.
+    authentik-outpost:
+      entryPoints:
+        - https
+      rule: HostRegexp(`^.+\.{{DOMAIN}}$`) && PathPrefix(`/outpost.goauthentik.io/`)
+      priority: 100
+      tls:
+        certResolver: cloudflare
+      service: authentik-outpost
+
 
   # -------------------------------------------------------
   # REUSABLE MIDDLEWARE CHAINS
@@ -45,10 +70,10 @@ http:
         middlewares:
           - middlewares-rate-limit
           - middlewares-secure-headers
-          - authentik@docker
+          - authentik
           - middlewares-compress
 
-    # Use this for upload-heavy apps such as Postiz without Authentik.
+    # Use this for upload-heavy apps such as Postiz/Filebrowser without Authentik.
     chain-large-upload:
       chain:
         middlewares:
@@ -57,13 +82,14 @@ http:
           - middlewares-buffering-large-upload
           - middlewares-compress
 
-    # Use this later for upload-heavy apps that also work correctly behind Authentik.
+    # Use this for upload-heavy apps protected by Authentik,
+    # such as Postiz and Filebrowser/SFTPGo.
     chain-authentik-large-upload:
       chain:
         middlewares:
           - middlewares-rate-limit
           - middlewares-secure-headers
-          - authentik@docker
+          - authentik
           - middlewares-buffering-large-upload
           - middlewares-compress
 
@@ -83,6 +109,32 @@ http:
         usersFile: /run/secrets/htpasswd
         realm: "Traefik Basic Auth"
         removeHeader: true
+
+    # -----------------------------------------------------
+    # AUTHENTIK FORWARD AUTH
+    # -----------------------------------------------------
+    # Domain-level Authentik forward-auth middleware.
+    # Authentik provider should use:
+    #   Authentication URL: https://auth.{{DOMAIN}}
+    #   Cookie domain: {{DOMAIN}}
+    authentik:
+      forwardAuth:
+        address: "http://authentik-server:9000/outpost.goauthentik.io/auth/traefik"
+        trustForwardHeader: true
+        maxResponseBodySize: 1048576
+        authResponseHeaders:
+          - X-authentik-username
+          - X-authentik-groups
+          - X-authentik-entitlements
+          - X-authentik-email
+          - X-authentik-name
+          - X-authentik-uid
+          - X-authentik-jwt
+          - X-authentik-meta-jwks
+          - X-authentik-meta-outpost
+          - X-authentik-meta-provider
+          - X-authentik-meta-app
+          - X-authentik-meta-version
 
     # -----------------------------------------------------
     # RATE LIMITING
@@ -124,7 +176,6 @@ http:
     # -----------------------------------------------------
     # BUFFERING PROFILES
     # -----------------------------------------------------
-    # Small/default profile: general dashboards and APIs.
     middlewares-buffering-small:
       buffering:
         maxRequestBodyBytes: 10485760
@@ -133,7 +184,7 @@ http:
         memResponseBodyBytes: 2097152
         retryExpression: "IsNetworkError() && Attempts() <= 2"
 
-    # Large upload profile: Postiz/video-heavy workflows.
+    # Large upload profile: Postiz/Filebrowser/video-heavy workflows.
     # 1 GiB max body, 32 MiB memory buffer; excess spills to disk.
     middlewares-buffering-large-upload:
       buffering:
@@ -142,6 +193,15 @@ http:
         maxResponseBodyBytes: 1073741824
         memResponseBodyBytes: 33554432
         retryExpression: "IsNetworkError() && Attempts() <= 2"
+
+  # -------------------------------------------------------
+  # FILE-PROVIDER SERVICES
+  # -------------------------------------------------------
+  services:
+    authentik-outpost:
+      loadBalancer:
+        servers:
+          - url: "http://authentik-server:9000"
 
 # ---------------------------------------------------------
 # TLS OPTIONS

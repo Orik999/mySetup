@@ -1,14 +1,23 @@
 # 11-filebrowser-compose.yml
 # Project: Filebrowser
-# Purpose: Browser file manager for uploads/downloads and safe project-file edits.
+# Purpose: Lightweight browser file manager for uploads/downloads and safe project-file edits.
+#
+# Final setup notes:
+# - Filebrowser original is very lightweight, but it does not provide clean native OIDC/SSO.
+# - It is protected by Traefik + Authentik forward-auth instead.
+# - For future proper low-resource OIDC/SSO, SFTPGo is the recommended replacement candidate.
 #
 # Security notes:
 # - compose/shared/backups are mounted read-write so you can upload modified YAML/files.
 # - secrets, .env, PostgreSQL data, Redis data, Authentik data, and acme.json are intentionally not mounted.
 # - Traefik appdata is NOT mounted as a whole because it can contain certificate/private ACME material.
 # - Only selected Traefik config files are mounted for safe editing.
-# - Access is protected by Traefik + Authentik.
 # - No direct host port is published.
+#
+# Upload/download notes:
+# - Uses chain-authentik-large-upload@file from Traefik dynamic-config.yml.
+# - Large upload/download buffering is managed centrally in Traefik's file-provider middleware.
+# - No Filebrowser-specific Docker middleware is created here to avoid drift from the central Traefik template.
 
 name: filebrowser
 
@@ -52,23 +61,11 @@ services:
       traefik.http.routers.filebrowser.entrypoints: https
       traefik.http.routers.filebrowser.tls: "true"
       traefik.http.routers.filebrowser.tls.certresolver: cloudflare
+      traefik.http.routers.filebrowser.middlewares: chain-authentik-large-upload@file
       traefik.http.routers.filebrowser.service: filebrowser
-
-      # Authentik + large upload/download middleware.
-      # filebrowser-large-upload@docker keeps request/response limits unrestricted.
-      traefik.http.routers.filebrowser.middlewares: chain-authentik@file,filebrowser-large-upload@docker
 
       # Service.
       traefik.http.services.filebrowser.loadbalancer.server.port: 80
-
-      # Large upload/download buffering.
-      # 0 = no hard maximum body size limit.
-      # memRequestBodyBytes/memResponseBodyBytes keep only 10MB in memory before spooling.
-      traefik.http.middlewares.filebrowser-large-upload.buffering.maxRequestBodyBytes: "0"
-      traefik.http.middlewares.filebrowser-large-upload.buffering.memRequestBodyBytes: "10485760"
-      traefik.http.middlewares.filebrowser-large-upload.buffering.maxResponseBodyBytes: "0"
-      traefik.http.middlewares.filebrowser-large-upload.buffering.memResponseBodyBytes: "10485760"
-      traefik.http.middlewares.filebrowser-large-upload.buffering.retryExpression: "IsNetworkError() && Attempts() <= 2"
 
 networks:
   t2_proxy:

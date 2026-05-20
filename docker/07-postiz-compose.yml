@@ -1,13 +1,3 @@
-# 07-postiz-compose.yml
-# Project: Postiz
-# Purpose: Social-media posting application with large-upload Traefik middleware.
-#
-# Auth note:
-# - Authentik forward-auth is intentionally not enabled by default because third-party
-#   OAuth/callback routes may need to remain reachable.
-# - After Postiz integrations are confirmed, you can switch to chain-authentik-large-upload@file
-#   or add route exceptions for callbacks/webhooks.
-
 name: postiz
 
 services:
@@ -15,41 +5,58 @@ services:
     image: ghcr.io/gitroomhq/postiz-app:latest
     container_name: postiz
     restart: unless-stopped
+
     security_opt:
       - no-new-privileges:true
+
     networks:
       - t2_proxy
       - database
-    volumes:
-      - ${DOCKER_DIR}/appdata/postiz/config:/config
-      - ${DOCKER_DIR}/appdata/postiz/uploads:/uploads
+
     environment:
       TZ: ${TZ}
+
       MAIN_URL: https://postiz.${DOMAIN}
       FRONTEND_URL: https://postiz.${DOMAIN}
       NEXT_PUBLIC_BACKEND_URL: https://postiz.${DOMAIN}/api
-      JWT_SECRET: ${AUTHENTIK_SECRET_KEY}
+      BACKEND_URL: https://postiz.${DOMAIN}/api
+      BACKEND_INTERNAL_URL: http://127.0.0.1:3000
+
       DATABASE_URL: postgresql://postiz:${POSTIZ_POSTGRES_PASSWORD}@postgres:5432/postiz
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+
+      JWT_SECRET: ${POSTIZ_JWT_SECRET}
+
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+
       STORAGE_PROVIDER: local
       UPLOAD_DIRECTORY: /uploads
-      TEMPORAL_ADDRESS: temporal:7233
+
+      IS_GENERAL: "true"
+      DISABLE_REGISTRATION: "false"
+      RUN_CRON: "true"
+
+    volumes:
+      - ${DOCKER_DIR}/appdata/postiz/uploads:/uploads
+
     labels:
       traefik.enable: "true"
+
       traefik.http.routers.postiz.rule: Host(`postiz.${DOMAIN}`)
       traefik.http.routers.postiz.entrypoints: https
       traefik.http.routers.postiz.tls: "true"
       traefik.http.routers.postiz.tls.certresolver: cloudflare
       traefik.http.routers.postiz.middlewares: chain-large-upload@file
       traefik.http.routers.postiz.service: postiz
+
       traefik.http.services.postiz.loadbalancer.server.port: 5000
-      # Enable later only if it does not break OAuth/callback routes:
-      # traefik.http.routers.postiz.middlewares: chain-authentik-large-upload@file
 
 networks:
   t2_proxy:
     name: t2_proxy
     external: true
+
   database:
     name: database
     external: true

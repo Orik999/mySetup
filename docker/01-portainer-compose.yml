@@ -1,8 +1,33 @@
 # 01-portainer-compose.yml
-# Project: Portainer
-# Purpose: Docker management UI through socket-proxy and Traefik.
-# Bootstrap note: script 6.5 may add a local override exposing 9443 temporarily.
-# Production note: keep direct ports removed and access through Traefik/AuthentiK.
+# Project: Portainer CE
+# Purpose: Legacy/advanced Docker management UI through socket-proxy and Traefik.
+#
+# Public-GitHub-safe:
+# - No secrets are stored in this file.
+# - Domain, paths, timezone, and other runtime values come from local .env.
+# - No direct host ports are published in production.
+#
+# Bootstrap note:
+# - Script 6.5 may temporarily add 01-portainer-bootstrap-override.yml
+#   to expose Portainer on 9443 for first-time setup.
+# - Script 7 should redeploy Portainer without the bootstrap override and
+#   remove any temporary UFW 9443 rule.
+#
+# Production access:
+# - Access Portainer through Traefik/AuthentiK only:
+#     https://portainer.${DOMAIN}
+#
+# Portainer CE SSO limitation:
+# - Portainer CE can use OAuth/OIDC with Authentik.
+# - Portainer CE cannot hide the internal authentication prompt without
+#   Portainer Business Edition.
+# - Accept the OAuth button flow in CE, or choose Dockge/Komodo in Script 6/6.5
+#   if one-click/no-license-gate SSO is required.
+#
+# Admin UI selection guidance:
+# - Dockge should be the default lightweight compose/log workflow UI.
+# - Portainer CE is the legacy/advanced Docker management option.
+# - Komodo is the future-oriented Git-driven, multi-host, no-license-gate option.
 
 name: portainer
 
@@ -11,31 +36,42 @@ services:
     image: portainer/portainer-ce:latest
     container_name: portainer
     restart: unless-stopped
+
     security_opt:
       - no-new-privileges:true
+
+    # Portainer talks to Docker only through socket-proxy.
+    # Do not mount /var/run/docker.sock directly here.
     command: -H tcp://socket-proxy:2375
+
     networks:
       - t2_proxy
       - socket_proxy
+
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - ${DOCKER_DIR}/appdata/portainer:/data
+
     environment:
       TZ: ${TZ}
+
     labels:
       traefik.enable: "true"
+
       traefik.http.routers.portainer.rule: Host(`portainer.${DOMAIN}`)
       traefik.http.routers.portainer.entrypoints: https
       traefik.http.routers.portainer.tls: "true"
       traefik.http.routers.portainer.tls.certresolver: cloudflare
       traefik.http.routers.portainer.middlewares: chain-authentik@file
       traefik.http.routers.portainer.service: portainer
+
       traefik.http.services.portainer.loadbalancer.server.port: 9000
 
 networks:
   t2_proxy:
     name: t2_proxy
     external: true
+
   socket_proxy:
     name: socket_proxy
     external: true

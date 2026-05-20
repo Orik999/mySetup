@@ -65,6 +65,9 @@ DAEMON_CONFIG_VALID="no"
 UFW_ENABLED="no"
 SWAP_DISABLED="no"
 DOCKER_GC_INSTALLED="no"
+DOCKER_GC_TIMER_INSTALLED="no"
+REDIS_OVERCOMMIT_CONFIGURED="no"
+REDIS_OVERCOMMIT_VALUE="unknown"
 
 UBUNTU_CODENAME=""
 ARCHITECTURE=""
@@ -942,7 +945,7 @@ function collect_user_options() {
         CONFIGURE_UFW="y"
     fi
 
-    gc_yn="$(timed_yes_no "Install docker-gc cleanup helper?" "n")"
+    gc_yn="$(timed_yes_no "Install safe Docker cleanup helper and weekly systemd timer?" "n")"
     if [[ "$gc_yn" =~ ^[Yy] ]]; then
         INSTALL_DOCKER_GC="y"
     else
@@ -1228,14 +1231,66 @@ function configure_ufw_firewall() {
     msg_ok "UFW FIREWALL CONFIGURED"
 }
 
-# --- 41. DOCKER-GC OPTIONAL INSTALL ---
-# Creates a simple safe Docker cleanup helper instead of aggressive automatic pruning.
+# --- 41. REDIS HOST TUNING ---
+# Persists and applies vm.overcommit_memory=1 for Redis stability.
+# Redis warns when this is not enabled because background save/replication can fail under memory pressure.
+function configure_redis_host_tuning() {
+    section "REDIS HOST TUNING"
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        msg_warn "Container mode detected. sysctl may be controlled by the host. Attempting safe configuration anyway."
+    fi
+
+    msg_info "Writing Redis overcommit sysctl config"
+
+    write_root_file /etc/sysctl.d/99-redis-overcommit.conf <<'EOF'
+# Redis background save/replication stability
+# Managed by 5-dockerSetup.sh
+vm.overcommit_memory=1
+EOF
+
+    msg_ok "REDIS SYSCTL CONFIG WRITTEN"
+
+    msg_info "Applying vm.overcommit_memory=1 immediately"
+
+    if [ -n "$SUDO_CMD" ]; then
+        if "$SUDO_CMD" sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1; then
+            REDIS_OVERCOMMIT_CONFIGURED="yes"
+            msg_ok "REDIS OVERCOMMIT APPLIED"
+        else
+            REDIS_OVERCOMMIT_CONFIGURED="failed"
+            msg_warn "Failed to apply vm.overcommit_memory immediately. It may apply after reboot."
+        fi
+    else
+        if sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1; then
+            REDIS_OVERCOMMIT_CONFIGURED="yes"
+            msg_ok "REDIS OVERCOMMIT APPLIED"
+        else
+            REDIS_OVERCOMMIT_CONFIGURED="failed"
+            msg_warn "Failed to apply vm.overcommit_memory immediately. It may apply after reboot."
+        fi
+    fi
+
+    REDIS_OVERCOMMIT_VALUE="$(sysctl -n vm.overcommit_memory 2>/dev/null || echo unknown)"
+
+    if [ "$REDIS_OVERCOMMIT_VALUE" == "1" ]; then
+        REDIS_OVERCOMMIT_CONFIGURED="yes"
+        msg_ok "REDIS HOST TUNING VERIFIED"
+    else
+        msg_warn "Redis overcommit value is ${REDIS_OVERCOMMIT_VALUE}; expected 1"
+    fi
+}
+
+# --- 42. DOCKER-GC OPTIONAL INSTALL ---
+# Creates a safe host-side Docker cleanup helper and optional weekly systemd timer.
+# This intentionally avoids any Docker socket-proxy permission expansion and never prunes volumes.
 function install_docker_gc_helper() {
-    section "DOCKER-GC HELPER"
+    section "DOCKER CLEANUP HELPER"
 
     if [ "$INSTALL_DOCKER_GC" != "y" ]; then
         DOCKER_GC_INSTALLED="no"
-        msg_skip "DOCKER-GC CLEANUP HELPER WAS NOT INSTALLED BECAUSE USER CHOSE NO"
+        DOCKER_GC_TIMER_INSTALLED="no"
+        msg_skip "DOCKER CLEANUP HELPER WAS NOT INSTALLED BECAUSE USER CHOSE NO"
         return 0
     fi
 
@@ -1245,24 +1300,129 @@ function install_docker_gc_helper() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Docker cleanup helper"
-echo "This removes unused containers, networks, dangling images, and old build cache."
-echo ""
+LOG_FILE="/var/log/docker-gc-safe.log"
+LOCK_FILE="/run/docker-gc-safe.lock"
 
-docker system prune -f
-docker image prune -f
-docker builder prune -f --filter "until=168h"
+mkdir -p "$(dirname "$LOG_FILE")"
+
+touch "$LOG_FILE"
+chmod 0644 "$LOG_FILE" 2>/dev/null || true
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "[$(date -Is)] Another docker-gc-safe run is already active. Exiting." >> "$LOG_FILE"
+    exit 0
+fi
+
+{
+    echo "============================================================"
+    echo "Docker safe cleanup started: $(date -Is)"
+    echo "Hostname: $(hostname)"
+    echo ""
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "ERROR: docker command not found."
+        exit 1
+    fi
+
+    if ! docker info >/dev/null 2>&1; then
+        echo "ERROR: Docker daemon is not reachable."
+        exit 1
+    fi
+
+    echo "Before cleanup:"
+    docker system df || true
+    echo ""
+
+    echo "Pruning stopped containers only..."
+    docker container prune -f || true
+    echo ""
+
+    echo "Pruning unused Docker networks..."
+    docker network prune -f || true
+    echo ""
+
+    echo "Pruning dangling images..."
+    docker image prune -f || true
+    echo ""
+
+    echo "Pruning unused images older than 7 days..."
+    docker image prune -a -f --filter "until=168h" || true
+    echo ""
+
+    echo "Pruning old BuildKit/build cache older than 7 days..."
+    docker builder prune -f --filter "until=168h" || true
+    echo ""
+
+    echo "IMPORTANT: Docker volumes are intentionally never pruned by this helper."
+    echo ""
+
+    echo "After cleanup:"
+    docker system df || true
+    echo ""
+    echo "Docker safe cleanup finished: $(date -Is)"
+    echo "============================================================"
+    echo ""
+} >> "$LOG_FILE" 2>&1
 EOF
 
-    msg_ok "DOCKER-GC HELPER WRITTEN"
+    msg_ok "DOCKER CLEANUP HELPER WRITTEN"
 
-    msg_info "Making docker-gc helper executable"
-    run_cmd "making docker-gc helper executable" chmod +x /usr/local/sbin/docker-gc-safe
-    msg_ok "DOCKER-GC HELPER MADE EXECUTABLE"
+    msg_info "Making docker cleanup helper executable"
+    run_cmd "making docker cleanup helper executable" chmod 0755 /usr/local/sbin/docker-gc-safe
+    msg_ok "DOCKER CLEANUP HELPER MADE EXECUTABLE"
 
     DOCKER_GC_INSTALLED="yes"
 
-    msg_ok "DOCKER-GC HELPER INSTALLED"
+    if command -v systemctl >/dev/null 2>&1; then
+        msg_info "Writing docker-gc-safe systemd service"
+
+        write_root_file /etc/systemd/system/docker-gc-safe.service <<'EOF'
+[Unit]
+Description=Safe Docker cleanup helper
+Documentation=man:docker-system-prune(1)
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/docker-gc-safe
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOF
+
+        msg_ok "DOCKER CLEANUP SERVICE WRITTEN"
+
+        msg_info "Writing docker-gc-safe weekly timer"
+
+        write_root_file /etc/systemd/system/docker-gc-safe.timer <<'EOF'
+[Unit]
+Description=Run safe Docker cleanup weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=30m
+Unit=docker-gc-safe.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+        msg_ok "DOCKER CLEANUP TIMER WRITTEN"
+
+        msg_info "Enabling docker-gc-safe timer"
+        run_cmd "reloading systemd for docker cleanup timer" systemctl daemon-reload
+        run_cmd "enabling docker cleanup timer" systemctl enable --now docker-gc-safe.timer
+        DOCKER_GC_TIMER_INSTALLED="yes"
+        msg_ok "DOCKER CLEANUP TIMER ENABLED"
+    else
+        DOCKER_GC_TIMER_INSTALLED="no-systemctl"
+        msg_warn "systemctl not available; cleanup helper installed without timer"
+    fi
+
+    msg_ok "SAFE DOCKER CLEANUP INSTALLED"
 }
 
 # =========================================================
@@ -1338,6 +1498,12 @@ EOF
         if [ -f /etc/docker/daemon.json ]; then echo "✓ PASS - daemon.json exists"; else echo "✗ FAIL - daemon.json missing"; fi
         if validate_docker_daemon_json; then echo "✓ PASS - daemon.json valid"; else echo "✗ FAIL - daemon.json validation failed"; fi
 
+        if [ -f /etc/sysctl.d/99-redis-overcommit.conf ]; then echo "✓ PASS - Redis overcommit sysctl file exists"; else echo "✗ FAIL - Redis overcommit sysctl file missing"; fi
+        if [ "$(sysctl -n vm.overcommit_memory 2>/dev/null || echo unknown)" = "1" ]; then echo "✓ PASS - vm.overcommit_memory=1 active"; else echo "! WARN - vm.overcommit_memory is not 1"; fi
+
+        if [ -x /usr/local/sbin/docker-gc-safe ]; then echo "✓ PASS - docker-gc-safe helper exists"; else echo "! INFO - docker-gc-safe helper not installed"; fi
+        if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker-gc-safe.timer >/dev/null 2>&1; then echo "✓ PASS - docker-gc-safe.timer exists"; else echo "! INFO - docker-gc-safe.timer not installed"; fi
+
         if getent group docker >/dev/null 2>&1; then echo "✓ PASS - docker group exists"; else echo "✗ FAIL - docker group missing"; fi
         if id -nG "$TARGET_USER" 2>/dev/null | grep -qw docker; then echo "✓ PASS - target user is in docker group"; else echo "! WARN - target user docker group membership not confirmed"; fi
 
@@ -1387,6 +1553,9 @@ containerd service enabled: $CONTAINERD_SERVICE_ENABLED
 Docker group ready: $DOCKER_GROUP_READY
 User added to docker group: $USER_ADDED_TO_DOCKER
 Docker GC helper: $DOCKER_GC_INSTALLED
+Docker GC timer: $DOCKER_GC_TIMER_INSTALLED
+Redis overcommit configured: $REDIS_OVERCOMMIT_CONFIGURED
+Redis overcommit value: $REDIS_OVERCOMMIT_VALUE
 Docker firewall mode: $DOCKER_FIREWALL_MODE
 UFW configured selected: $CONFIGURE_UFW
 UFW result: $UFW_ENABLED
@@ -1410,6 +1579,9 @@ containerd service enabled: $CONTAINERD_SERVICE_ENABLED
 Docker group ready: $DOCKER_GROUP_READY
 User added to docker group: $USER_ADDED_TO_DOCKER
 Docker GC helper: $DOCKER_GC_INSTALLED
+Docker GC timer: $DOCKER_GC_TIMER_INSTALLED
+Redis overcommit configured: $REDIS_OVERCOMMIT_CONFIGURED
+Redis overcommit value: $REDIS_OVERCOMMIT_VALUE
 Docker firewall mode: $DOCKER_FIREWALL_MODE
 UFW configured selected: $CONFIGURE_UFW
 UFW result: $UFW_ENABLED
@@ -1451,6 +1623,8 @@ function show_final_summary() {
     detail_line "DOCKER GROUP READY" "$DOCKER_GROUP_READY"
     detail_line "USER ADDED TO DOCKER" "$USER_ADDED_TO_DOCKER"
     detail_line "DOCKER-GC HELPER" "$DOCKER_GC_INSTALLED"
+    detail_line "DOCKER-GC TIMER" "$DOCKER_GC_TIMER_INSTALLED"
+    detail_line "REDIS OVERCOMMIT" "${REDIS_OVERCOMMIT_CONFIGURED} (${REDIS_OVERCOMMIT_VALUE})"
     detail_line "UFW FIREWALL" "$UFW_ENABLED"
     detail_line "DAEMON CONFIG VALID" "$DAEMON_CONFIG_VALID"
     detail_line "EXISTING SETUP DETECTED" "$EXISTING_SETUP"
@@ -1461,7 +1635,8 @@ function show_final_summary() {
     echo ""
     echo -e "${BL}SECURITY NOTE:${CL}"
     echo -e "${YW}Docker can publish container ports using Docker-managed firewall rules. Keep public exposure limited to Traefik/80/443 unless intentionally needed.${CL}"
-    echo -e "${YW}We will revisit DOCKER-USER firewall hardening after the compose stack is fully deployed and stable.${CL}"
+    echo -e "${YW}We will revisit DOCKER-USER firewall hardening after the compose stack is fully deployed and stable.
+${YW}Safe Docker cleanup uses host-side /usr/local/sbin/docker-gc-safe and never prunes volumes automatically.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
     echo -e "${YW}After reboot and SSH reconnect, run script 6-dockerENVsetup-crea.sh.${CL}"
@@ -1510,6 +1685,7 @@ function main() {
     collect_user_options
 
     handle_swap
+    configure_redis_host_tuning
     install_repository_dependencies
     configure_docker_repository
     install_docker_engine

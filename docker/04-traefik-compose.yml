@@ -1,15 +1,4 @@
 # 04-traefik-compose.yml
-# Project: Traefik
-# Purpose: Public HTTPS reverse proxy using generated Traefik config files.
-#
-# Script 6 generates these local runtime files from public-safe templates:
-#   ${DOCKER_DIR}/appdata/traefik/traefik.yml
-#   ${DOCKER_DIR}/appdata/traefik/dynamic-config.yml
-#   ${DOCKER_DIR}/appdata/traefik/acme/acme.json
-#
-# Do not commit generated appdata/traefik/acme/acme.json to GitHub.
-# Network note: t2_proxy and socket_proxy are created by script 6.5 and reused as external.
-
 name: traefik
 
 secrets:
@@ -25,6 +14,22 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    command:
+      - --global.checkNewVersion=false
+      - --global.sendAnonymousUsage=false
+      - --api.dashboard=true
+      - --entrypoints.http.address=:80
+      - --entrypoints.https.address=:443
+      - --entrypoints.http.http.redirections.entrypoint.to=https
+      - --entrypoints.http.http.redirections.entrypoint.scheme=https
+      - --providers.docker=true
+      - --providers.docker.endpoint=tcp://socket-proxy:2375
+      - --providers.docker.exposedByDefault=false
+      - --providers.docker.network=t2_proxy
+      - --certificatesresolvers.cloudflare.acme.email=${CF_API_EMAIL}
+      - --certificatesresolvers.cloudflare.acme.storage=/acme/acme.json
+      - --certificatesresolvers.cloudflare.acme.dnschallenge=true
+      - --certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare
     networks:
       t2_proxy:
         ipv4_address: 192.168.90.254
@@ -37,8 +42,7 @@ services:
       - htpasswd
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - ${DOCKER_DIR}/appdata/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
-      - ${DOCKER_DIR}/appdata/traefik/dynamic-config.yml:/etc/traefik/dynamic-config.yml:ro
+      - ${DOCKER_DIR}/appdata/traefik:/etc/traefik
       - ${DOCKER_DIR}/appdata/traefik/acme:/acme
     environment:
       TZ: ${TZ}
@@ -46,18 +50,30 @@ services:
     labels:
       traefik.enable: "true"
 
-      # Dashboard route. Authentik middleware becomes available after yml 5 is deployed.
       traefik.http.routers.traefik.rule: Host(`traefik.${DOMAIN}`)
       traefik.http.routers.traefik.entrypoints: https
       traefik.http.routers.traefik.tls: "true"
       traefik.http.routers.traefik.tls.certresolver: cloudflare
-      traefik.http.routers.traefik.middlewares: chain-authentik@file
+      traefik.http.routers.traefik.middlewares: authentik@docker
       traefik.http.routers.traefik.service: api@internal
+
+      # Optional Traefik basic-auth middleware.
+      # Script 6 creates ${DOCKER_SECRETS_DIR}/htpasswd.
+      # Leave these commented when Authentik/Authelia/SSO is your main protection.
+      # To enable basic-auth only:
+      # traefik.http.routers.traefik.middlewares: basic-auth@docker
+      # To chain Authentik + basic-auth:
+      # traefik.http.routers.traefik.middlewares: authentik@docker,basic-auth@docker
+      # traefik.http.middlewares.basic-auth.basicauth.usersfile: /run/secrets/htpasswd
+      # traefik.http.middlewares.basic-auth.basicauth.removeheader: "true"
 
 networks:
   t2_proxy:
     name: t2_proxy
-    external: true
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.90.0/24
   socket_proxy:
     name: socket_proxy
     external: true

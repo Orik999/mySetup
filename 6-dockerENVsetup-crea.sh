@@ -68,6 +68,7 @@ REDIS_PASSWORD=""
 AUTHENTIK_SECRET_KEY=""
 AUTHENTIK_POSTGRES_PASSWORD=""
 POSTIZ_POSTGRES_PASSWORD=""
+POSTIZ_JWT_SECRET=""
 TEMPORAL_POSTGRES_PASSWORD=""
 
 HTPASSWD_MODE="empty"
@@ -1417,6 +1418,7 @@ function generate_or_reuse_secrets() {
     AUTHENTIK_SECRET_KEY="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_secret_key")"
     AUTHENTIK_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/authentik_postgres_password")"
     POSTIZ_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_postgres_password")"
+    POSTIZ_JWT_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_jwt_secret")"
     TEMPORAL_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/temporal_postgres_password")"
 
     msg_ok "SECRETS GENERATED / REUSED"
@@ -1525,6 +1527,7 @@ function write_secret_files() {
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/authentik_secret_key" "$AUTHENTIK_SECRET_KEY"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/authentik_postgres_password" "$AUTHENTIK_POSTGRES_PASSWORD"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postiz_postgres_password" "$POSTIZ_POSTGRES_PASSWORD"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postiz_jwt_secret" "$POSTIZ_JWT_SECRET"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/temporal_postgres_password" "$TEMPORAL_POSTGRES_PASSWORD"
 
     if [ -n "$CF_API_TOKEN_VALUE" ]; then
@@ -1589,6 +1592,7 @@ AUTHENTIK_POSTGRES_PASSWORD="${AUTHENTIK_POSTGRES_PASSWORD}"
 
 # --- Postiz ---
 POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
+POSTIZ_JWT_SECRET="${POSTIZ_JWT_SECRET}"
 
 # --- Temporal ---
 TEMPORAL_POSTGRES_PASSWORD="${TEMPORAL_POSTGRES_PASSWORD}"
@@ -1686,6 +1690,7 @@ EOF
             authentik_secret_key \
             authentik_postgres_password \
             postiz_postgres_password \
+            postiz_jwt_secret \
             temporal_postgres_password
         do
             if [ -s "${DOCKER_SECRETS_DIR}/${secret_file}" ]; then
@@ -1708,6 +1713,8 @@ EOF
         if [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ]; then echo "✓ PASS - Traefik dynamic config exists"; else echo "✗ FAIL - Traefik dynamic config missing"; fi
         if [ -f "${TRAEFIK_ACME_DIR}/acme.json" ]; then echo "✓ PASS - Traefik acme.json exists"; else echo "✗ FAIL - Traefik acme.json missing"; fi
         if [ "$(root_stat_mode "${TRAEFIK_ACME_DIR}/acme.json")" == "600" ]; then echo "✓ PASS - Traefik acme.json mode is 600"; else echo "! WARN - Traefik acme.json mode is not 600"; fi
+        if grep -q "POSTIZ_JWT_SECRET=" "${DOCKER_DIR}/.env"; then echo "✓ PASS - Postiz JWT secret env present"; else echo "✗ FAIL - Postiz JWT secret env missing"; fi
+        if [ -s "${DOCKER_SECRETS_DIR}/postiz_jwt_secret" ]; then echo "✓ PASS - postiz_jwt_secret exists and is non-empty"; else echo "✗ FAIL - postiz_jwt_secret missing or empty"; fi
 
         if command -v docker >/dev/null 2>&1; then echo "✓ PASS - Docker CLI detected"; else echo "! WARN - Docker CLI not detected"; fi
         if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then echo "✓ PASS - Docker Compose plugin detected"; else echo "! WARN - Docker Compose plugin not detected for current shell"; fi
@@ -1833,6 +1840,7 @@ function show_secrets_once_without_logging() {
     echo -e "AUTHENTIK_SECRET_KEY=${GN}${AUTHENTIK_SECRET_KEY}${CL}"
     echo -e "AUTHENTIK_POSTGRES_PASSWORD=${GN}${AUTHENTIK_POSTGRES_PASSWORD}${CL}"
     echo -e "POSTIZ_POSTGRES_PASSWORD=${GN}${POSTIZ_POSTGRES_PASSWORD}${CL}"
+    echo -e "POSTIZ_JWT_SECRET=${GN}${POSTIZ_JWT_SECRET}${CL}"
     echo -e "TEMPORAL_POSTGRES_PASSWORD=${GN}${TEMPORAL_POSTGRES_PASSWORD}${CL}"
     echo ""
 

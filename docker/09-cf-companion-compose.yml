@@ -6,7 +6,17 @@
 # - No Cloudflare token is stored in this file.
 # - Script 6 writes the real token to ${CF_API_TOKEN_FILE}.
 # - Docker mounts it as /run/secrets/cf_api_token.
-# - The entrypoint exports it as CF_API_TOKEN / CLOUDFLARE_API_TOKEN for the companion app.
+# - The entrypoint reads the secret file and exports:
+#     CF_API_TOKEN
+#     CLOUDFLARE_API_TOKEN
+# - This avoids relying on unsupported *_FILE environment syntax.
+#
+# Notes:
+# - Docker label discovery is enabled through socket-proxy.
+# - Traefik polling is intentionally disabled because Docker label discovery is sufficient
+#   for this stack and avoids needing to expose/query the Traefik API URL.
+# - If future testing shows polling is required, set ENABLE_TRAEFIK_POLL=true and add
+#   the correct TRAEFIK_URL for the internal Traefik endpoint.
 
 name: cf-companion
 
@@ -19,6 +29,7 @@ services:
     image: tiredofit/traefik-cloudflare-companion:latest
     container_name: cf-companion
     restart: unless-stopped
+
     security_opt:
       - no-new-privileges:true
 
@@ -29,6 +40,7 @@ services:
       - cf_api_token
 
     environment:
+      # Timezone.
       TIMEZONE: ${TZ}
 
       # Docker provider discovery through socket proxy.
@@ -52,8 +64,16 @@ services:
       - /bin/sh
       - -c
       - |
-        export CF_API_TOKEN="$$(cat /run/secrets/cf_api_token)"
-        export CLOUDFLARE_API_TOKEN="$${CF_API_TOKEN}"
+        set -eu
+
+        if [ ! -s /run/secrets/cf_api_token ]; then
+          echo "ERROR: Cloudflare token secret is missing or empty: /run/secrets/cf_api_token" >&2
+          exit 1
+        fi
+
+        export CF_API_TOKEN="$(cat /run/secrets/cf_api_token)"
+        export CLOUDFLARE_API_TOKEN="${CF_API_TOKEN}"
+
         exec /init
 
 networks:
