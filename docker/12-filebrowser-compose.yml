@@ -23,6 +23,8 @@ name: filebrowser
 
 services:
   filebrowser:
+    env_file:
+      - /home/orik/docker/.env
     image: filebrowser/filebrowser:latest
     container_name: filebrowser
     restart: unless-stopped

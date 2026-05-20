@@ -9,6 +9,8 @@ secrets:
 
 services:
   traefik:
+    env_file:
+      - /home/orik/docker/.env
     image: traefik:latest
     container_name: traefik
     restart: unless-stopped

@@ -17,6 +17,8 @@ name: komodo
 
 services:
   komodo-postgres:
+    env_file:
+      - /home/orik/docker/.env
     image: postgres:17-alpine
     container_name: komodo-postgres
     restart: unless-stopped
@@ -40,6 +42,8 @@ services:
       retries: 10
 
   ferretdb:
+    env_file:
+      - /home/orik/docker/.env
     image: ghcr.io/ferretdb/ferretdb:2
     container_name: komodo-ferretdb
     restart: unless-stopped
@@ -56,6 +60,8 @@ services:
         condition: service_healthy
 
   komodo-core:
+    env_file:
+      - /home/orik/docker/.env
     image: ghcr.io/moghtech/komodo-core:latest
     container_name: komodo-core
     restart: unless-stopped
@@ -98,6 +104,8 @@ services:
       traefik.http.services.komodo.loadbalancer.server.port: 9120
 
   komodo-periphery:
+    env_file:
+      - /home/orik/docker/.env
     image: ghcr.io/moghtech/komodo-periphery:latest
     container_name: komodo-periphery
     restart: unless-stopped

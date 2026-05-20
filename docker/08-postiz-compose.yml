@@ -2,6 +2,8 @@ name: postiz
 
 services:
   postiz:
+    env_file:
+      - /home/orik/docker/.env
     image: ghcr.io/gitroomhq/postiz-app:latest
     container_name: postiz
     restart: unless-stopped

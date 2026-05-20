@@ -2,6 +2,8 @@ name: postiz-temporal-guard
 
 services:
   postiz-temporal-guard:
+    env_file:
+      - /home/orik/docker/.env
     image: temporalio/admin-tools:latest
     container_name: postiz-temporal-guard
     restart: "no"

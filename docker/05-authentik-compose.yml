@@ -21,6 +21,8 @@ name: authentik
 
 services:
   authentik-server:
+    env_file:
+      - /home/orik/docker/.env
     image: ghcr.io/goauthentik/server:latest
     container_name: authentik-server
     restart: unless-stopped
@@ -86,6 +88,8 @@ services:
       traefik.http.services.authentik.loadbalancer.server.port: 9000
 
   authentik-worker:
+    env_file:
+      - /home/orik/docker/.env
     image: ghcr.io/goauthentik/server:latest
     container_name: authentik-worker
     restart: unless-stopped

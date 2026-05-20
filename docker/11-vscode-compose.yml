@@ -7,6 +7,8 @@ name: vscode
 
 services:
   vscode:
+    env_file:
+      - /home/orik/docker/.env
     image: lscr.io/linuxserver/code-server:latest
     container_name: vscode
     restart: unless-stopped

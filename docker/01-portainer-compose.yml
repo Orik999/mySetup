@@ -33,6 +33,8 @@ name: portainer
 
 services:
   portainer:
+    env_file:
+      - /home/orik/docker/.env
     image: portainer/portainer-ce:latest
     container_name: portainer
     restart: unless-stopped
