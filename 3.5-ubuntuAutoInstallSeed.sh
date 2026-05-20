@@ -724,6 +724,51 @@ get_vm_status() {
     qm status "$vmid" 2>/dev/null | awk '{print $2}'
 }
 
+# --- 24A. STRICT VM STOP DETECTION HELPER ---
+# Waits until Proxmox reports the selected VM as fully stopped.
+# This is used before installer media is attached and before a newly installed VM is started again.
+# It avoids racing against a still-running installer or a VM that is shutting down asynchronously.
+wait_for_vm_stopped_strict() {
+    local vmid="$1"
+    local timeout_seconds="${2:-120}"
+    local reason="${3:-VM stop confirmation}"
+    local start_time=""
+    local now_time=""
+    local elapsed=""
+    local status=""
+    local stable_count="0"
+
+    start_time="$(date +%s)"
+
+    while true; do
+        status="$(get_vm_status "$vmid")"
+
+        # Require two consecutive stopped reads so a transient qm status result cannot race the next action.
+        if [ "$status" == "stopped" ]; then
+            stable_count=$((stable_count + 1))
+
+            if [ "$stable_count" -ge 2 ]; then
+                tty_print "${BFR}"
+                return 0
+            fi
+        else
+            stable_count="0"
+        fi
+
+        now_time="$(date +%s)"
+        elapsed=$(( now_time - start_time ))
+
+        if [ "$elapsed" -ge "$timeout_seconds" ]; then
+            tty_print "${BFR}"
+            msg_warn "${reason} timed out. VM ${vmid} status is ${status:-unknown}."
+            return 1
+        fi
+
+        tty_print "${BFR}${YW}${reason}: waiting for VM ${vmid} to stop... ${elapsed}s / ${timeout_seconds}s, status=${status:-unknown}${CL}"
+        sleep 2
+    done
+}
+
 # --- 25. WAIT FOR VM POWEROFF HELPER ---
 wait_for_vm_poweroff() {
     local vmid="$1"
@@ -1354,24 +1399,28 @@ select_vm() {
 
     qm config "$TARGET_VMID" >/dev/null 2>&1 || msg_error "Selected VM ${TARGET_VMID} does not exist."
 
-    if [ "$TARGET_VM_STATUS" == "running" ]; then
-        msg_warn "VM ${TARGET_VMID} is running; it will not be stopped until final apply."
-    fi
-
     detail_line "Selected VM" "${TARGET_VMID} / ${TARGET_VM_NAME} / ${TARGET_VM_STATUS}"
+
+    ensure_vm_stopped_after_selection
 }
 
-# --- 39A. VM STOP SAFETY BEFORE APPLY ---
-# Stops the selected VM only after all prechecks, ISO decisions and final confirmation are complete.
-ensure_vm_stopped_before_apply() {
+# --- 39A. EARLY VM SHUTDOWN AFTER SELECTION ---
+# Stops a running VM immediately after VM selection, before ISO creation, package work, and final apply.
+# This prevents Script 3.5 from shutting the VM down at the last second and racing the autoinstall boot.
+ensure_vm_stopped_after_selection() {
     local shutdown_yn=""
     local current_status=""
 
     current_status="$(get_vm_status "$TARGET_VMID")"
     TARGET_VM_STATUS="${current_status:-unknown}"
 
-    if [ "$TARGET_VM_STATUS" != "running" ]; then
+    if [ "$TARGET_VM_STATUS" == "stopped" ]; then
+        detail_line "VM shutdown state" "already stopped"
         return 0
+    fi
+
+    if [ "$TARGET_VM_STATUS" != "running" ]; then
+        msg_error "VM ${TARGET_VMID} must be stopped before autoinstall. Current status: ${TARGET_VM_STATUS}"
     fi
 
     section "VM SHUTDOWN BEFORE APPLY"
@@ -1382,19 +1431,50 @@ ensure_vm_stopped_before_apply() {
 
     shutdown_yn="$(timed_yes_no "Shutdown VM now?" "y")"
 
-    if [[ "$shutdown_yn" =~ ^[Yy] ]]; then
-        msg_info "Shutting down VM ${TARGET_VMID}"
-        if qm shutdown "$TARGET_VMID" --timeout 60 >/dev/null 2>&1; then
-            msg_ok "VM SHUTDOWN COMPLETE"
-        else
-            msg_warn "Graceful shutdown failed or timed out; forcing stop"
-            run_cmd "stopping VM ${TARGET_VMID}" qm stop "$TARGET_VMID"
-            msg_ok "VM STOPPED"
-        fi
-        TARGET_VM_STATUS="stopped"
-    else
+    if [[ "$shutdown_yn" =~ ^[Nn] ]]; then
         msg_error "VM must be stopped before attaching install media safely."
     fi
+
+    msg_info "Shutting down VM ${TARGET_VMID}"
+
+    if qm shutdown "$TARGET_VMID" --timeout 90 >/dev/null 2>&1; then
+        if wait_for_vm_stopped_strict "$TARGET_VMID" "30" "Verifying VM shutdown"; then
+            TARGET_VM_STATUS="stopped"
+            msg_ok "VM SHUTDOWN COMPLETE"
+            return 0
+        fi
+    fi
+
+    msg_warn "Graceful shutdown failed or did not reach a stable stopped state; forcing stop"
+    run_cmd "forcing VM ${TARGET_VMID} off" qm stop "$TARGET_VMID"
+
+    if wait_for_vm_stopped_strict "$TARGET_VMID" "30" "Verifying forced VM stop"; then
+        TARGET_VM_STATUS="stopped"
+        msg_ok "VM SHUTDOWN COMPLETE"
+        return 0
+    fi
+
+    msg_error "VM ${TARGET_VMID} did not reach stopped state. Autoinstall cancelled."
+}
+
+# --- 39B. FINAL VM STOP PRECHECK BEFORE INSTALL BOOT ---
+# Performs a final no-prompt stop check immediately before attaching media and starting autoinstall.
+# The expected normal path is already stopped because ensure_vm_stopped_after_selection ran earlier.
+ensure_vm_stopped_before_install_start() {
+    local current_status=""
+
+    current_status="$(get_vm_status "$TARGET_VMID")"
+    TARGET_VM_STATUS="${current_status:-unknown}"
+
+    if [ "$TARGET_VM_STATUS" != "stopped" ]; then
+        msg_error "VM ${TARGET_VMID} is ${TARGET_VM_STATUS}; refusing to attach installer media until it is fully stopped."
+    fi
+
+    if ! wait_for_vm_stopped_strict "$TARGET_VMID" "15" "Final VM stopped precheck"; then
+        msg_error "VM ${TARGET_VMID} did not remain stopped. Autoinstall cancelled."
+    fi
+
+    TARGET_VM_STATUS="stopped"
 }
 
 # --- 40. VM MAC DETECTION ---
@@ -1868,7 +1948,7 @@ show_apply_summary() {
 
 # --- 58. ATTACH AND START INSTALL ---
 attach_iso_and_start_install() {
-    ensure_vm_stopped_before_apply
+    ensure_vm_stopped_before_install_start
 
     section "ATTACH INSTALLER AND START VM"
 
@@ -1930,6 +2010,14 @@ start_installed_vm_and_detect_ip() {
     section "START INSTALLED VM"
 
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
+        if ! wait_for_vm_stopped_strict "$TARGET_VMID" "30" "Confirming installed VM is stopped before first boot"; then
+            msg_error "VM ${TARGET_VMID} is not safely stopped before installed-system boot."
+        fi
+
+        msg_info "Waiting 5 seconds before starting installed VM"
+        sleep 5
+        msg_ok "POST-INSTALL STARTUP DELAY COMPLETE"
+
         msg_info "Starting installed Ubuntu VM"
         run_cmd "starting installed Ubuntu VM" qm start "$TARGET_VMID"
         msg_ok "INSTALLED UBUNTU VM STARTED"
