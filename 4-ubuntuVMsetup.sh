@@ -907,9 +907,13 @@ function detect_ssh_key_source() {
 }
 
 # --- 33. USER CREATION / REUSE ---
-# Creates the user only if missing and ensures the selected user is in the sudo group.
+# Creates the user only if missing, ensures sudo group membership, and locks the selected user password when requested.
+# Important: autoinstall usually creates the user before Script 4 runs, so existing users must still be offered
+# password locking. The previous logic only locked brand-new users and left existing autoinstall users with
+# an active password hash.
 function create_or_reuse_user() {
     local lock_yn=""
+    local passwd_state=""
 
     if [ "$EXISTING_USER" == "no" ]; then
         msg_info "Creating user ${USERNAME}"
@@ -918,18 +922,6 @@ function create_or_reuse_user() {
         SUDO_USER_CREATED="yes"
 
         msg_ok "USER CREATED"
-
-        lock_yn="$(timed_yes_no "Lock password for SSH-key-only user?" "y")"
-
-        if [[ "$lock_yn" =~ ^[Yy] ]]; then
-            msg_info "Locking password for ${USERNAME}"
-            run_optional passwd -l "$USERNAME"
-            USER_PASSWORD_LOCKED="yes"
-            msg_ok "USER PASSWORD LOCKED"
-        else
-            USER_PASSWORD_LOCKED="no"
-            msg_warn "User password was not locked"
-        fi
     else
         msg_ok "USER ${USERNAME} ALREADY EXISTS"
     fi
@@ -938,6 +930,26 @@ function create_or_reuse_user() {
     run_cmd "adding ${USERNAME} to sudo group" usermod -aG sudo "$USERNAME"
     USER_ADDED_TO_SUDO="yes"
     msg_ok "USER SUDO ACCESS CONFIRMED"
+
+    lock_yn="$(timed_yes_no "Lock password for SSH-key-only user?" "y")"
+
+    if [[ "$lock_yn" =~ ^[Yy] ]]; then
+        msg_info "Locking password for ${USERNAME}"
+        run_cmd "locking password for ${USERNAME}" passwd -l "$USERNAME"
+
+        passwd_state="$(passwd -S "$USERNAME" 2>/dev/null | awk '{print $2}' || true)"
+
+        if [ "$passwd_state" == "L" ] || [ "$passwd_state" == "NP" ]; then
+            USER_PASSWORD_LOCKED="yes"
+            msg_ok "USER PASSWORD LOCKED"
+        else
+            USER_PASSWORD_LOCKED="verify-failed"
+            msg_warn "Password lock command ran but verification did not confirm locked state"
+        fi
+    else
+        USER_PASSWORD_LOCKED="no"
+        msg_warn "User password was not locked"
+    fi
 }
 
 # --- 34. SSH KEY CONFIGURATION ---
@@ -1130,8 +1142,18 @@ function install_qemu_guest_agent() {
 # --- 38. ROOT FILESYSTEM LVM EXPANSION ---
 # Detects if Ubuntu installed / on LVM and automatically expands it to use remaining free VG space.
 # Skips inside LXC/container mode because root storage is controlled by the host.
+# Uses machine-readable byte values and sudo-safe LVM lookups so human-readable values such as
+# "38.47g" or "<76.95g" can never cause the script to incorrectly report "not-needed".
 function expand_root_lvm_if_possible() {
     section "ROOT DISK EXPANSION"
+
+    local root_source=""
+    local root_candidate=""
+    local lv_name=""
+    local lv_path=""
+    local vg_free_raw=""
+    local vg_free_int="0"
+    local min_expand_bytes="1073741824"
 
     if [ "$IS_CONTAINER" == "yes" ]; then
         ROOT_EXPANDED="skipped-lxc"
@@ -1147,31 +1169,77 @@ function expand_root_lvm_if_possible() {
 
     msg_info "Checking root filesystem free space"
 
-    ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    ROOT_SOURCE="$root_source"
     ROOT_LV_PATH=""
+    VG_NAME=""
+    VG_FREE_BYTES="0"
 
-    if [ -n "$ROOT_SOURCE" ]; then
-        ROOT_LV_PATH="$(readlink -f "$ROOT_SOURCE" 2>/dev/null || echo "$ROOT_SOURCE")"
+    if [ -n "$root_source" ]; then
+        root_candidate="$(readlink -f "$root_source" 2>/dev/null || echo "$root_source")"
     fi
 
-    if [ -n "$ROOT_LV_PATH" ] && lvs "$ROOT_LV_PATH" &>/dev/null; then
-        VG_NAME="$(lvs --noheadings -o vg_name "$ROOT_LV_PATH" | xargs)"
-        VG_FREE_BYTES="$(vgs --noheadings --units b --nosuffix -o vg_free "$VG_NAME" | xargs | cut -d'.' -f1)"
-
-        if [[ "$VG_FREE_BYTES" =~ ^[0-9]+$ ]] && [ "$VG_FREE_BYTES" -gt 1073741824 ]; then
-            msg_ok "FOUND EMPTY LVM SPACE"
-
-            msg_info "Expanding Ubuntu root filesystem"
-            run_cmd "expanding Ubuntu root filesystem" lvextend -r -l +100%FREE "$ROOT_LV_PATH"
-            ROOT_EXPANDED="yes"
-            msg_ok "UBUNTU ROOT FILESYSTEM EXPANDED"
-        else
-            ROOT_EXPANDED="not-needed"
-            msg_ok "NO EMPTY LVM SPACE FOUND"
-        fi
+    # First try the resolved device path, for example /dev/dm-0.
+    # If that fails, ask LVM which LV backs the root source and use its canonical LV path.
+    if [ -n "$root_candidate" ] && { lvs "$root_candidate" >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" lvs "$root_candidate" >/dev/null 2>&1; }; }; then
+        ROOT_LV_PATH="$root_candidate"
     else
+        lv_name="$(findmnt -n -o SOURCE / 2>/dev/null | sed 's#^/dev/mapper/##' || true)"
+
+        if [ -n "$lv_name" ]; then
+            lv_path="$(lvs --noheadings -o lv_path 2>/dev/null | xargs -n1 | grep -F "/${lv_name//--/-}" | head -n1 || true)"
+
+            if [ -z "$lv_path" ] && [ -n "$SUDO_CMD" ]; then
+                lv_path="$($SUDO_CMD lvs --noheadings -o lv_path 2>/dev/null | xargs -n1 | grep -F "/${lv_name//--/-}" | head -n1 || true)"
+            fi
+
+            [ -n "$lv_path" ] && ROOT_LV_PATH="$lv_path"
+        fi
+    fi
+
+    if [ -z "$ROOT_LV_PATH" ]; then
         ROOT_EXPANDED="not-needed"
         msg_ok "ROOT FILESYSTEM LVM EXPANSION NOT NEEDED"
+        return 0
+    fi
+
+    VG_NAME="$(lvs --noheadings -o vg_name "$ROOT_LV_PATH" 2>/dev/null | xargs || true)"
+
+    if [ -z "$VG_NAME" ] && [ -n "$SUDO_CMD" ]; then
+        VG_NAME="$($SUDO_CMD lvs --noheadings -o vg_name "$ROOT_LV_PATH" 2>/dev/null | xargs || true)"
+    fi
+
+    if [ -z "$VG_NAME" ]; then
+        ROOT_EXPANDED="not-needed"
+        msg_ok "ROOT FILESYSTEM LVM EXPANSION NOT NEEDED"
+        return 0
+    fi
+
+    vg_free_raw="$(vgs --noheadings --units b --nosuffix -o vg_free "$VG_NAME" 2>/dev/null | xargs || true)"
+
+    if [ -z "$vg_free_raw" ] && [ -n "$SUDO_CMD" ]; then
+        vg_free_raw="$($SUDO_CMD vgs --noheadings --units b --nosuffix -o vg_free "$VG_NAME" 2>/dev/null | xargs || true)"
+    fi
+
+    vg_free_int="${vg_free_raw%%.*}"
+    vg_free_int="${vg_free_int//[^0-9]/}"
+    [ -z "$vg_free_int" ] && vg_free_int="0"
+    VG_FREE_BYTES="$vg_free_int"
+
+    if [[ "$VG_FREE_BYTES" =~ ^[0-9]+$ ]] && [ "$VG_FREE_BYTES" -gt "$min_expand_bytes" ]; then
+        msg_ok "FOUND EMPTY LVM SPACE"
+        detail_line "Volume group" "$VG_NAME"
+        detail_line "Free LVM bytes" "$VG_FREE_BYTES"
+
+        msg_info "Expanding Ubuntu root filesystem"
+        run_cmd "expanding Ubuntu root filesystem" lvextend -r -l +100%FREE "$ROOT_LV_PATH"
+        ROOT_EXPANDED="yes"
+        msg_ok "UBUNTU ROOT FILESYSTEM EXPANDED"
+    else
+        ROOT_EXPANDED="not-needed"
+        msg_ok "NO EMPTY LVM SPACE FOUND"
+        detail_line "Volume group" "$VG_NAME"
+        detail_line "Free LVM bytes" "$VG_FREE_BYTES"
     fi
 }
 
