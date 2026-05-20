@@ -1149,8 +1149,14 @@ function expand_root_lvm_if_possible() {
 
     local root_source=""
     local root_candidate=""
-    local lv_name=""
+    local lvm_rows=""
+    local row=""
     local lv_path=""
+    local lv_dm_path=""
+    local vg_name=""
+    local lv_name=""
+    local resolved_lv_path=""
+    local resolved_dm_path=""
     local vg_free_raw=""
     local vg_free_int="0"
     local min_expand_bytes="1073741824"
@@ -1179,57 +1185,64 @@ function expand_root_lvm_if_possible() {
         root_candidate="$(readlink -f "$root_source" 2>/dev/null || echo "$root_source")"
     fi
 
-    # First try the resolved device path, for example /dev/dm-0.
-    # If that fails, ask LVM which LV backs the root source and use its canonical LV path.
-    if [ -n "$root_candidate" ] && { lvs "$root_candidate" >/dev/null 2>&1 || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" lvs "$root_candidate" >/dev/null 2>&1; }; }; then
-        ROOT_LV_PATH="$root_candidate"
+    # Robustly map the mounted root device back to its LVM logical volume.
+    # Do not parse human-readable names like ubuntu--vg-ubuntu--lv manually.
+    # Instead, ask LVM for both canonical LV paths and device-mapper paths, then compare
+    # them against findmnt output and resolved /dev/dm-* paths.
+    if [ -n "$SUDO_CMD" ]; then
+        lvm_rows="$($SUDO_CMD lvs --noheadings --separator '|' -o lv_path,lv_dm_path,vg_name,lv_name 2>/dev/null || true)"
     else
-        lv_name="$(findmnt -n -o SOURCE / 2>/dev/null | sed 's#^/dev/mapper/##' || true)"
+        lvm_rows="$(lvs --noheadings --separator '|' -o lv_path,lv_dm_path,vg_name,lv_name 2>/dev/null || true)"
+    fi
 
-        if [ -n "$lv_name" ]; then
-            lv_path="$(lvs --noheadings -o lv_path 2>/dev/null | xargs -n1 | grep -F "/${lv_name//--/-}" | head -n1 || true)"
+    while IFS='|' read -r lv_path lv_dm_path vg_name lv_name; do
+        lv_path="$(echo "$lv_path" | xargs)"
+        lv_dm_path="$(echo "$lv_dm_path" | xargs)"
+        vg_name="$(echo "$vg_name" | xargs)"
+        lv_name="$(echo "$lv_name" | xargs)"
 
-            if [ -z "$lv_path" ] && [ -n "$SUDO_CMD" ]; then
-                lv_path="$($SUDO_CMD lvs --noheadings -o lv_path 2>/dev/null | xargs -n1 | grep -F "/${lv_name//--/-}" | head -n1 || true)"
-            fi
+        [ -z "$lv_path" ] && continue
 
-            [ -n "$lv_path" ] && ROOT_LV_PATH="$lv_path"
+        resolved_lv_path="$(readlink -f "$lv_path" 2>/dev/null || echo "$lv_path")"
+        resolved_dm_path="$(readlink -f "$lv_dm_path" 2>/dev/null || echo "$lv_dm_path")"
+
+        if [ "$root_source" == "$lv_path" ] || \
+           [ "$root_source" == "$lv_dm_path" ] || \
+           [ "$root_candidate" == "$resolved_lv_path" ] || \
+           [ "$root_candidate" == "$resolved_dm_path" ]; then
+            ROOT_LV_PATH="$lv_path"
+            VG_NAME="$vg_name"
+            break
         fi
-    fi
+    done <<< "$lvm_rows"
 
-    if [ -z "$ROOT_LV_PATH" ]; then
+    if [ -z "$ROOT_LV_PATH" ] || [ -z "$VG_NAME" ]; then
         ROOT_EXPANDED="not-needed"
         msg_ok "ROOT FILESYSTEM LVM EXPANSION NOT NEEDED"
+        detail_line "Root source" "${ROOT_SOURCE:-unknown}"
+        detail_line "Resolved root source" "${root_candidate:-unknown}"
         return 0
     fi
 
-    VG_NAME="$(lvs --noheadings -o vg_name "$ROOT_LV_PATH" 2>/dev/null | xargs || true)"
-
-    if [ -z "$VG_NAME" ] && [ -n "$SUDO_CMD" ]; then
-        VG_NAME="$($SUDO_CMD lvs --noheadings -o vg_name "$ROOT_LV_PATH" 2>/dev/null | xargs || true)"
-    fi
-
-    if [ -z "$VG_NAME" ]; then
-        ROOT_EXPANDED="not-needed"
-        msg_ok "ROOT FILESYSTEM LVM EXPANSION NOT NEEDED"
-        return 0
-    fi
-
-    vg_free_raw="$(vgs --noheadings --units b --nosuffix -o vg_free "$VG_NAME" 2>/dev/null | xargs || true)"
-
-    if [ -z "$vg_free_raw" ] && [ -n "$SUDO_CMD" ]; then
+    if [ -n "$SUDO_CMD" ]; then
         vg_free_raw="$($SUDO_CMD vgs --noheadings --units b --nosuffix -o vg_free "$VG_NAME" 2>/dev/null | xargs || true)"
+    else
+        vg_free_raw="$(vgs --noheadings --units b --nosuffix -o vg_free "$VG_NAME" 2>/dev/null | xargs || true)"
     fi
 
+    # vgs can return decimal bytes such as 41306882048.00. Strip decimals safely.
     vg_free_int="${vg_free_raw%%.*}"
     vg_free_int="${vg_free_int//[^0-9]/}"
     [ -z "$vg_free_int" ] && vg_free_int="0"
     VG_FREE_BYTES="$vg_free_int"
 
+    detail_line "Root source" "$ROOT_SOURCE"
+    detail_line "Root LV path" "$ROOT_LV_PATH"
+    detail_line "Volume group" "$VG_NAME"
+    detail_line "Free LVM bytes" "$VG_FREE_BYTES"
+
     if [[ "$VG_FREE_BYTES" =~ ^[0-9]+$ ]] && [ "$VG_FREE_BYTES" -gt "$min_expand_bytes" ]; then
         msg_ok "FOUND EMPTY LVM SPACE"
-        detail_line "Volume group" "$VG_NAME"
-        detail_line "Free LVM bytes" "$VG_FREE_BYTES"
 
         msg_info "Expanding Ubuntu root filesystem"
         run_cmd "expanding Ubuntu root filesystem" lvextend -r -l +100%FREE "$ROOT_LV_PATH"
@@ -1238,8 +1251,6 @@ function expand_root_lvm_if_possible() {
     else
         ROOT_EXPANDED="not-needed"
         msg_ok "NO EMPTY LVM SPACE FOUND"
-        detail_line "Volume group" "$VG_NAME"
-        detail_line "Free LVM bytes" "$VG_FREE_BYTES"
     fi
 }
 
