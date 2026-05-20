@@ -1967,8 +1967,6 @@ attach_iso_and_start_install() {
 
 # --- 59. POST-INSTALL CLEANUP ---
 post_install_cleanup() {
-    section "POST-INSTALL CLEANUP"
-
     if wait_for_vm_poweroff "$TARGET_VMID" "$INSTALL_WAIT_MINUTES"; then
         INSTALL_POWERED_OFF="yes"
     else
@@ -1987,6 +1985,8 @@ post_install_cleanup() {
         echo ""
         exit 1
     fi
+
+    section "POST-INSTALL CLEANUP"
 
     msg_info "Detaching generated autoinstall ISO from VM"
     run_cmd "detaching installer ISO from VM" qm set "$TARGET_VMID" --delete ide2
@@ -2135,7 +2135,7 @@ show_generated_iso_only_summary() {
 
 # --- 64. FINAL OUTPUT ---
 show_final_output() {
-    section_flash_success "FINISHED"
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
     echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
     echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
