@@ -939,21 +939,33 @@ if [ -f "\$VERIFY_MARKER" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " UBUNTU AUTOINSTALL VERIFICATION REPORT"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Date: \$(date)"
-echo "Host: \$(hostname)"
-echo "User: ${TARGET_USERNAME}"
-echo "Expected VM MAC: ${TARGET_VM_MAC}"
-echo "Keyboard Layout: ${TARGET_KEYBOARD_LAYOUT}"
-echo "Locale: ${TARGET_LOCALE}"
-echo ""
+# Script 1-style colour helpers for the one-time login verification report.
+YW="\$(printf '\\033[33m')"
+BL="\$(printf '\\033[36m')"
+RD="\$(printf '\\033[01;31m')"
+GN="\$(printf '\\033[1;92m')"
+DGN="\$(printf '\\033[32m')"
+CL="\$(printf '\\033[m')"
+CM="\${GN}✓\${CL}"
+WARN_ICON="\${YW}!\${CL}"
+CROSS="\${RD}✗\${CL}"
+BORDER="\${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\${CL}"
 
-PASS() { echo "✓ PASS - \$1"; }
-WARN() { echo "! WARN - \$1"; }
-FAIL() { echo "✗ FAIL - \$1"; }
+printf '\n'
+echo -e "\${BORDER}"
+echo -e "\${BL} UBUNTU AUTOINSTALL VERIFICATION REPORT\${CL}"
+echo -e "\${BORDER}"
+echo -e "\${DGN}Date:\${CL} \$(date)"
+echo -e "\${DGN}Host:\${CL} \$(hostname)"
+echo -e "\${DGN}User:\${CL} ${TARGET_USERNAME}"
+echo -e "\${DGN}Expected VM MAC:\${CL} ${TARGET_VM_MAC}"
+echo -e "\${DGN}Keyboard Layout:\${CL} ${TARGET_KEYBOARD_LAYOUT}"
+echo -e "\${DGN}Locale:\${CL} ${TARGET_LOCALE}"
+printf '\n'
+
+PASS() { echo -e "\${CM} \${GN}PASS - \$1\${CL}"; }
+WARN() { echo -e "\${WARN_ICON} \${YW}WARN - \$1\${CL}"; }
+FAIL() { echo -e "\${CROSS} \${RD}FAIL - \$1\${CL}"; }
 
 if [ -s "/home/${TARGET_USERNAME}/.ssh/authorized_keys" ]; then PASS "SSH authorized_keys present"; else FAIL "SSH authorized_keys missing"; fi
 if sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled"; else FAIL "SSH password authentication not disabled"; fi
@@ -966,15 +978,15 @@ if findmnt / >/dev/null 2>&1; then PASS "Root filesystem mounted"; else FAIL "Ro
 if command -v ip >/dev/null 2>&1 && ip -4 addr show | grep -q "inet "; then PASS "IPv4 address detected"; else WARN "IPv4 address not detected"; fi
 if apt-get check >/dev/null 2>&1; then PASS "APT database healthy"; else WARN "APT database check failed"; fi
 
-echo ""
-echo "Network:"
+printf '\n'
+echo -e "\${BL}Network:\${CL}"
 ip -br addr 2>/dev/null || true
-echo ""
-echo "Disk:"
+printf '\n'
+echo -e "\${BL}Disk:\${CL}"
 df -h / 2>/dev/null || true
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
+printf '\n'
+echo -e "\${BORDER}"
+printf '\n'
 
 touch "\$VERIFY_MARKER" 2>/dev/null || true
 rm -f /etc/profile.d/ubuntu-autoinstall-verify-display.sh 2>/dev/null || true
