@@ -1281,7 +1281,7 @@ function collect_traefik_inputs() {
     local default_traefik_host="traefik.${DOMAIN_VALUE}"
     local proxmox_yn=""
     local default_proxmox_host="proxmox.${DOMAIN_VALUE}"
-    local default_proxmox_url="https://192.168.1.10:8006"
+    local default_proxmox_url="https://192.168.1.11:8006"
 
     section "TRAEFIK CONFIG"
 
