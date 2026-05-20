@@ -791,8 +791,6 @@ function start_confirmation() {
     section "START"
 
     echo -e "${YW}This script creates shared Docker networks, validates Script 6 output, downloads bootstrap compose files, and deploys socket-proxy plus the selected admin UI.${CL}"
-    echo -e "${YW}Selected admin UI is read from ${ENV_FILE}: Dockge, Portainer CE, or Komodo.${CL}"
-    echo -e "${YW}The retired yml 12 Docker-GC container is intentionally skipped; Script 5 now owns host-side cleanup.${CL}"
     echo ""
 
     start_yn="$(timed_yes_no "Start Docker Bootstrap Setup?" "y")"
@@ -987,10 +985,46 @@ function verify_authentik_folders() {
         "${DOCKER_DIR}/appdata/authentik/certs"
     )
     local folder=""
+    local missing_folders=()
+
+    msg_info "Checking Authentik host bind-mount folders"
 
     for folder in "${folders[@]}"; do
-        msg_info "Checking ${folder}"
-        [ -d "$folder" ] || msg_error "Required Authentik folder missing: ${folder}"
+        if [ ! -d "$folder" ]; then
+            missing_folders+=("$folder")
+        fi
+    done
+
+    if [ "${#missing_folders[@]}" -gt 0 ]; then
+        msg_warn "Missing Authentik folders detected"
+        echo ""
+
+        for folder in "${missing_folders[@]}"; do
+            detail_line "Missing folder" "$folder"
+        done
+
+        echo ""
+        msg_info "Creating missing Authentik folders"
+
+        for folder in "${folders[@]}"; do
+            run_cmd "creating Authentik folder ${folder}" mkdir -p "$folder"
+        done
+
+        msg_ok "AUTHENTIK FOLDERS CREATED"
+    else
+        msg_ok "AUTHENTIK FOLDERS FOUND"
+    fi
+
+    msg_info "Applying Authentik folder ownership"
+    run_cmd "setting Authentik folder ownership for UID 1000" chown -R 1000:1000 "${DOCKER_DIR}/appdata/authentik"
+    msg_ok "AUTHENTIK FOLDER OWNERSHIP SET"
+
+    msg_info "Applying Authentik folder permissions"
+    run_cmd "setting Authentik folder permissions" chmod -R u+rwX,g+rX,o-rwx "${DOCKER_DIR}/appdata/authentik"
+    msg_ok "AUTHENTIK FOLDER PERMISSIONS SET"
+
+    for folder in "${folders[@]}"; do
+        msg_info "Verifying ${folder}"
 
         if [ -n "$SUDO_CMD" ]; then
             "$SUDO_CMD" -u '#1000' sh -c "touch '${folder}/.ak-write-test-$$' && rm -f '${folder}/.ak-write-test-$$'" >/dev/null 2>&1 || msg_error "Authentik UID 1000 cannot write to ${folder}"
@@ -1101,10 +1135,45 @@ function verify_filebrowser_folders() {
         "${DOCKER_DIR}/compose"
     )
     local folder=""
+    local missing_folders=()
+
+    msg_info "Checking Filebrowser-safe writable folders"
 
     for folder in "${folders[@]}"; do
-        msg_info "Checking ${folder}"
-        [ -d "$folder" ] || msg_error "Required Filebrowser folder missing: ${folder}"
+        if [ ! -d "$folder" ]; then
+            missing_folders+=("$folder")
+        fi
+    done
+
+    if [ "${#missing_folders[@]}" -gt 0 ]; then
+        msg_warn "Missing Filebrowser folders detected"
+        echo ""
+
+        for folder in "${missing_folders[@]}"; do
+            detail_line "Missing folder" "$folder"
+        done
+
+        echo ""
+        msg_info "Creating missing Filebrowser folders"
+
+        for folder in "${folders[@]}"; do
+            run_cmd "creating Filebrowser folder ${folder}" mkdir -p "$folder"
+        done
+
+        msg_ok "FILEBROWSER FOLDERS CREATED"
+    else
+        msg_ok "FILEBROWSER FOLDERS FOUND"
+    fi
+
+    msg_info "Applying Filebrowser folder ownership"
+    for folder in "${folders[@]}"; do
+        run_cmd "setting Filebrowser folder ownership ${folder}" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$folder"
+        run_cmd "setting Filebrowser folder permissions ${folder}" chmod -R u+rwX,g+rwX,o-rwx "$folder"
+    done
+    msg_ok "FILEBROWSER FOLDER PERMISSIONS SET"
+
+    for folder in "${folders[@]}"; do
+        msg_info "Verifying ${folder}"
         verify_user_writable_dir "$folder" || msg_error "Docker user ${DOCKER_USER} cannot write to ${folder}"
         msg_ok "FILEBROWSER FOLDER WRITABLE: ${folder}"
     done
@@ -1115,16 +1184,10 @@ function verify_filebrowser_folders() {
 # --- 33H. YML 12 RETIREMENT CHECK ---
 # Prevents deployment of the retired Docker-GC container stack.
 function retire_yml_12_docker_gc() {
-    section "YML 12 RETIREMENT"
-
     local file="${COMPOSE_DIR}/${YML_12_NAME}"
 
     if [ -f "$file" ]; then
-        msg_warn "Retired yml 12 Docker-GC compose file found. It will not be deployed."
-        run_cmd "renaming retired yml 12" mv "$file" "${file}.retired"
-        detail_line "Retired file" "${file}.retired"
-    else
-        msg_ok "NO YML 12 DOCKER-GC CONTAINER COMPOSE FOUND"
+        run_cmd "renaming retired compose file" mv "$file" "${file}.retired"
     fi
 
     YML_12_RETIRED="yes"
@@ -1873,7 +1936,6 @@ function show_final_summary() {
     detail_line "ADMIN UI" "$ADMIN_UI"
     detail_line "ADMIN UI COMPOSE" "$ADMIN_UI_COMPOSE_FILE"
     detail_line "ADMIN UI HOST" "$ADMIN_UI_HOST"
-    detail_line "YML 12 RETIRED" "$YML_12_RETIRED"
     detail_line "REDIS SYSCTL" "$SYSCTL_REDIS_OK"
     detail_line "TRAEFIK PLACEHOLDERS" "$TRAEFIK_PLACEHOLDERS_OK"
     detail_line "TRAEFIK DNS V3.7" "$TRAEFIK_DNS_DELAY_OK"

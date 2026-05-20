@@ -1399,6 +1399,17 @@ function create_docker_directories() {
     run_cmd "creating PostgreSQL data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
+    run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
+    run_cmd "creating Authentik media directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
+    run_cmd "creating Authentik custom templates directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/custom-templates"
+    run_cmd "creating Authentik certs directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/certs"
+
+    run_cmd "creating Temporal appdata directory" mkdir -p "${DOCKER_DIR}/appdata/temporal"
+    run_cmd "creating Temporal dynamic config directory" mkdir -p "${DOCKER_DIR}/appdata/temporal/dynamicconfig"
+
+    run_cmd "creating Filebrowser database directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
+    run_cmd "creating Filebrowser config directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
+
     run_cmd "creating Traefik config directory" mkdir -p "${TRAEFIK_DIR}"
     run_cmd "creating Traefik ACME directory" mkdir -p "${TRAEFIK_ACME_DIR}"
     run_cmd "creating Traefik ACME storage" touch "${TRAEFIK_ACME_DIR}/acme.json"
@@ -1471,6 +1482,7 @@ SQL
 create_user_and_db "authentik" "authentik" "$AUTHENTIK_POSTGRES_PASSWORD"
 create_user_and_db "postiz" "postiz" "$POSTIZ_POSTGRES_PASSWORD"
 create_user_and_db "temporal" "temporal" "$TEMPORAL_POSTGRES_PASSWORD"
+create_user_and_db "temporal" "temporal_visibility" "$TEMPORAL_POSTGRES_PASSWORD"
 EOF
 
     run_cmd "making PostgreSQL init script executable" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
@@ -1625,6 +1637,18 @@ function apply_permissions() {
     run_cmd "setting PostgreSQL init directory permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
+    run_cmd "setting Authentik appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/authentik"
+    run_cmd "setting Authentik media permissions" chmod 750 "${DOCKER_DIR}/appdata/authentik/media"
+    run_cmd "setting Authentik custom templates permissions" chmod 750 "${DOCKER_DIR}/appdata/authentik/custom-templates"
+    run_cmd "setting Authentik certs permissions" chmod 750 "${DOCKER_DIR}/appdata/authentik/certs"
+
+    run_cmd "setting Temporal appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/temporal"
+    run_cmd "setting Temporal dynamic config permissions" chmod 750 "${DOCKER_DIR}/appdata/temporal/dynamicconfig"
+
+    run_cmd "setting Filebrowser appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/filebrowser"
+    run_cmd "setting Filebrowser database permissions" chmod 750 "${DOCKER_DIR}/appdata/filebrowser/database"
+    run_cmd "setting Filebrowser config permissions" chmod 750 "${DOCKER_DIR}/appdata/filebrowser/config"
+
     run_cmd "setting Traefik config directory permissions" chmod 750 "${TRAEFIK_DIR}"
     run_cmd "setting Traefik ACME directory permissions" chmod 700 "${TRAEFIK_ACME_DIR}"
     run_cmd "setting Traefik static config permissions" chmod 644 "${TRAEFIK_STATIC_CONFIG_FILE}"
@@ -1709,6 +1733,17 @@ EOF
         if [ -e "$CF_API_TOKEN_FILE" ]; then echo "✓ PASS - Cloudflare token file exists"; else echo "! WARN - Cloudflare token file missing"; fi
         if [ -e "${DOCKER_SECRETS_DIR}/htpasswd" ]; then echo "✓ PASS - htpasswd file exists"; else echo "! WARN - htpasswd file missing"; fi
         if [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ]; then echo "✓ PASS - PostgreSQL init script exists and is executable"; else echo "✗ FAIL - PostgreSQL init script missing or not executable"; fi
+        if grep -q 'temporal_visibility' "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" 2>/dev/null; then echo "✓ PASS - PostgreSQL init creates temporal_visibility"; else echo "✗ FAIL - PostgreSQL init missing temporal_visibility"; fi
+        for required_dir in \
+            "${DOCKER_DIR}/appdata/authentik" \
+            "${DOCKER_DIR}/appdata/authentik/media" \
+            "${DOCKER_DIR}/appdata/authentik/custom-templates" \
+            "${DOCKER_DIR}/appdata/authentik/certs" \
+            "${DOCKER_DIR}/appdata/filebrowser/database" \
+            "${DOCKER_DIR}/appdata/filebrowser/config"
+        do
+            if [ -d "$required_dir" ]; then echo "✓ PASS - Required app folder exists: ${required_dir}"; else echo "✗ FAIL - Required app folder missing: ${required_dir}"; fi
+        done
         if [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ]; then echo "✓ PASS - Traefik static config exists"; else echo "✗ FAIL - Traefik static config missing"; fi
         if [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ]; then echo "✓ PASS - Traefik dynamic config exists"; else echo "✗ FAIL - Traefik dynamic config missing"; fi
         if [ -f "${TRAEFIK_ACME_DIR}/acme.json" ]; then echo "✓ PASS - Traefik acme.json exists"; else echo "✗ FAIL - Traefik acme.json missing"; fi
