@@ -40,31 +40,36 @@ COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"
 ENV_FILE="${ENV_FILE:-${DOCKER_DIR}/.env}"
 
 GITHUB_RAW_BASE="${GITHUB_RAW_BASE:-https://raw.githubusercontent.com/Orik999/mySetup/main/docker}"
-YML_00_NAME="00-socket-proxy-compose.yml"
-YML_01_NAME="01-portainer-compose.yml"
-YML_01_OVERRIDE_NAME="01-portainer-bootstrap-override.yml"
-YML_DOCKGE_NAME="13-dockge-compose.yml"
-YML_KOMODO_NAME="14-komodo-compose.yml"
-YML_12_NAME="12-docker-gc-compose.yml"
+SOCKET_PROXY_STACK_FILE="00-socket-proxy-compose.yml"
+PORTAINER_STACK_FILE="01-portainer-compose.yml"
+PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME="01-portainer-bootstrap-override.yml"
+DOCKGE_STACK_FILE="13-dockge-compose.yml"
+KOMODO_STACK_FILE="14-komodo-compose.yml"
+DOCKHAND_STACK_FILE="15-dockhand-compose.yml"
 
 # Optional environment overrides for advanced/testing workflows.
 # If these are not set, URLs are rebuilt from GITHUB_RAW_BASE after user input.
-YML_00_URL_OVERRIDE="${YML_00_URL:-}"
-YML_01_URL_OVERRIDE="${YML_01_URL:-}"
-YML_01_OVERRIDE_URL_OVERRIDE="${YML_01_OVERRIDE_URL:-}"
-YML_DOCKGE_URL_OVERRIDE="${YML_DOCKGE_URL:-}"
-YML_DOCKGE_OVERRIDE_NAME="13-dockge-bootstrap-override.yml"
-YML_DOCKGE_OVERRIDE_URL_OVERRIDE="${YML_DOCKGE_OVERRIDE_URL:-}"
-YML_KOMODO_URL_OVERRIDE="${YML_KOMODO_URL:-}"
-YML_KOMODO_OVERRIDE_NAME="14-komodo-bootstrap-override.yml"
-YML_KOMODO_OVERRIDE_URL_OVERRIDE="${YML_KOMODO_OVERRIDE_URL:-}"
-YML_00_URL="${YML_00_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_00_NAME}}"
-YML_01_URL="${YML_01_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_01_NAME}}"
-YML_01_OVERRIDE_URL="${YML_01_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_01_OVERRIDE_NAME}}"
-YML_DOCKGE_URL="${YML_DOCKGE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_DOCKGE_NAME}}"
-YML_DOCKGE_OVERRIDE_URL="${YML_DOCKGE_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_DOCKGE_OVERRIDE_NAME}}"
-YML_KOMODO_URL="${YML_KOMODO_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_KOMODO_NAME}}"
-YML_KOMODO_OVERRIDE_URL="${YML_KOMODO_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${YML_KOMODO_OVERRIDE_NAME}}"
+SOCKET_PROXY_STACK_URL_OVERRIDE="${SOCKET_PROXY_STACK_URL:-}"
+PORTAINER_STACK_URL_OVERRIDE="${PORTAINER_STACK_URL:-}"
+PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${PORTAINER_BOOTSTRAP_OVERRIDE_URL:-}"
+DOCKGE_STACK_URL_OVERRIDE="${DOCKGE_STACK_URL:-}"
+DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME="13-dockge-bootstrap-override.yml"
+DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${DOCKGE_BOOTSTRAP_OVERRIDE_URL:-}"
+KOMODO_STACK_URL_OVERRIDE="${KOMODO_STACK_URL:-}"
+KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME="14-komodo-bootstrap-override.yml"
+KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${KOMODO_BOOTSTRAP_OVERRIDE_URL:-}"
+DOCKHAND_STACK_URL_OVERRIDE="${DOCKHAND_STACK_URL:-}"
+DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME="15-dockhand-bootstrap-override.yml"
+DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${DOCKHAND_BOOTSTRAP_OVERRIDE_URL:-}"
+SOCKET_PROXY_STACK_URL="${SOCKET_PROXY_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${SOCKET_PROXY_STACK_FILE}}"
+PORTAINER_STACK_URL="${PORTAINER_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${PORTAINER_STACK_FILE}}"
+PORTAINER_BOOTSTRAP_OVERRIDE_URL="${PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
+DOCKGE_STACK_URL="${DOCKGE_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKGE_STACK_FILE}}"
+DOCKGE_BOOTSTRAP_OVERRIDE_URL="${DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
+KOMODO_STACK_URL="${KOMODO_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${KOMODO_STACK_FILE}}"
+KOMODO_BOOTSTRAP_OVERRIDE_URL="${KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
+DOCKHAND_STACK_URL="${DOCKHAND_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKHAND_STACK_FILE}}"
+DOCKHAND_BOOTSTRAP_OVERRIDE_URL="${DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
 
 SOCKET_PROXY_SUBNET_EXPECTED="192.168.91.0/24"
 T2_PROXY_SUBNET_EXPECTED="192.168.90.0/24"
@@ -75,6 +80,7 @@ DATABASE_NETWORK_NAME=""
 PORTAINER_BOOTSTRAP_PORT="${PORTAINER_BOOTSTRAP_PORT:-9443}"
 DOCKGE_BOOTSTRAP_PORT="${DOCKGE_BOOTSTRAP_PORT:-5001}"
 KOMODO_BOOTSTRAP_PORT="${KOMODO_BOOTSTRAP_PORT:-9120}"
+DOCKHAND_BOOTSTRAP_PORT="${DOCKHAND_BOOTSTRAP_PORT:-3000}"
 ADMIN_UI_BOOTSTRAP_BIND="${ADMIN_UI_BOOTSTRAP_BIND:-0.0.0.0}"
 ADMIN_UI_BOOTSTRAP_PORT=""
 ADMIN_UI_INTERNAL_PORT=""
@@ -107,29 +113,23 @@ TRAEFIK_DNS_DELAY_OK="no"
 TRAEFIK_ENCODED_CHARS_OK="no"
 TRAEFIK_AUTHENTIK_REFERENCES_OK="no"
 AUTHENTIK_FOLDERS_OK="no"
-TEMPORAL_COMPOSE_OK="skipped"
 CF_COMPANION_SECRET_OK="skipped"
 FILEBROWSER_FOLDERS_OK="skipped"
-YML_12_RETIRED="no"
-
-POSTIZ_TEMPORAL_GUARD_PATH="/usr/local/sbin/postiz-temporal-guard"
-POSTIZ_TEMPORAL_GUARD_INSTALLED="no"
-POSTIZ_TEMPORAL_GUARD_RUN="not-run"
-POSTIZ_TEMPORAL_GUARD_STATUS="not-run"
-
 SUDO_CMD=""
 DOCKER_NEEDS_SUDO="no"
 TEMP_FILES=()
 
 NETWORKS_CREATED="no"
 NETWORKS_VERIFIED="no"
-YML_00_DOWNLOADED="no"
-YML_01_DOWNLOADED="no"
-YML_01_OVERRIDE_DOWNLOADED="no"
-YML_DOCKGE_DOWNLOADED="no"
-YML_DOCKGE_OVERRIDE_DOWNLOADED="no"
-YML_KOMODO_DOWNLOADED="no"
-YML_KOMODO_OVERRIDE_DOWNLOADED="no"
+SOCKET_PROXY_STACK_DOWNLOADED="no"
+PORTAINER_STACK_DOWNLOADED="no"
+PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED="no"
+DOCKGE_STACK_DOWNLOADED="no"
+DOCKGE_BOOTSTRAP_OVERRIDE_DOWNLOADED="no"
+KOMODO_STACK_DOWNLOADED="no"
+KOMODO_BOOTSTRAP_OVERRIDE_DOWNLOADED="no"
+DOCKHAND_STACK_DOWNLOADED="no"
+DOCKHAND_BOOTSTRAP_OVERRIDE_DOWNLOADED="no"
 SOCKET_PROXY_DEPLOYED="no"
 PORTAINER_DEPLOYED="no"
 ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="no"
@@ -807,7 +807,7 @@ function start_confirmation() {
     section "START"
 
     echo -e "${YW}This script creates shared Docker networks, validates Script 6 output, downloads bootstrap compose files, and deploys socket-proxy plus the selected admin UI.${CL}"
-    echo -e "${YW}Selected admin UI is read from ${ENV_FILE}: Dockge, Portainer CE, or Komodo.${CL}"
+    echo -e "${YW}Selected admin UI is read from ${ENV_FILE}: Dockge, Portainer CE, Komodo, or Dockhand.${CL}"
     echo ""
 
     start_yn="$(timed_yes_no "Start Docker Bootstrap Setup?" "y")"
@@ -847,32 +847,40 @@ function collect_bootstrap_settings() {
         msg_error "GitHub raw base is not a valid HTTP/HTTPS URL."
     fi
 
-    if [ -z "$YML_00_URL_OVERRIDE" ]; then
-        YML_00_URL="${GITHUB_RAW_BASE}/${YML_00_NAME}"
+    if [ -z "$SOCKET_PROXY_STACK_URL_OVERRIDE" ]; then
+        SOCKET_PROXY_STACK_URL="${GITHUB_RAW_BASE}/${SOCKET_PROXY_STACK_FILE}"
     fi
 
-    if [ -z "$YML_01_URL_OVERRIDE" ]; then
-        YML_01_URL="${GITHUB_RAW_BASE}/${YML_01_NAME}"
+    if [ -z "$PORTAINER_STACK_URL_OVERRIDE" ]; then
+        PORTAINER_STACK_URL="${GITHUB_RAW_BASE}/${PORTAINER_STACK_FILE}"
     fi
 
-    if [ -z "$YML_01_OVERRIDE_URL_OVERRIDE" ]; then
-        YML_01_OVERRIDE_URL="${GITHUB_RAW_BASE}/${YML_01_OVERRIDE_NAME}"
+    if [ -z "$PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        PORTAINER_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}"
     fi
 
-    if [ -z "$YML_DOCKGE_URL_OVERRIDE" ]; then
-        YML_DOCKGE_URL="${GITHUB_RAW_BASE}/${YML_DOCKGE_NAME}"
+    if [ -z "$DOCKGE_STACK_URL_OVERRIDE" ]; then
+        DOCKGE_STACK_URL="${GITHUB_RAW_BASE}/${DOCKGE_STACK_FILE}"
     fi
 
-    if [ -z "$YML_DOCKGE_OVERRIDE_URL_OVERRIDE" ]; then
-        YML_DOCKGE_OVERRIDE_URL="${GITHUB_RAW_BASE}/${YML_DOCKGE_OVERRIDE_NAME}"
+    if [ -z "$DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        DOCKGE_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME}"
     fi
 
-    if [ -z "$YML_KOMODO_URL_OVERRIDE" ]; then
-        YML_KOMODO_URL="${GITHUB_RAW_BASE}/${YML_KOMODO_NAME}"
+    if [ -z "$KOMODO_STACK_URL_OVERRIDE" ]; then
+        KOMODO_STACK_URL="${GITHUB_RAW_BASE}/${KOMODO_STACK_FILE}"
     fi
 
-    if [ -z "$YML_KOMODO_OVERRIDE_URL_OVERRIDE" ]; then
-        YML_KOMODO_OVERRIDE_URL="${GITHUB_RAW_BASE}/${YML_KOMODO_OVERRIDE_NAME}"
+    if [ -z "$KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        KOMODO_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+
+    if [ -z "$DOCKHAND_STACK_URL_OVERRIDE" ]; then
+        DOCKHAND_STACK_URL="${GITHUB_RAW_BASE}/${DOCKHAND_STACK_FILE}"
+    fi
+
+    if [ -z "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        DOCKHAND_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}"
     fi
 
     detail_line "Docker user" "$DOCKER_USER"
@@ -1024,34 +1032,6 @@ function verify_authentik_folders() {
     AUTHENTIK_FOLDERS_OK="yes"
 }
 
-# --- 33D. TEMPORAL COMPOSE VERIFICATION ---
-# Checks Temporal settings before yml 06 deployment when the file is present.
-function verify_temporal_compose_settings() {
-    section "TEMPORAL COMPOSE VERIFICATION"
-
-    local file="${COMPOSE_DIR}/06-temporal-compose.yml"
-
-    if [ ! -f "$file" ]; then
-        TEMPORAL_COMPOSE_OK="not-present-yet"
-        msg_skip "YML 06 NOT PRESENT YET; TEMPORAL CHECK WILL BE RUN AFTER DOWNLOAD/BEFORE DEPLOYMENT"
-        return 0
-    fi
-
-    grep -q 'DB=postgres12\|DB:.*postgres12' "$file" || msg_error "Temporal compose must use DB=postgres12."
-    grep -q 'DBNAME=temporal\|DBNAME:.*temporal' "$file" || msg_error "Temporal compose must set DBNAME=temporal."
-    grep -q 'VISIBILITY_DBNAME=temporal_visibility\|VISIBILITY_DBNAME:.*temporal_visibility' "$file" || msg_error "Temporal compose must set VISIBILITY_DBNAME=temporal_visibility."
-    grep -q 'SKIP_DB_CREATE=true\|SKIP_DB_CREATE:.*true' "$file" || msg_error "Temporal compose must set SKIP_DB_CREATE=true."
-
-    if grep -q 'DYNAMIC_CONFIG_FILE_PATH' "$file"; then
-        if ! grep -q 'development-sql.yaml' "$file" || [ ! -f "${DOCKER_DIR}/appdata/temporal/dynamicconfig/development-sql.yaml" ]; then
-            msg_error "DYNAMIC_CONFIG_FILE_PATH is set but the required dynamic config file is not present. Remove the override or create the file."
-        fi
-    fi
-
-    TEMPORAL_COMPOSE_OK="yes"
-    msg_ok "TEMPORAL COMPOSE SETTINGS VERIFIED"
-}
-
 # --- 33E. ADMIN UI SELECTION VERIFICATION ---
 # Maps .env ADMIN_UI to expected compose template and service.
 function verify_admin_ui_selection() {
@@ -1064,9 +1044,9 @@ function verify_admin_ui_selection() {
             ADMIN_UI_PROJECT_NAME="dockge"
             ADMIN_UI_SERVICE_NAME="dockge"
             ADMIN_UI_DISPLAY_NAME="Dockge"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${YML_DOCKGE_NAME}"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$YML_DOCKGE_OVERRIDE_NAME"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${YML_DOCKGE_OVERRIDE_NAME}"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${DOCKGE_STACK_FILE}"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME}"
             ADMIN_UI_BOOTSTRAP_PORT="$DOCKGE_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="5001"
             ADMIN_UI_BOOTSTRAP_SCHEME="http"
@@ -1077,9 +1057,9 @@ function verify_admin_ui_selection() {
             ADMIN_UI_PROJECT_NAME="portainer"
             ADMIN_UI_SERVICE_NAME="portainer"
             ADMIN_UI_DISPLAY_NAME="Portainer"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${YML_01_NAME}"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$YML_01_OVERRIDE_NAME"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${YML_01_OVERRIDE_NAME}"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}"
             ADMIN_UI_BOOTSTRAP_PORT="$PORTAINER_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="9443"
             ADMIN_UI_BOOTSTRAP_SCHEME="https"
@@ -1089,16 +1069,28 @@ function verify_admin_ui_selection() {
             ADMIN_UI_PROJECT_NAME="komodo"
             ADMIN_UI_SERVICE_NAME="komodo-core"
             ADMIN_UI_DISPLAY_NAME="Komodo"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${YML_KOMODO_NAME}"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$YML_KOMODO_OVERRIDE_NAME"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${YML_KOMODO_OVERRIDE_NAME}"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${KOMODO_STACK_FILE}"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}"
             ADMIN_UI_BOOTSTRAP_PORT="$KOMODO_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="9120"
             ADMIN_UI_BOOTSTRAP_SCHEME="http"
             expected_host="komodo.${DOMAIN_VALUE}"
             ;;
+        dockhand)
+            ADMIN_UI_PROJECT_NAME="dockhand"
+            ADMIN_UI_SERVICE_NAME="dockhand"
+            ADMIN_UI_DISPLAY_NAME="Dockhand"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${DOCKHAND_STACK_FILE}"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+            ADMIN_UI_BOOTSTRAP_PORT="$DOCKHAND_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="3000"
+            ADMIN_UI_BOOTSTRAP_SCHEME="http"
+            expected_host="dockhand.${DOMAIN_VALUE}"
+            ;;
         *)
-            msg_error "Invalid ADMIN_UI value in .env: ${ADMIN_UI}. Expected dockge, portainer, or komodo."
+            msg_error "Invalid ADMIN_UI value in .env: ${ADMIN_UI}. Expected dockge, portainer, komodo, or dockhand."
             ;;
     esac
 
@@ -1135,7 +1127,7 @@ function verify_cf_companion_secret_file() {
 }
 
 # --- 33G. FILEBROWSER FOLDER VERIFICATION ---
-# Confirms Filebrowser-safe writable folders exist before yml 11 deployment.
+# Confirms Filebrowser-safe writable folders exist before Filebrowser stack deployment.
 function verify_filebrowser_folders() {
     section "FILEBROWSER FOLDER VERIFICATION"
 
@@ -1156,284 +1148,6 @@ function verify_filebrowser_folders() {
     done
 
     FILEBROWSER_FOLDERS_OK="yes"
-}
-
-# --- 33H. YML 12 RETIREMENT CHECK ---
-# Prevents deployment of the retired Docker-GC container stack.
-function retire_yml_12_docker_gc() {
-    YML_12_RETIRED="retired-host-side-cleanup"
-    return 0
-}
-
-
-# =========================================================
-#  POSTIZ / TEMPORAL RUNTIME GUARD
-# =========================================================
-
-# --- 33I. POSTIZ TEMPORAL GUARD INSTALLER ---
-# Installs a reusable helper that fixes the known Postiz + Temporal fresh/rerun startup issue.
-# Temporal auto-setup can create default Text search attributes that conflict with Postiz startup.
-# The helper must run after Temporal is fully started and before Postiz starts.
-function install_postiz_temporal_guard() {
-    section "POSTIZ / TEMPORAL GUARD"
-
-    msg_info "Installing Postiz Temporal guard helper"
-
-    if [ -n "$SUDO_CMD" ]; then
-        "$SUDO_CMD" tee "$POSTIZ_TEMPORAL_GUARD_PATH" >/dev/null <<'POSTIZ_TEMPORAL_GUARD_EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-# =========================================================
-#  Postiz Temporal Guard
-# =========================================================
-# Run after Temporal is started and before Postiz is started.
-# It removes Temporal default Text search attributes that can make Postiz fail with:
-# cannot have more than 3 search attribute of type Text
-# Do not restart Temporal after this helper removes the attributes.
-
-TEMPORAL_CONTAINER="${TEMPORAL_CONTAINER:-temporal}"
-POSTIZ_CONTAINER="${POSTIZ_CONTAINER:-postiz}"
-WAIT_SECONDS="${WAIT_SECONDS:-120}"
-SLEEP_SECONDS="${SLEEP_SECONDS:-5}"
-
-cleanup_tmp() {
-    rm -f /tmp/postiz-temporal-search-attributes.$$ /tmp/postiz-temporal-guard-error.$$ 2>/dev/null || true
-}
-trap cleanup_tmp EXIT
-
-if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
-    DOCKER=(docker)
-elif command -v sudo >/dev/null 2>&1 && sudo -n docker ps >/dev/null 2>&1; then
-    DOCKER=(sudo docker)
-else
-    echo "ERROR: Docker is not reachable. Run as a docker user or with sudo." >&2
-    exit 1
-fi
-
-if ! "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$TEMPORAL_CONTAINER"; then
-    echo "SKIP: Temporal container not found: $TEMPORAL_CONTAINER"
-    exit 0
-fi
-
-if "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
-    if "${DOCKER[@]}" ps --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
-        echo "Stopping Postiz before Temporal search-attribute cleanup..."
-        "${DOCKER[@]}" stop "$POSTIZ_CONTAINER" >/dev/null || true
-    fi
-fi
-
-if ! "${DOCKER[@]}" ps --format '{{.Names}}' | grep -qx "$TEMPORAL_CONTAINER"; then
-    echo "Starting Temporal..."
-    "${DOCKER[@]}" start "$TEMPORAL_CONTAINER" >/dev/null
-fi
-
-waited=0
-TEMPORAL_IP=""
-while [ "$waited" -le "$WAIT_SECONDS" ]; do
-    TEMPORAL_IP="$("${DOCKER[@]}" inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TEMPORAL_CONTAINER" 2>/dev/null || true)"
-
-    if [ -n "$TEMPORAL_IP" ]; then
-        if "${DOCKER[@]}" exec "$TEMPORAL_CONTAINER" temporal --address "${TEMPORAL_IP}:7233" operator search-attribute list >/tmp/postiz-temporal-search-attributes.$$ 2>/tmp/postiz-temporal-guard-error.$$; then
-            break
-        fi
-    fi
-
-    sleep "$SLEEP_SECONDS"
-    waited=$((waited + SLEEP_SECONDS))
-done
-
-if [ ! -s /tmp/postiz-temporal-search-attributes.$$ ]; then
-    echo "ERROR: Temporal did not become reachable on port 7233 within ${WAIT_SECONDS}s." >&2
-    cat /tmp/postiz-temporal-guard-error.$$ 2>/dev/null || true
-    exit 1
-fi
-
-attrs="$(cat /tmp/postiz-temporal-search-attributes.$$)"
-
-remove_args=()
-if grep -q '^  CustomTextField[[:space:]]\+Text' <<< "$attrs"; then
-    remove_args+=(--name CustomTextField)
-fi
-if grep -q '^  CustomStringField[[:space:]]\+Text' <<< "$attrs"; then
-    remove_args+=(--name CustomStringField)
-fi
-
-if [ "${#remove_args[@]}" -gt 0 ]; then
-    echo "Removing Temporal Text attributes that conflict with Postiz: ${remove_args[*]}"
-    "${DOCKER[@]}" exec "$TEMPORAL_CONTAINER" temporal --address "${TEMPORAL_IP}:7233" operator search-attribute remove "${remove_args[@]}" --yes
-else
-    echo "No conflicting Temporal Text attributes found."
-fi
-
-# Important: do not restart Temporal after attribute removal.
-# Restarting Temporal can recreate the attributes before Postiz starts.
-if "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
-    echo "Starting Postiz..."
-    "${DOCKER[@]}" start "$POSTIZ_CONTAINER" >/dev/null || true
-
-    sleep 30
-    if "${DOCKER[@]}" exec "$POSTIZ_CONTAINER" sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -qi ':0BB8'"; then
-        echo "PASS: Postiz backend port 3000 is listening."
-    else
-        echo "WARN: Postiz container exists, but backend port 3000 was not confirmed yet. Check: docker logs postiz --tail=180" >&2
-    fi
-else
-    echo "Postiz container is not deployed yet. Run this helper after yml 06 Temporal is up and before yml 07 Postiz, or immediately after yml 07 if Postiz already exists."
-fi
-
-exit 0
-POSTIZ_TEMPORAL_GUARD_EOF
-        "$SUDO_CMD" chmod 0755 "$POSTIZ_TEMPORAL_GUARD_PATH"
-    else
-        cat > "$POSTIZ_TEMPORAL_GUARD_PATH" <<'POSTIZ_TEMPORAL_GUARD_EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-# =========================================================
-#  Postiz Temporal Guard
-# =========================================================
-# Run after Temporal is started and before Postiz is started.
-# It removes Temporal default Text search attributes that can make Postiz fail with:
-# cannot have more than 3 search attribute of type Text
-# Do not restart Temporal after this helper removes the attributes.
-
-TEMPORAL_CONTAINER="${TEMPORAL_CONTAINER:-temporal}"
-POSTIZ_CONTAINER="${POSTIZ_CONTAINER:-postiz}"
-WAIT_SECONDS="${WAIT_SECONDS:-120}"
-SLEEP_SECONDS="${SLEEP_SECONDS:-5}"
-
-cleanup_tmp() {
-    rm -f /tmp/postiz-temporal-search-attributes.$$ /tmp/postiz-temporal-guard-error.$$ 2>/dev/null || true
-}
-trap cleanup_tmp EXIT
-
-if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
-    DOCKER=(docker)
-elif command -v sudo >/dev/null 2>&1 && sudo -n docker ps >/dev/null 2>&1; then
-    DOCKER=(sudo docker)
-else
-    echo "ERROR: Docker is not reachable. Run as a docker user or with sudo." >&2
-    exit 1
-fi
-
-if ! "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$TEMPORAL_CONTAINER"; then
-    echo "SKIP: Temporal container not found: $TEMPORAL_CONTAINER"
-    exit 0
-fi
-
-if "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
-    if "${DOCKER[@]}" ps --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
-        echo "Stopping Postiz before Temporal search-attribute cleanup..."
-        "${DOCKER[@]}" stop "$POSTIZ_CONTAINER" >/dev/null || true
-    fi
-fi
-
-if ! "${DOCKER[@]}" ps --format '{{.Names}}' | grep -qx "$TEMPORAL_CONTAINER"; then
-    echo "Starting Temporal..."
-    "${DOCKER[@]}" start "$TEMPORAL_CONTAINER" >/dev/null
-fi
-
-waited=0
-TEMPORAL_IP=""
-while [ "$waited" -le "$WAIT_SECONDS" ]; do
-    TEMPORAL_IP="$("${DOCKER[@]}" inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$TEMPORAL_CONTAINER" 2>/dev/null || true)"
-
-    if [ -n "$TEMPORAL_IP" ]; then
-        if "${DOCKER[@]}" exec "$TEMPORAL_CONTAINER" temporal --address "${TEMPORAL_IP}:7233" operator search-attribute list >/tmp/postiz-temporal-search-attributes.$$ 2>/tmp/postiz-temporal-guard-error.$$; then
-            break
-        fi
-    fi
-
-    sleep "$SLEEP_SECONDS"
-    waited=$((waited + SLEEP_SECONDS))
-done
-
-if [ ! -s /tmp/postiz-temporal-search-attributes.$$ ]; then
-    echo "ERROR: Temporal did not become reachable on port 7233 within ${WAIT_SECONDS}s." >&2
-    cat /tmp/postiz-temporal-guard-error.$$ 2>/dev/null || true
-    exit 1
-fi
-
-attrs="$(cat /tmp/postiz-temporal-search-attributes.$$)"
-
-remove_args=()
-if grep -q '^  CustomTextField[[:space:]]\+Text' <<< "$attrs"; then
-    remove_args+=(--name CustomTextField)
-fi
-if grep -q '^  CustomStringField[[:space:]]\+Text' <<< "$attrs"; then
-    remove_args+=(--name CustomStringField)
-fi
-
-if [ "${#remove_args[@]}" -gt 0 ]; then
-    echo "Removing Temporal Text attributes that conflict with Postiz: ${remove_args[*]}"
-    "${DOCKER[@]}" exec "$TEMPORAL_CONTAINER" temporal --address "${TEMPORAL_IP}:7233" operator search-attribute remove "${remove_args[@]}" --yes
-else
-    echo "No conflicting Temporal Text attributes found."
-fi
-
-# Important: do not restart Temporal after attribute removal.
-# Restarting Temporal can recreate the attributes before Postiz starts.
-if "${DOCKER[@]}" ps -a --format '{{.Names}}' | grep -qx "$POSTIZ_CONTAINER"; then
-    echo "Starting Postiz..."
-    "${DOCKER[@]}" start "$POSTIZ_CONTAINER" >/dev/null || true
-
-    sleep 30
-    if "${DOCKER[@]}" exec "$POSTIZ_CONTAINER" sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -qi ':0BB8'"; then
-        echo "PASS: Postiz backend port 3000 is listening."
-    else
-        echo "WARN: Postiz container exists, but backend port 3000 was not confirmed yet. Check: docker logs postiz --tail=180" >&2
-    fi
-else
-    echo "Postiz container is not deployed yet. Run this helper after yml 06 Temporal is up and before yml 07 Postiz, or immediately after yml 07 if Postiz already exists."
-fi
-
-exit 0
-POSTIZ_TEMPORAL_GUARD_EOF
-        chmod 0755 "$POSTIZ_TEMPORAL_GUARD_PATH"
-    fi
-
-    POSTIZ_TEMPORAL_GUARD_INSTALLED="yes"
-    msg_ok "POSTIZ TEMPORAL GUARD INSTALLED"
-    detail_line "Guard command" "$POSTIZ_TEMPORAL_GUARD_PATH"
-}
-
-# --- 33J. POSTIZ TEMPORAL GUARD RERUN CHECK ---
-# Runs the guard only when Temporal is already deployed during a rerun.
-# On a brand-new deployment, this safely skips and the installed helper is used after yml 06 starts.
-function run_postiz_temporal_guard_if_ready() {
-    section "POSTIZ / TEMPORAL RERUN CHECK"
-
-    if ! docker_cmd ps -a --format '{{.Names}}' | grep -qx 'temporal'; then
-        POSTIZ_TEMPORAL_GUARD_RUN="skipped-temporal-not-present"
-        POSTIZ_TEMPORAL_GUARD_STATUS="helper-installed-for-later"
-        msg_skip "TEMPORAL NOT DEPLOYED YET; GUARD HELPER INSTALLED FOR LATER"
-        echo -e "${YW}After yml 06 Temporal is deployed and before yml 07 Postiz is started, run:${CL}"
-        echo -e " ${GN}${POSTIZ_TEMPORAL_GUARD_PATH}${CL}"
-        return 0
-    fi
-
-    msg_info "Running Postiz Temporal guard against existing Temporal container"
-
-    POSTIZ_TEMPORAL_GUARD_RUN="yes"
-
-    if [ -n "$SUDO_CMD" ]; then
-        if "$SUDO_CMD" "$POSTIZ_TEMPORAL_GUARD_PATH"; then
-            POSTIZ_TEMPORAL_GUARD_STATUS="passed"
-            msg_ok "POSTIZ TEMPORAL GUARD PASSED"
-        else
-            POSTIZ_TEMPORAL_GUARD_STATUS="failed"
-            msg_error "Postiz Temporal guard failed. Check Temporal/Postiz logs before deploying Postiz."
-        fi
-    else
-        if "$POSTIZ_TEMPORAL_GUARD_PATH"; then
-            POSTIZ_TEMPORAL_GUARD_STATUS="passed"
-            msg_ok "POSTIZ TEMPORAL GUARD PASSED"
-        else
-            POSTIZ_TEMPORAL_GUARD_STATUS="failed"
-            msg_error "Postiz Temporal guard failed. Check Temporal/Postiz logs before deploying Postiz."
-        fi
-    fi
 }
 
 # =========================================================
@@ -1496,63 +1210,70 @@ function verify_shared_networks() {
 # =========================================================
 
 # --- 36. COMPOSE FILE DOWNLOAD ---
-# Downloads yml 00, yml 01 and the Admin UI bootstrap override from GitHub into docker/compose.
+# Downloads Socket Proxy stack, selected Admin UI stack and Admin UI bootstrap override from GitHub into docker/compose.
 function download_bootstrap_compose_files() {
     section "STACK COMPOSE DOWNLOAD"
 
     msg_info "Downloading Socket Proxy stack compose"
-    curl -fsSL "$YML_00_URL" -o "${COMPOSE_DIR}/${YML_00_NAME}"
-    YML_00_DOWNLOADED="yes"
+    curl -fsSL "$SOCKET_PROXY_STACK_URL" -o "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    SOCKET_PROXY_STACK_DOWNLOADED="yes"
     msg_ok "SOCKET PROXY STACK COMPOSE DOWNLOADED"
 
     case "$ADMIN_UI" in
         portainer)
             msg_info "Downloading Portainer stack compose"
-            curl -fsSL "$YML_01_URL" -o "${COMPOSE_DIR}/${YML_01_NAME}"
-            YML_01_DOWNLOADED="yes"
+            curl -fsSL "$PORTAINER_STACK_URL" -o "${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
+            PORTAINER_STACK_DOWNLOADED="yes"
             msg_ok "PORTAINER STACK COMPOSE DOWNLOADED"
 
             msg_info "Downloading Admin UI bootstrap override"
-            curl -fsSL "$YML_01_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
-            YML_01_OVERRIDE_DOWNLOADED="yes"
+            curl -fsSL "$PORTAINER_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
             msg_ok "PORTAINER BOOTSTRAP OVERRIDE DOWNLOADED"
             ;;
         dockge)
             msg_info "Downloading Dockge stack compose"
-            curl -fsSL "$YML_DOCKGE_URL" -o "${COMPOSE_DIR}/${YML_DOCKGE_NAME}"
-            YML_DOCKGE_DOWNLOADED="yes"
+            curl -fsSL "$DOCKGE_STACK_URL" -o "${COMPOSE_DIR}/${DOCKGE_STACK_FILE}"
+            DOCKGE_STACK_DOWNLOADED="yes"
             msg_ok "DOCKGE STACK COMPOSE DOWNLOADED"
 
             msg_info "Downloading Dockge bootstrap override"
-            curl -fsSL "$YML_DOCKGE_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
-            YML_DOCKGE_OVERRIDE_DOWNLOADED="yes"
+            curl -fsSL "$DOCKGE_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            DOCKGE_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
             msg_ok "DOCKGE BOOTSTRAP OVERRIDE DOWNLOADED"
             ;;
         komodo)
             msg_info "Downloading Komodo stack compose"
-            curl -fsSL "$YML_KOMODO_URL" -o "${COMPOSE_DIR}/${YML_KOMODO_NAME}"
-            YML_KOMODO_DOWNLOADED="yes"
+            curl -fsSL "$KOMODO_STACK_URL" -o "${COMPOSE_DIR}/${KOMODO_STACK_FILE}"
+            KOMODO_STACK_DOWNLOADED="yes"
             msg_ok "KOMODO STACK COMPOSE DOWNLOADED"
 
             msg_info "Downloading Komodo bootstrap override"
-            curl -fsSL "$YML_KOMODO_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
-            YML_KOMODO_OVERRIDE_DOWNLOADED="yes"
+            curl -fsSL "$KOMODO_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            KOMODO_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
             msg_ok "KOMODO BOOTSTRAP OVERRIDE DOWNLOADED"
+            ;;
+        dockhand)
+            msg_info "Downloading Dockhand stack compose"
+            curl -fsSL "$DOCKHAND_STACK_URL" -o "${COMPOSE_DIR}/${DOCKHAND_STACK_FILE}"
+            DOCKHAND_STACK_DOWNLOADED="yes"
+            msg_ok "DOCKHAND STACK COMPOSE DOWNLOADED"
+
+            msg_info "Downloading Dockhand bootstrap override"
+            curl -fsSL "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            DOCKHAND_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
+            msg_ok "DOCKHAND BOOTSTRAP OVERRIDE DOWNLOADED"
             ;;
     esac
 
     ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
 
-    run_cmd "setting Socket Proxy compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${COMPOSE_DIR}/${YML_00_NAME}"
-    run_cmd "setting Socket Proxy compose file permissions" chmod 640 "${COMPOSE_DIR}/${YML_00_NAME}"
+    run_cmd "setting Socket Proxy compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    run_cmd "setting Socket Proxy compose file permissions" chmod 640 "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
     run_cmd "setting ${ADMIN_UI_DISPLAY_NAME} compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$ADMIN_UI_COMPOSE_FILE" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
     run_cmd "setting ${ADMIN_UI_DISPLAY_NAME} compose permissions" chmod 640 "$ADMIN_UI_COMPOSE_FILE" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
 
-    if declare -F retire_yml_12_docker_gc >/dev/null 2>&1; then
-        retire_yml_12_docker_gc
-    fi
-
-    detail_line "Socket Proxy stack" "${COMPOSE_DIR}/${YML_00_NAME}"
+    detail_line "Socket Proxy stack" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
     detail_line "Admin UI stack" "$ADMIN_UI_COMPOSE_FILE"
     detail_line "Admin UI bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
 }
@@ -1576,38 +1297,38 @@ function verify_admin_ui_bootstrap_override_file() {
 
 
 # --- 38. COMPOSE CONFIG VALIDATION ---
-# Validates yml 00, yml 01 and the Admin UI bootstrap override before deployment.
+# Validates Socket Proxy stack, selected Admin UI stack and Admin UI bootstrap override before deployment.
 function validate_bootstrap_compose_files() {
     section "STACK COMPOSE VALIDATION"
 
     msg_info "Validating Socket Proxy stack compose"
-    run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${YML_00_NAME}" config -q
+    run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}" config -q
     msg_ok "SOCKET PROXY STACK COMPOSE VALID"
 
     msg_info "Validating ${ADMIN_UI_DISPLAY_NAME} stack compose with bootstrap override"
-    export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
+    export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
     run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" config -q
     msg_ok "${ADMIN_UI_DISPLAY_NAME^^} STACK COMPOSE VALID"
 
     ADMIN_UI_VALIDATED="yes"
 }
 # --- 39. SOCKET-PROXY DEPLOYMENT ---
-# Deploys yml 00 using Docker CLI.
+# Deploys the Socket Proxy stack using Docker Compose.
 function deploy_socket_proxy() {
-    section "DEPLOY YML 00 - SOCKET PROXY"
+    section "DEPLOY STACK - SOCKET PROXY"
 
     msg_info "Deploying socket-proxy"
-    run_docker_cmd "deploying socket-proxy" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${YML_00_NAME}" up -d
+    run_docker_cmd "deploying socket-proxy" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}" up -d
     SOCKET_PROXY_DEPLOYED="yes"
     msg_ok "SOCKET-PROXY DEPLOYED"
 }
 
 # --- 40. PORTAINER DEPLOYMENT ---
-# Deploys yml 01 using Docker CLI with temporary bootstrap port override.
+# Deploys the selected Admin UI stack with its temporary bootstrap override.
 function deploy_admin_ui() {
     section "DEPLOY STACK - ${ADMIN_UI_DISPLAY_NAME}"
 
-    export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
+    export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
     msg_info "Deploying ${ADMIN_UI_DISPLAY_NAME} with bootstrap port"
     run_docker_cmd "deploying ${ADMIN_UI_DISPLAY_NAME}" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" up -d
     ADMIN_UI_DEPLOYED="yes"
@@ -1748,11 +1469,12 @@ VERIFY_LOG_EOF
         echo "database=${DATABASE_NETWORK_NAME}"
         echo ""
         echo "Compose files:"
-        echo "${YML_00_NAME}: ${YML_00_DOWNLOADED}"
-        echo "${YML_01_NAME}: ${YML_01_DOWNLOADED}"
-        echo "${YML_01_OVERRIDE_NAME}: ${YML_01_OVERRIDE_DOWNLOADED}"
-        echo "${YML_DOCKGE_NAME}: ${YML_DOCKGE_DOWNLOADED}"
-        echo "${YML_KOMODO_NAME}: ${YML_KOMODO_DOWNLOADED}"
+        echo "Socket Proxy stack compose downloaded: ${SOCKET_PROXY_STACK_DOWNLOADED}"
+        echo "Portainer stack compose downloaded: ${PORTAINER_STACK_DOWNLOADED}"
+        echo "Portainer bootstrap override downloaded: ${PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED}"
+        echo "Dockge stack compose downloaded: ${DOCKGE_STACK_DOWNLOADED}"
+        echo "Komodo stack compose downloaded: ${KOMODO_STACK_DOWNLOADED}"
+        echo "Dockhand stack compose downloaded: ${DOCKHAND_STACK_DOWNLOADED}"
         echo "Admin UI bootstrap override: ${ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN}"
         echo ""
         echo "Deployments:"
@@ -1773,13 +1495,9 @@ VERIFY_LOG_EOF
         echo "Traefik encoded characters: ${TRAEFIK_ENCODED_CHARS_OK}"
         echo "Traefik authentik references: ${TRAEFIK_AUTHENTIK_REFERENCES_OK}"
         echo "Authentik folders: ${AUTHENTIK_FOLDERS_OK}"
-        echo "Temporal compose: ${TEMPORAL_COMPOSE_OK}"
         echo "CF companion secret: ${CF_COMPANION_SECRET_OK}"
         echo "Filebrowser folders: ${FILEBROWSER_FOLDERS_OK}"
-        echo "Postiz Temporal guard installed: ${POSTIZ_TEMPORAL_GUARD_INSTALLED}"
-        echo "Postiz Temporal guard run: ${POSTIZ_TEMPORAL_GUARD_RUN}"
-        echo "Postiz Temporal guard status: ${POSTIZ_TEMPORAL_GUARD_STATUS}"
-        echo ""
+                echo ""
         echo "Docker containers:"
         docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
     } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
@@ -1807,11 +1525,12 @@ Networks verified: $NETWORKS_VERIFIED
 socket_proxy subnet: $SOCKET_PROXY_SUBNET_ACTUAL
 t2_proxy subnet: $T2_PROXY_SUBNET_ACTUAL
 database network: $DATABASE_NETWORK_NAME
-YML 00 downloaded: $YML_00_DOWNLOADED
-YML 01 downloaded: $YML_01_DOWNLOADED
-YML 01 override downloaded: $YML_01_OVERRIDE_DOWNLOADED
-Dockge compose downloaded: $YML_DOCKGE_DOWNLOADED
-Komodo compose downloaded: $YML_KOMODO_DOWNLOADED
+Socket Proxy stack downloaded: $SOCKET_PROXY_STACK_DOWNLOADED
+Portainer stack downloaded: $PORTAINER_STACK_DOWNLOADED
+Portainer bootstrap override downloaded: $PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED
+Dockge stack compose downloaded: $DOCKGE_STACK_DOWNLOADED
+Komodo stack compose downloaded: $KOMODO_STACK_DOWNLOADED
+Dockhand stack compose downloaded: $DOCKHAND_STACK_DOWNLOADED
 Socket proxy deployed: $SOCKET_PROXY_DEPLOYED
 Admin UI: $ADMIN_UI
 Admin UI validated: $ADMIN_UI_VALIDATED
@@ -1828,13 +1547,8 @@ Traefik DNS v3.7 OK: $TRAEFIK_DNS_DELAY_OK
 Traefik encoded characters OK: $TRAEFIK_ENCODED_CHARS_OK
 Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
 Authentik folders OK: $AUTHENTIK_FOLDERS_OK
-Temporal compose OK: $TEMPORAL_COMPOSE_OK
 CF companion secret OK: $CF_COMPANION_SECRET_OK
 Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
-Postiz Temporal guard installed: $POSTIZ_TEMPORAL_GUARD_INSTALLED
-Postiz Temporal guard run: $POSTIZ_TEMPORAL_GUARD_RUN
-Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
-Postiz Temporal guard path: $POSTIZ_TEMPORAL_GUARD_PATH
 Verify log: $VERIFY_LOG
 MARKER_EOF
     else
@@ -1850,11 +1564,12 @@ Networks verified: $NETWORKS_VERIFIED
 socket_proxy subnet: $SOCKET_PROXY_SUBNET_ACTUAL
 t2_proxy subnet: $T2_PROXY_SUBNET_ACTUAL
 database network: $DATABASE_NETWORK_NAME
-YML 00 downloaded: $YML_00_DOWNLOADED
-YML 01 downloaded: $YML_01_DOWNLOADED
-YML 01 override downloaded: $YML_01_OVERRIDE_DOWNLOADED
-Dockge compose downloaded: $YML_DOCKGE_DOWNLOADED
-Komodo compose downloaded: $YML_KOMODO_DOWNLOADED
+Socket Proxy stack downloaded: $SOCKET_PROXY_STACK_DOWNLOADED
+Portainer stack downloaded: $PORTAINER_STACK_DOWNLOADED
+Portainer bootstrap override downloaded: $PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED
+Dockge stack compose downloaded: $DOCKGE_STACK_DOWNLOADED
+Komodo stack compose downloaded: $KOMODO_STACK_DOWNLOADED
+Dockhand stack compose downloaded: $DOCKHAND_STACK_DOWNLOADED
 Socket proxy deployed: $SOCKET_PROXY_DEPLOYED
 Admin UI: $ADMIN_UI
 Admin UI validated: $ADMIN_UI_VALIDATED
@@ -1871,13 +1586,8 @@ Traefik DNS v3.7 OK: $TRAEFIK_DNS_DELAY_OK
 Traefik encoded characters OK: $TRAEFIK_ENCODED_CHARS_OK
 Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
 Authentik folders OK: $AUTHENTIK_FOLDERS_OK
-Temporal compose OK: $TEMPORAL_COMPOSE_OK
 CF companion secret OK: $CF_COMPANION_SECRET_OK
 Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
-Postiz Temporal guard installed: $POSTIZ_TEMPORAL_GUARD_INSTALLED
-Postiz Temporal guard run: $POSTIZ_TEMPORAL_GUARD_RUN
-Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
-Postiz Temporal guard path: $POSTIZ_TEMPORAL_GUARD_PATH
 Verify log: $VERIFY_LOG
 MARKER_EOF
     fi
@@ -1893,8 +1603,8 @@ function show_final_summary() {
     detail_line "socket_proxy" "$SOCKET_PROXY_SUBNET_ACTUAL"
     detail_line "t2_proxy" "$T2_PROXY_SUBNET_ACTUAL"
     detail_line "database" "$DATABASE_NETWORK_NAME"
-    detail_line "YML 00" "${COMPOSE_DIR}/${YML_00_NAME}"
-    detail_line "ADMIN UI" "$ADMIN_UI"
+    detail_line "SOCKET PROXY STACK" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    detail_line "ADMIN UI" "$ADMIN_UI_DISPLAY_NAME"
     detail_line "ADMIN UI COMPOSE" "$ADMIN_UI_COMPOSE_FILE"
     detail_line "ADMIN UI HOST" "$ADMIN_UI_HOST"
     detail_line "REDIS SYSCTL" "$SYSCTL_REDIS_OK"
@@ -1902,26 +1612,19 @@ function show_final_summary() {
     detail_line "TRAEFIK DNS V3.7" "$TRAEFIK_DNS_DELAY_OK"
     detail_line "TRAEFIK ENCODED CHARS" "$TRAEFIK_ENCODED_CHARS_OK"
     detail_line "AUTHENTIK FOLDERS" "$AUTHENTIK_FOLDERS_OK"
-    detail_line "TEMPORAL COMPOSE" "$TEMPORAL_COMPOSE_OK"
     detail_line "FILEBROWSER FOLDERS" "$FILEBROWSER_FOLDERS_OK"
-    detail_line "POSTIZ TEMPORAL GUARD" "$POSTIZ_TEMPORAL_GUARD_STATUS"
-    detail_line "GUARD COMMAND" "$POSTIZ_TEMPORAL_GUARD_PATH"
     detail_line "Admin UI temporary URL" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
     detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
     detail_line "Verify log" "$VERIFY_LOG"
 
     echo ""
-    if [ "$ADMIN_UI" == "portainer" ]; then
-        echo -e "${YW}Portainer is temporarily exposed directly for bootstrap access.${CL}"
-        echo -e "${YW}After Traefik/AuthentiK deployment is stable, run Script 7 to close this direct port and harden sudo/Docker access.${CL}"
-    else
-        echo -e "${YW}${ADMIN_UI} is deployed behind Traefik/AuthentiK labels with no direct bootstrap port.${CL}"
-    fi
+    echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} is temporarily available by direct IP for bootstrap:${CL}"
+    echo -e "${GN}${ADMIN_UI_BOOTSTRAP_ACCESS_URL}${CL}"
+    echo -e "${YW}Script 7 will close this direct bootstrap port and leave access through Traefik/AuthentiK.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Deploy/verify remaining stacks in order. After yml 06 Temporal starts and before yml 07 Postiz, run:${CL}"
-    echo -e "${GN}${POSTIZ_TEMPORAL_GUARD_PATH}${CL}"
-    echo -e "${YW}Do not restart Temporal after the guard runs. Then deploy/start Postiz and finally run Script 7.${CL}"
+    echo -e "${YW}Deploy the remaining application stacks in the documented order.${CL}"
+    echo -e "${YW}After all stacks are stable, run Script 7 for SSO and bootstrap-port hardening.${CL}"
     echo ""
 }
 
@@ -1944,11 +1647,8 @@ function main() {
     verify_redis_host_tuning
     verify_traefik_rendered_configs
     verify_authentik_folders
-    verify_temporal_compose_settings
     verify_cf_companion_secret_file
     verify_filebrowser_folders
-    install_postiz_temporal_guard
-
     create_shared_networks
     verify_shared_networks
 
@@ -1960,8 +1660,6 @@ function main() {
     deploy_socket_proxy
     deploy_admin_ui
     verify_bootstrap_containers
-    run_postiz_temporal_guard_if_ready
-
     create_verification_report
     write_completion_marker
     show_final_summary

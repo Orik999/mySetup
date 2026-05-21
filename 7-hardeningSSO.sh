@@ -46,6 +46,7 @@ ADMIN_UI="auto"
 PORTAINER_SELECTED="no"
 DOCKGE_SELECTED="no"
 KOMODO_SELECTED="no"
+DOCKHAND_SELECTED="no"
 ADMIN_UI_DISPLAY_NAME="Unknown"
 ADMIN_UI_SERVICE_NAME=""
 ADMIN_UI_PROJECT_NAME=""
@@ -55,6 +56,7 @@ ADMIN_UI_BOOTSTRAP_PORT=""
 ADMIN_UI_INTERNAL_PORT=""
 DOCKGE_BOOTSTRAP_PORT="${DOCKGE_BOOTSTRAP_PORT:-5001}"
 KOMODO_BOOTSTRAP_PORT="${KOMODO_BOOTSTRAP_PORT:-9120}"
+DOCKHAND_BOOTSTRAP_PORT="${DOCKHAND_BOOTSTRAP_PORT:-3000}"
 PORTAINER_BOOTSTRAP_PORT="${PORTAINER_BOOTSTRAP_PORT:-9443}"
 
 SUDO_CMD=""
@@ -70,6 +72,7 @@ AUTHENTIK_OUTPOST_ATTACH_OK="no"
 AUTHENTIK_OUTPOST_302_OK="no"
 PORTAINER_OIDC_STATUS="not-applicable"
 KOMODO_OIDC_STATUS="not-applicable"
+DOCKHAND_OIDC_STATUS="not-applicable"
 ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
 UFW_ADMIN_UI_RULE_REMOVED="not-applicable"
 PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
@@ -649,7 +652,10 @@ function detect_admin_ui() {
 
     msg_info "Detecting selected admin UI"
 
-    if docker_cmd ps -a --format '{{.Names}}' | grep -qx 'dockge'; then
+    if docker_cmd ps -a --format '{{.Names}}' | grep -qx 'dockhand'; then
+        ADMIN_UI="dockhand"
+        DOCKHAND_SELECTED="yes"
+    elif docker_cmd ps -a --format '{{.Names}}' | grep -qx 'dockge'; then
         ADMIN_UI="dockge"
         DOCKGE_SELECTED="yes"
     elif docker_cmd ps -a --format '{{.Names}}' | grep -qx 'komodo-core'; then
@@ -670,7 +676,7 @@ function detect_admin_ui() {
     [ -n "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" ] && detail_line "Bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
 
     if [ "$ADMIN_UI" == "unknown" ]; then
-        msg_warn "No Dockge, Komodo, or Portainer container detected. Admin UI-specific hardening will be skipped."
+        msg_warn "No Dockhand, Dockge, Komodo, or Portainer container detected. Admin UI-specific hardening will be skipped."
     fi
 }
 
@@ -696,6 +702,15 @@ function configure_admin_ui_bootstrap_context() {
             ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/14-komodo-bootstrap-override.yml"
             ADMIN_UI_BOOTSTRAP_PORT="$KOMODO_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="9120"
+            ;;
+        dockhand)
+            ADMIN_UI_DISPLAY_NAME="Dockhand"
+            ADMIN_UI_SERVICE_NAME="dockhand"
+            ADMIN_UI_PROJECT_NAME="dockhand"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/15-dockhand-compose.yml"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/15-dockhand-bootstrap-override.yml"
+            ADMIN_UI_BOOTSTRAP_PORT="$DOCKHAND_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="3000"
             ;;
         portainer|portainer-ce)
             ADMIN_UI="portainer"
@@ -1119,6 +1134,8 @@ function verify_authentik_outpost_302() {
         test_host="dockge.${DOMAIN}"
     elif [ "$KOMODO_SELECTED" == "yes" ]; then
         test_host="komodo.${DOMAIN}"
+    elif [ "$DOCKHAND_SELECTED" == "yes" ]; then
+        test_host="dockhand.${DOMAIN}"
     else
         test_host="traefik.${DOMAIN}"
     fi
@@ -1180,6 +1197,14 @@ function configure_admin_ui_sso() {
         echo -e "${YW}Komodo should use Authentik OIDC for clean app-level SSO.${CL}"
         echo -e "${YW}This script records the requirement; final Komodo automation can be added after its compose/env schema is locked.${CL}"
         msg_ok "KOMODO OIDC REQUIREMENT RECORDED"
+        return 0
+    fi
+
+    if [ "$DOCKHAND_SELECTED" == "yes" ]; then
+        DOCKHAND_OIDC_STATUS="manual-oidc-required"
+        echo -e "${YW}Dockhand supports app-level OIDC/SSO and should be paired with Authentik for clean session handling.${CL}"
+        echo -e "${YW}This script closes bootstrap exposure now; final Dockhand OIDC automation can be added after its env/API schema is locked.${CL}"
+        msg_ok "DOCKHAND OIDC REQUIREMENT RECORDED"
         return 0
     fi
 
@@ -1273,8 +1298,8 @@ function remove_admin_ui_ufw_rule() {
 # =========================================================
 
 # --- 19. POSTIZ HEALTH VERIFICATION ---
-# Confirms the real Postiz stack is healthy before stopping the temporary yml 07 guard.
-# The guard exists only to remove Temporal's default Text search attributes before Postiz starts.
+# Confirms the real Postiz stack is healthy before stopping the temporary Postiz Temporal Guard stack.
+# The guard exists only to remove Temporal default Text search attributes before Postiz starts.
 function verify_postiz_health() {
     section "POSTIZ HEALTH CHECK"
 
@@ -1340,7 +1365,7 @@ function verify_postiz_health() {
 }
 
 # --- 20. POSTIZ TEMPORAL GUARD STOPPER ---
-# Stops the temporary yml 07 guard after Postiz is confirmed healthy.
+# Stops the temporary Postiz Temporal Guard after Postiz is confirmed healthy.
 # It does not delete Portainer stack definitions or compose files.
 function stop_postiz_temporal_guard_if_safe() {
     section "POSTIZ TEMPORAL GUARD CLEANUP"
@@ -1363,7 +1388,7 @@ function stop_postiz_temporal_guard_if_safe() {
         return 0
     fi
 
-    echo -e "${YW}The temporary yml 07 Postiz Temporal guard is no longer needed because Postiz is healthy.${CL}"
+    echo -e "${YW}The temporary Postiz Temporal Guard is no longer needed because Postiz is healthy.${CL}"
     echo -e "${YW}This will only stop the guard container. It will not delete Portainer stack data or GitHub backup.${CL}"
     echo ""
 
@@ -1520,6 +1545,7 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
+Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
 Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
 UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
@@ -1551,6 +1577,7 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
+Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
 Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
 UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
@@ -1598,6 +1625,7 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
+Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
 Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
 UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
@@ -1621,6 +1649,7 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
+Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
 Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
 UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
@@ -1647,6 +1676,7 @@ function show_final_summary() {
     detail_line "AUTHENTIK OUTPOST 302" "$AUTHENTIK_OUTPOST_302_OK"
     detail_line "PORTAINER OIDC" "$PORTAINER_OIDC_STATUS"
     detail_line "KOMODO OIDC" "$KOMODO_OIDC_STATUS"
+    detail_line "DOCKHAND OIDC" "$DOCKHAND_OIDC_STATUS"
     detail_line "ADMIN UI BOOTSTRAP CLOSED" "$ADMIN_UI_BOOTSTRAP_CLOSED"
     detail_line "UFW ADMIN UI RULE REMOVED" "$UFW_ADMIN_UI_RULE_REMOVED"
     detail_line "NOPASSWD HARDENED" "$NOPASSWD_HARDENED"

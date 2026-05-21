@@ -1,0 +1,12 @@
+# 15-dockhand-bootstrap-override.yml
+# Project: Dockhand Bootstrap Override
+# Purpose: Temporarily exposes Dockhand by direct IP/port before Traefik + Authentik are fully deployed.
+#
+# Public-GitHub-safe:
+# - No secrets are stored in this file.
+# - Script 7 redeploys Dockhand without this override to close direct access.
+
+services:
+  dockhand:
+    ports:
+      - "${DOCKHAND_BOOTSTRAP_BIND:-0.0.0.0}:${DOCKHAND_BOOTSTRAP_PORT:-3000}:3000"

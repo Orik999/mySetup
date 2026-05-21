@@ -51,6 +51,7 @@ CF_API_TOKEN_FILE=""
 
 PUID_VALUE=""
 PGID_VALUE=""
+DOCKER_GID_VALUE=""
 TZ_VALUE=""
 DOMAIN_VALUE=""
 CF_API_EMAIL_VALUE=""
@@ -845,6 +846,7 @@ function validate_dependencies() {
         date
         grep
         id
+        ip
         mkdir
         mktemp
         openssl
@@ -854,6 +856,7 @@ function validate_dependencies() {
         tee
         test
         touch
+        timeout
         tput
         tr
         xargs
@@ -1166,6 +1169,7 @@ function collect_user_and_path_inputs() {
 
     PUID_VALUE="$(id -u "$DOCKER_USER")"
     PGID_VALUE="$(id -g "$DOCKER_USER")"
+    DOCKER_GID_VALUE="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || getent group docker 2>/dev/null | cut -d: -f3 || echo 999)"
 
     if id -nG "$DOCKER_USER" 2>/dev/null | grep -qw docker; then
         DOCKER_USER_IN_DOCKER_GROUP="yes"
@@ -1274,6 +1278,64 @@ function collect_domain_cloudflare_inputs() {
     fi
 }
 
+# --- 46AA. PROXMOX URL DETECTION HELPER ---
+# Builds the safest Proxmox URL default for the optional Traefik route.
+# It never hard-codes a LAN IP. Instead it checks any explicit PROXMOX_URL first,
+# then probes likely local candidates on port 8006 and shows the detected result.
+function detect_default_proxmox_url() {
+    local preset="${PROXMOX_URL:-}"
+    local src_ip=""
+    local gateway_ip=""
+    local lan_prefix=""
+    local candidate=""
+    local candidates=()
+    local seen=""
+
+    if [ -n "$preset" ]; then
+        printf '%s' "$preset"
+        return 0
+    fi
+
+    src_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+    gateway_ip="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="via") {print $(i+1); exit}}' || true)"
+
+    if [[ "$src_ip" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$ ]]; then
+        lan_prefix="${BASH_REMATCH[1]}"
+    fi
+
+    [ -n "$gateway_ip" ] && candidates+=("$gateway_ip")
+
+    if [ -n "$lan_prefix" ]; then
+        candidates+=(
+            "${lan_prefix}.11"
+            "${lan_prefix}.10"
+            "${lan_prefix}.2"
+            "${lan_prefix}.20"
+            "${lan_prefix}.21"
+            "${lan_prefix}.100"
+        )
+    fi
+
+    # Add already-known neighbours too, but keep the list small and quick.
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] && candidates+=("$candidate")
+    done < <(ip -4 neigh show 2>/dev/null | awk '{print $1}' | head -20 || true)
+
+    for candidate in "${candidates[@]}"; do
+        [ -z "$candidate" ] && continue
+        [[ " $seen " == *" $candidate "* ]] && continue
+        seen+=" $candidate"
+
+        if timeout 0.45 bash -c "</dev/tcp/${candidate}/8006" >/dev/null 2>&1; then
+            printf 'https://%s:8006' "$candidate"
+            return 0
+        fi
+    done
+
+    # Safe fallback: use the common Proxmox hostname if local port probing cannot confirm an IP.
+    printf 'https://proxmox.%s:8006' "$DOMAIN_VALUE"
+}
+
 # --- 46A. TRAEFIK CONFIG INPUTS ---
 # Collects non-secret Traefik values used to render template config files.
 # Cloudflare token stays in ${CF_API_TOKEN_FILE}; it is never embedded into Traefik YAML.
@@ -1281,9 +1343,12 @@ function collect_traefik_inputs() {
     local default_traefik_host="traefik.${DOMAIN_VALUE}"
     local proxmox_yn=""
     local default_proxmox_host="proxmox.${DOMAIN_VALUE}"
-    local default_proxmox_url="https://192.168.1.11:8006"
+    local default_proxmox_url=""
 
     section "TRAEFIK CONFIG"
+
+    default_proxmox_url="$(detect_default_proxmox_url)"
+    detail_line "Detected Proxmox URL default" "$default_proxmox_url"
 
     while true; do
         TRAEFIK_DASHBOARD_HOST="$(timed_text_input "Enter Traefik dashboard host" "$default_traefik_host")"
@@ -1403,6 +1468,10 @@ function set_admin_ui_details() {
             ADMIN_UI_DISPLAY_NAME="Komodo"
             ADMIN_UI_HOST="komodo.${DOMAIN_VALUE}"
             ;;
+        dockhand)
+            ADMIN_UI_DISPLAY_NAME="Dockhand"
+            ADMIN_UI_HOST="dockhand.${DOMAIN_VALUE}"
+            ;;
         *)
             ADMIN_UI="dockge"
             ADMIN_UI_DISPLAY_NAME="Dockge"
@@ -1418,7 +1487,7 @@ function set_admin_ui_details() {
 # Script 6 owns this choice and writes it into .env; Script 6.5 only reads and deploys it.
 function collect_admin_ui_selection() {
     local choice=""
-    local default_choice="2"
+    local default_choice="1"
 
     section "ADMIN UI SELECTION"
 
@@ -1426,6 +1495,7 @@ function collect_admin_ui_selection() {
     echo "1) Dockge - lightweight Compose-focused admin UI"
     echo "2) Portainer CE - full Docker management UI"
     echo "3) Komodo - Git/server-oriented deployment UI"
+    echo "4) Dockhand - modern multi-host Docker management UI"
     echo ""
 
     while true; do
@@ -1447,6 +1517,11 @@ function collect_admin_ui_selection() {
                 ADMIN_UI_DISPLAY_NAME="Komodo"
                 break
                 ;;
+            4)
+                ADMIN_UI="dockhand"
+                ADMIN_UI_DISPLAY_NAME="Dockhand"
+                break
+                ;;
             dockge|Dockge)
                 ADMIN_UI="dockge"
                 ADMIN_UI_DISPLAY_NAME="Dockge"
@@ -1462,8 +1537,13 @@ function collect_admin_ui_selection() {
                 ADMIN_UI_DISPLAY_NAME="Komodo"
                 break
                 ;;
+            dockhand|Dockhand)
+                ADMIN_UI="dockhand"
+                ADMIN_UI_DISPLAY_NAME="Dockhand"
+                break
+                ;;
             *)
-                msg_warn "Invalid admin UI selection. Choose 1, 2, or 3."
+                msg_warn "Invalid admin UI selection. Choose 1, 2, 3, or 4."
                 ;;
         esac
     done
@@ -1516,6 +1596,10 @@ function create_docker_directories() {
             ;;
         komodo)
             run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
+            ;;
+        dockhand)
+            run_cmd "creating Dockhand appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand"
+            run_cmd "creating Dockhand stacks directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand/stacks"
             ;;
     esac
 
@@ -1691,6 +1775,7 @@ USERDIR="${USERDIR}"
 # --- Linux user/container IDs ---
 PUID="${PUID_VALUE}"
 PGID="${PGID_VALUE}"
+DOCKER_GID="${DOCKER_GID_VALUE}"
 
 # --- Localisation ---
 TZ="${TZ_VALUE}"
@@ -1773,6 +1858,10 @@ function apply_permissions() {
             ;;
         komodo)
             run_cmd "setting Komodo appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/komodo"
+            ;;
+        dockhand)
+            run_cmd "setting Dockhand appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/dockhand"
+            run_cmd "setting Dockhand stacks permissions" chmod 750 "${DOCKER_DIR}/appdata/dockhand/stacks"
             ;;
     esac
 
@@ -1964,6 +2053,62 @@ EOF
     msg_ok "COMPLETION MARKER WRITTEN"
 }
 
+# --- 55A. PRE-SECRET REVIEW TIMER ---
+# Gives the user time to review the non-sensitive setup result before the screen is cleared.
+# ENTER continues immediately, SPACE pauses until ENTER, timeout continues automatically.
+function wait_before_secret_display() {
+    local deadline=""
+    local now=""
+    local remaining=""
+    local key=""
+
+    section "PRE-SECRET REVIEW"
+
+    echo -e "${YW}The non-sensitive setup steps are complete.${CL}"
+    echo -e "${YW}Review the output above before the secret/password screen is shown.${CL}"
+    echo -e "${YW}ENTER continues now. SPACE pauses this screen until ENTER. Timeout continues automatically.${CL}"
+    echo ""
+
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            break
+        fi
+
+        tty_print "${BFR}${YW}Showing secrets/passwords in ${remaining}s. Press ENTER to continue or SPACE to pause.${CL} "
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    tty_print "${BFR}${YW}Paused. Press ENTER to show secrets/passwords...${CL} "
+                    IFS= read -r _ < /dev/tty || true
+                    break
+                elif [[ -z "$key" ]]; then
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    tty_print "${BFR}${YW}Paused. Press ENTER to show secrets/passwords...${CL} "
+                    IFS= read -r _ || true
+                    break
+                elif [[ -z "$key" ]]; then
+                    break
+                fi
+            fi
+        fi
+    done
+
+    tty_print "${BFR}"
+    msg_ok "SECRET DISPLAY READY"
+}
+
 # --- 56. FINAL SECRET DISPLAY ---
 # Shows generated/reused secret values once while logging is disabled.
 # After user confirms they saved them, terminal and scrollback are cleared where supported.
@@ -1993,6 +2138,7 @@ function show_secrets_once_without_logging() {
     echo -e "ADMIN_UI_URL=${GN}${ADMIN_UI_URL}${CL}"
     echo -e "PUID=${GN}${PUID_VALUE}${CL}"
     echo -e "PGID=${GN}${PGID_VALUE}${CL}"
+    echo -e "DOCKER_GID=${GN}${DOCKER_GID_VALUE}${CL}"
     echo ""
 
     echo -e "${BL}DOMAIN / CLOUDFLARE:${CL}"
@@ -2066,6 +2212,7 @@ function show_clean_final_summary() {
     detail_line "ADMIN UI HOST" "$ADMIN_UI_HOST"
     detail_line "ADMIN UI URL" "$ADMIN_UI_URL"
     detail_line "PUID / PGID" "${PUID_VALUE}:${PGID_VALUE}"
+    detail_line "DOCKER GID" "$DOCKER_GID_VALUE"
     detail_line "EXISTING SETUP" "$EXISTING_SETUP"
     detail_line "SECRETS REGENERATED" "$REGENERATE_SECRETS"
     detail_line "SECRET SCREEN CLEARED" "$SECRET_SCREEN_CLEARED"
@@ -2105,6 +2252,7 @@ function main() {
     write_env_file
     apply_permissions
 
+    wait_before_secret_display
     show_secrets_once_without_logging
 
     write_completion_marker
