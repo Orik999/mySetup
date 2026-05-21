@@ -56,7 +56,7 @@ services:
       traefik.http.routers.traefik.entrypoints: https
       traefik.http.routers.traefik.tls: "true"
       traefik.http.routers.traefik.tls.certresolver: cloudflare
-      traefik.http.routers.traefik.middlewares: authentik@docker
+      traefik.http.routers.traefik.middlewares: chain-authentik@file
       traefik.http.routers.traefik.service: api@internal
 
       # Optional Traefik basic-auth middleware.
@@ -65,7 +65,7 @@ services:
       # To enable basic-auth only:
       # traefik.http.routers.traefik.middlewares: basic-auth@docker
       # To chain Authentik + basic-auth:
-      # traefik.http.routers.traefik.middlewares: authentik@docker,basic-auth@docker
+      # traefik.http.routers.traefik.middlewares: chain-authentik@file,basic-auth@docker
       # traefik.http.middlewares.basic-auth.basicauth.usersfile: /run/secrets/htpasswd
       # traefik.http.middlewares.basic-auth.basicauth.removeheader: "true"
 
