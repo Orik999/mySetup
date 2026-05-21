@@ -482,22 +482,36 @@ function timed_text_input() {
 function sensitive_line_input() {
     local prompt="${1:-Sensitive input}"
     local answer=""
+    local cols="80"
+    local visible_len="0"
+    local lines_to_clear="1"
+    local i=""
+
+    # Match Script 6 proven behavior:
+    # - read a full pasted/typed line directly from /dev/tty
+    # - do NOT use read -s because some consoles appear blocked while echo is disabled
+    # - do NOT flush here because flushing can consume pasted token characters
+    # - clear the visible prompt/token line immediately after ENTER
+    tty_print "${YW}${prompt}: ${CL}"
 
     if [ -r /dev/tty ]; then
-        stty sane < /dev/tty 2>/dev/null || true
-    fi
-
-    flush_input_buffer
-    tty_print "${YW}${prompt} ${DGN}(input hidden; paste/type then press ENTER)${YW}: ${CL}"
-
-    if [ -r /dev/tty ]; then
-        IFS= read -rs answer < /dev/tty || true
+        IFS= read -r answer < /dev/tty || answer=""
     else
-        IFS= read -rs answer || true
+        IFS= read -r answer || answer=""
     fi
 
-    tty_println ""
-    stty sane < /dev/tty 2>/dev/null || true
+    cols="$(tput cols 2>/dev/null || echo 80)"
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols="80"
+    [ "$cols" -lt 20 ] && cols="80"
+
+    visible_len=$(( ${#prompt} + 2 + ${#answer} ))
+    lines_to_clear=$(( (visible_len + cols - 1) / cols ))
+    [ "$lines_to_clear" -lt 1 ] && lines_to_clear="1"
+
+    for ((i=0; i<lines_to_clear; i++)); do
+        tty_print $'\033[1A\n\033[2K'
+    done
+
     printf '%s' "$answer"
 }
 
