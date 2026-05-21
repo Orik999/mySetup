@@ -53,7 +53,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - ${DOCKER_DIR}/appdata/portainer:/data
-
+      - ${DOCKER_DIR}/.env:${DOCKER_DIR}/.env:ro
     environment:
       TZ: ${TZ}
 

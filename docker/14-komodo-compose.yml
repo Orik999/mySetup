@@ -89,7 +89,7 @@ services:
 
     volumes:
       - ${DOCKER_DIR}/appdata/komodo/core:/config
-
+      - ${DOCKER_DIR}/.env:${DOCKER_DIR}/.env:ro
     depends_on:
       - ferretdb
 

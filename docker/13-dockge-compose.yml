@@ -37,9 +37,9 @@ services:
       - socket_proxy
 
     volumes:
-      - ${DOCKER_DIR}/appdata/dockge/data:/app/data
+      - ${DOCKER_DIR}/appdata/dockge:/app/data
       - ${DOCKER_DIR}/compose:${DOCKER_DIR}/compose
-
+      - ${DOCKER_DIR}/.env:${DOCKER_DIR}/.env:ro
     labels:
       traefik.enable: "true"
 

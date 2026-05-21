@@ -41,7 +41,7 @@ services:
     volumes:
       - ${DOCKER_DIR}/appdata/dockhand:${DOCKER_DIR}/appdata/dockhand
       - ${DOCKER_DIR}/compose:${DOCKER_DIR}/compose
-
+      - ${DOCKER_DIR}/.env:${DOCKER_DIR}/.env:ro
     labels:
       traefik.enable: "true"
 
