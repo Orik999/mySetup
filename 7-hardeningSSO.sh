@@ -46,6 +46,16 @@ ADMIN_UI="auto"
 PORTAINER_SELECTED="no"
 DOCKGE_SELECTED="no"
 KOMODO_SELECTED="no"
+ADMIN_UI_DISPLAY_NAME="Unknown"
+ADMIN_UI_SERVICE_NAME=""
+ADMIN_UI_PROJECT_NAME=""
+ADMIN_UI_COMPOSE_FILE=""
+ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE=""
+ADMIN_UI_BOOTSTRAP_PORT=""
+ADMIN_UI_INTERNAL_PORT=""
+DOCKGE_BOOTSTRAP_PORT="${DOCKGE_BOOTSTRAP_PORT:-5001}"
+KOMODO_BOOTSTRAP_PORT="${KOMODO_BOOTSTRAP_PORT:-9120}"
+PORTAINER_BOOTSTRAP_PORT="${PORTAINER_BOOTSTRAP_PORT:-9443}"
 
 SUDO_CMD=""
 DOCKER_NEEDS_SUDO="no"
@@ -60,6 +70,8 @@ AUTHENTIK_OUTPOST_ATTACH_OK="no"
 AUTHENTIK_OUTPOST_302_OK="no"
 PORTAINER_OIDC_STATUS="not-applicable"
 KOMODO_OIDC_STATUS="not-applicable"
+ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
+UFW_ADMIN_UI_RULE_REMOVED="not-applicable"
 PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
 UFW_PORTAINER_RULE_REMOVED="not-applicable"
 NOPASSWD_HARDENED="no"
@@ -650,12 +662,61 @@ function detect_admin_ui() {
         ADMIN_UI="${ADMIN_UI:-unknown}"
     fi
 
+    configure_admin_ui_bootstrap_context
+
     msg_ok "ADMIN UI DETECTION COMPLETE"
-    detail_line "Selected admin UI" "$ADMIN_UI"
+    detail_line "Selected admin UI" "$ADMIN_UI_DISPLAY_NAME"
+    [ -n "$ADMIN_UI_COMPOSE_FILE" ] && detail_line "Admin UI compose" "$ADMIN_UI_COMPOSE_FILE"
+    [ -n "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" ] && detail_line "Bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
 
     if [ "$ADMIN_UI" == "unknown" ]; then
         msg_warn "No Dockge, Komodo, or Portainer container detected. Admin UI-specific hardening will be skipped."
     fi
+}
+
+
+# --- 9A. ADMIN UI BOOTSTRAP CONTEXT ---
+# Maps the selected admin UI to its compose file, temporary bootstrap override and service port.
+function configure_admin_ui_bootstrap_context() {
+    case "$ADMIN_UI" in
+        dockge)
+            ADMIN_UI_DISPLAY_NAME="Dockge"
+            ADMIN_UI_SERVICE_NAME="dockge"
+            ADMIN_UI_PROJECT_NAME="dockge"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/13-dockge-compose.yml"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/13-dockge-bootstrap-override.yml"
+            ADMIN_UI_BOOTSTRAP_PORT="$DOCKGE_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="5001"
+            ;;
+        komodo)
+            ADMIN_UI_DISPLAY_NAME="Komodo"
+            ADMIN_UI_SERVICE_NAME="komodo-core"
+            ADMIN_UI_PROJECT_NAME="komodo"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/14-komodo-compose.yml"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/14-komodo-bootstrap-override.yml"
+            ADMIN_UI_BOOTSTRAP_PORT="$KOMODO_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="9120"
+            ;;
+        portainer|portainer-ce)
+            ADMIN_UI="portainer"
+            ADMIN_UI_DISPLAY_NAME="Portainer"
+            ADMIN_UI_SERVICE_NAME="portainer"
+            ADMIN_UI_PROJECT_NAME="portainer"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/01-portainer-compose.yml"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/01-portainer-bootstrap-override.yml"
+            ADMIN_UI_BOOTSTRAP_PORT="$PORTAINER_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="9443"
+            ;;
+        *)
+            ADMIN_UI_DISPLAY_NAME="Unknown"
+            ADMIN_UI_SERVICE_NAME=""
+            ADMIN_UI_PROJECT_NAME=""
+            ADMIN_UI_COMPOSE_FILE=""
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE=""
+            ADMIN_UI_BOOTSTRAP_PORT=""
+            ADMIN_UI_INTERNAL_PORT=""
+            ;;
+    esac
 }
 
 # =========================================================
@@ -1126,84 +1187,85 @@ function configure_admin_ui_sso() {
 }
 
 # --- 17. PORTAINER BOOTSTRAP PORT CLOSURE ---
-function close_portainer_bootstrap_exposure() {
-    section "PORTAINER BOOTSTRAP CLOSURE"
+function close_admin_ui_bootstrap_exposure() {
+    section "ADMIN UI BOOTSTRAP CLOSURE"
 
-    if [ "$PORTAINER_SELECTED" != "yes" ]; then
-        PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
-        msg_skip "PORTAINER NOT SELECTED; BOOTSTRAP CLOSURE SKIPPED"
-        return 0
-    fi
-
-    local yml_01="${COMPOSE_DIR}/01-portainer-compose.yml"
-    local yml_override="${COMPOSE_DIR}/01-portainer-bootstrap-override.yml"
     local close_yn=""
 
-    if [ ! -f "$yml_01" ]; then
-        PORTAINER_BOOTSTRAP_CLOSED="missing-compose"
-        msg_warn "Portainer compose file not found: ${yml_01}"
+    if [ -z "$ADMIN_UI_SERVICE_NAME" ] || [ -z "$ADMIN_UI_COMPOSE_FILE" ]; then
+        ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
+        msg_skip "NO SUPPORTED ADMIN UI SELECTED; BOOTSTRAP CLOSURE SKIPPED"
         return 0
     fi
 
-    if [ ! -f "$yml_override" ]; then
-        PORTAINER_BOOTSTRAP_CLOSED="already-no-override"
-        msg_ok "NO PORTAINER BOOTSTRAP OVERRIDE FILE FOUND"
+    if [ ! -f "$ADMIN_UI_COMPOSE_FILE" ]; then
+        ADMIN_UI_BOOTSTRAP_CLOSED="missing-compose"
+        msg_warn "${ADMIN_UI_DISPLAY_NAME} compose file not found: ${ADMIN_UI_COMPOSE_FILE}"
         return 0
     fi
 
-    echo -e "${YW}This redeploys Portainer without the bootstrap override so direct 9443 exposure closes.${CL}"
-    echo -e "${YW}Traefik/AuthentiK domain access remains available.${CL}"
+    echo -e "${YW}This redeploys ${ADMIN_UI_DISPLAY_NAME} without its temporary bootstrap override so direct port ${ADMIN_UI_BOOTSTRAP_PORT} closes.${CL}"
+    echo -e "${YW}Traefik/AuthentiK domain access remains available after DNS, Traefik and Authentik are healthy.${CL}"
     echo ""
 
-    close_yn="$(timed_yes_no "Close temporary Portainer bootstrap port now?" "y")"
+    close_yn="$(timed_yes_no "Close temporary ${ADMIN_UI_DISPLAY_NAME} bootstrap port now?" "y")"
 
     if [[ "$close_yn" =~ ^[Nn] ]]; then
-        PORTAINER_BOOTSTRAP_CLOSED="user-skipped"
-        msg_skip "PORTAINER BOOTSTRAP PORT CLOSURE SKIPPED"
+        ADMIN_UI_BOOTSTRAP_CLOSED="user-skipped"
+        PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
+        msg_skip "${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP PORT CLOSURE SKIPPED"
         return 0
     fi
 
-    msg_info "Redeploying Portainer without bootstrap override"
-    docker_cmd compose --env-file "$ENV_FILE" -p portainer -f "$yml_01" up -d >/dev/null
-    msg_ok "PORTAINER REDEPLOYED WITHOUT BOOTSTRAP OVERRIDE"
+    msg_info "Redeploying ${ADMIN_UI_DISPLAY_NAME} without bootstrap override"
+    docker_cmd compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" up -d >/dev/null
+    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} REDEPLOYED WITHOUT BOOTSTRAP OVERRIDE"
 
-    msg_info "Checking direct Portainer 9443 mapping"
-    if docker_cmd port portainer 9443/tcp >/dev/null 2>&1; then
-        PORTAINER_BOOTSTRAP_CLOSED="not-confirmed"
-        msg_warn "Portainer still appears to have direct 9443 mapping. Check compose labels/ports."
+    msg_info "Checking direct ${ADMIN_UI_DISPLAY_NAME} bootstrap port mapping"
+    if docker_cmd port "$ADMIN_UI_SERVICE_NAME" "${ADMIN_UI_INTERNAL_PORT}/tcp" >/dev/null 2>&1; then
+        ADMIN_UI_BOOTSTRAP_CLOSED="not-confirmed"
+        msg_warn "${ADMIN_UI_DISPLAY_NAME} still appears to have direct ${ADMIN_UI_BOOTSTRAP_PORT} mapping. Check compose ports."
     else
-        PORTAINER_BOOTSTRAP_CLOSED="yes"
-        msg_ok "PORTAINER DIRECT BOOTSTRAP PORT CLOSED"
+        ADMIN_UI_BOOTSTRAP_CLOSED="yes"
+        msg_ok "${ADMIN_UI_DISPLAY_NAME^^} DIRECT BOOTSTRAP PORT CLOSED"
     fi
+
+    PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
 }
 
+
 # --- 18. UFW CLEANUP ---
-function remove_portainer_ufw_rule() {
+function remove_admin_ui_ufw_rule() {
     section "UFW BOOTSTRAP RULE CLEANUP"
 
-    if [ "$PORTAINER_SELECTED" != "yes" ]; then
-        UFW_PORTAINER_RULE_REMOVED="not-applicable"
-        msg_skip "PORTAINER NOT SELECTED; UFW CLEANUP SKIPPED"
+    if [ -z "$ADMIN_UI_BOOTSTRAP_PORT" ]; then
+        UFW_ADMIN_UI_RULE_REMOVED="not-applicable"
+        UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
+        msg_skip "NO SUPPORTED ADMIN UI SELECTED; UFW CLEANUP SKIPPED"
         return 0
     fi
 
     if ! command -v ufw >/dev/null 2>&1; then
-        UFW_PORTAINER_RULE_REMOVED="ufw-not-found"
+        UFW_ADMIN_UI_RULE_REMOVED="ufw-not-found"
+        UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
         msg_skip "UFW NOT FOUND; RULE CLEANUP SKIPPED"
         return 0
     fi
 
     if ! ufw status 2>/dev/null | grep -qi "Status: active" && ! { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" ufw status 2>/dev/null | grep -qi "Status: active"; }; then
-        UFW_PORTAINER_RULE_REMOVED="ufw-not-active"
+        UFW_ADMIN_UI_RULE_REMOVED="ufw-not-active"
+        UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
         msg_skip "UFW NOT ACTIVE; RULE CLEANUP SKIPPED"
         return 0
     fi
 
-    msg_info "Removing temporary Portainer 9443 UFW rule"
-    run_optional ufw delete allow 9443/tcp
-    UFW_PORTAINER_RULE_REMOVED="attempted"
-    msg_ok "TEMPORARY PORTAINER UFW RULE REMOVAL ATTEMPTED"
+    msg_info "Removing temporary ${ADMIN_UI_DISPLAY_NAME} ${ADMIN_UI_BOOTSTRAP_PORT}/tcp UFW rule"
+    run_optional ufw delete allow "${ADMIN_UI_BOOTSTRAP_PORT}/tcp"
+    UFW_ADMIN_UI_RULE_REMOVED="attempted"
+    UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
+    msg_ok "TEMPORARY ${ADMIN_UI_DISPLAY_NAME^^} UFW RULE REMOVAL ATTEMPTED"
 }
+
 
 
 # =========================================================
@@ -1458,8 +1520,8 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
-Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
-UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
+Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
+UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 Postiz health OK: $POSTIZ_HEALTH_OK
 Postiz backend port OK: $POSTIZ_BACKEND_PORT_OK
@@ -1489,8 +1551,8 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
-Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
-UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
+Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
+UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 Postiz health OK: $POSTIZ_HEALTH_OK
 Postiz backend port OK: $POSTIZ_BACKEND_PORT_OK
@@ -1536,8 +1598,8 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
-Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
-UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
+Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
+UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 Verify log: $VERIFY_LOG
@@ -1559,8 +1621,8 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
-Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
-UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
+Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
+UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 Verify log: $VERIFY_LOG
@@ -1575,7 +1637,7 @@ function show_final_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
     detail_line "DOMAIN" "$DOMAIN"
-    detail_line "ADMIN UI" "$ADMIN_UI"
+    detail_line "ADMIN UI" "$ADMIN_UI_DISPLAY_NAME"
     detail_line "TRAEFIK CONFIG OK" "$TRAEFIK_CONFIG_OK"
     detail_line "AUTHENTIK CONTAINERS OK" "$AUTHENTIK_CONTAINERS_OK"
     detail_line "AUTHENTIK API OK" "$AUTHENTIK_API_OK"
@@ -1585,8 +1647,8 @@ function show_final_summary() {
     detail_line "AUTHENTIK OUTPOST 302" "$AUTHENTIK_OUTPOST_302_OK"
     detail_line "PORTAINER OIDC" "$PORTAINER_OIDC_STATUS"
     detail_line "KOMODO OIDC" "$KOMODO_OIDC_STATUS"
-    detail_line "PORTAINER BOOTSTRAP CLOSED" "$PORTAINER_BOOTSTRAP_CLOSED"
-    detail_line "UFW PORTAINER RULE REMOVED" "$UFW_PORTAINER_RULE_REMOVED"
+    detail_line "ADMIN UI BOOTSTRAP CLOSED" "$ADMIN_UI_BOOTSTRAP_CLOSED"
+    detail_line "UFW ADMIN UI RULE REMOVED" "$UFW_ADMIN_UI_RULE_REMOVED"
     detail_line "NOPASSWD HARDENED" "$NOPASSWD_HARDENED"
     detail_line "POSTIZ HEALTH" "$POSTIZ_HEALTH_OK"
     detail_line "POSTIZ BACKEND 3000" "$POSTIZ_BACKEND_PORT_OK"
@@ -1636,8 +1698,8 @@ function main() {
     verify_authentik_outpost_302
 
     configure_admin_ui_sso
-    close_portainer_bootstrap_exposure
-    remove_portainer_ufw_rule
+    close_admin_ui_bootstrap_exposure
+    remove_admin_ui_ufw_rule
 
     verify_postiz_health
     stop_postiz_temporal_guard_if_safe

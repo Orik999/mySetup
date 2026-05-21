@@ -1,0 +1,8 @@
+# 14-komodo-bootstrap-override.yml
+# Temporary bootstrap override used before Traefik/AuthentiK access is ready.
+# Script 7 redeploys Komodo without this override to close direct access.
+
+services:
+  komodo-core:
+    ports:
+      - "${ADMIN_UI_BOOTSTRAP_BIND:-0.0.0.0}:${KOMODO_BOOTSTRAP_PORT:-9120}:9120"
