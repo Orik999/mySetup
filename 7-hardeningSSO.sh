@@ -104,11 +104,11 @@ echo -e "${BL}
 ${CL}"
 }
 
-function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
-function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
-function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
-function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
-function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
+function msg_info() { local text="${1:-}"; echo -ne " ${HOLD} ${YW}${text}...${CL}"; }
+function msg_ok() { local text="${1:-}"; echo -e "${BFR} ${CM} ${GN}${text}${CL}"; }
+function msg_warn() { local text="${1:-}"; echo -e "${BFR} ${WARN} ${YW}${text}${CL}"; }
+function msg_skip() { local text="${1:-}"; echo -e "${BFR} ${WARN} ${YW}${text}${CL}"; }
+function msg_error() { local text="${1:-Unknown error}"; echo -e "${BFR} ${CROSS} ${RD}${text}${CL}"; exit 1; }
 
 function section() {
     echo ""
@@ -125,8 +125,8 @@ function section_flash_success() {
 }
 
 function detail_line() {
-    local label="$1"
-    local value="$2"
+    local label="${1:-}"
+    local value="${2:-}"
     echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
 }
 
@@ -153,6 +153,7 @@ function tty_println() {
 # --- 4. CLEANUP ---
 function cleanup() {
     local exit_code="$?"
+    stty sane < /dev/tty 2>/dev/null || true
     local file=""
 
     if [ -n "${SUDO_CMD:-}" ] && [ -n "${RUNTIME_LOG_FILE:-}" ] && [ -s "$RUNTIME_LOG_FILE" ]; then
@@ -479,10 +480,15 @@ function timed_text_input() {
 }
 
 function sensitive_line_input() {
-    local prompt="$1"
+    local prompt="${1:-Sensitive input}"
     local answer=""
 
-    tty_print "${YW}${prompt}: ${CL}"
+    if [ -r /dev/tty ]; then
+        stty sane < /dev/tty 2>/dev/null || true
+    fi
+
+    flush_input_buffer
+    tty_print "${YW}${prompt} ${DGN}(input hidden; paste/type then press ENTER)${YW}: ${CL}"
 
     if [ -r /dev/tty ]; then
         IFS= read -rs answer < /dev/tty || true
@@ -491,6 +497,7 @@ function sensitive_line_input() {
     fi
 
     tty_println ""
+    stty sane < /dev/tty 2>/dev/null || true
     printf '%s' "$answer"
 }
 
@@ -553,6 +560,7 @@ function validate_dependencies() {
         id
         mkdir
         mktemp
+        python3
         rm
         sed
         tee
@@ -670,6 +678,7 @@ function detect_admin_ui() {
     fi
 
     configure_admin_ui_bootstrap_context
+    resolve_admin_ui_compose_paths
 
     msg_ok "ADMIN UI DETECTION COMPLETE"
     detail_line "Selected admin UI" "$ADMIN_UI_DISPLAY_NAME"
@@ -733,6 +742,20 @@ function configure_admin_ui_bootstrap_context() {
             ADMIN_UI_INTERNAL_PORT=""
             ;;
     esac
+}
+
+# --- 9B. ADMIN UI DOCKGE STACK PATH RESOLUTION ---
+# Dockge stores managed stacks under ${COMPOSE_DIR}/<stack-name>/compose.yaml.
+# GitHub template files may also exist directly under ${COMPOSE_DIR}. Prefer the live Dockge path when present.
+function resolve_admin_ui_compose_paths() {
+    local live_compose=""
+
+    [ -z "${ADMIN_UI_PROJECT_NAME:-}" ] && return 0
+
+    live_compose="${COMPOSE_DIR}/${ADMIN_UI_PROJECT_NAME}/compose.yaml"
+    if [ -f "$live_compose" ]; then
+        ADMIN_UI_COMPOSE_FILE="$live_compose"
+    fi
 }
 
 # =========================================================
@@ -855,8 +878,9 @@ function collect_authentik_api_token() {
         echo ""
     fi
 
-    echo -e "${YW}To automate Authentik app/provider/outpost setup, create or provide an Authentik API token with admin permission.${CL}"
+    echo -e "${YW}To automate Authentik app/provider/outpost setup, paste an Authentik API token with admin permission.${CL}"
     echo -e "${YW}Leave blank to skip API automation and keep verification/manual guidance only.${CL}"
+    echo -e "${YW}AUTHENTIK_BOOTSTRAP_TOKEN is not an API token and will not be used here.${CL}"
     echo ""
 
     disable_logging
@@ -936,10 +960,17 @@ function verify_authentik_api() {
 
 # --- 14. AUTHENTIK FORWARD AUTH AUTOMATION ---
 function authentik_get_flow_pk() {
-    local slug="$1"
+    local slug="${1:-}"
     local pk=""
 
-    pk="$(ak_api GET "/flows/instances/?slug=${slug}" | json_get_first_pk || true)"
+    [ -z "$slug" ] && { printf ''; return 0; }
+
+    pk="$(ak_api GET "/flows/instances/?search=${slug}" | python3 -c 'import json,sys; slug=sys.argv[1]; data=json.load(sys.stdin); items=data.get("results", data if isinstance(data, list) else []); print(next((i.get("pk", "") for i in items if i.get("slug") == slug), ""))' "$slug" 2>/dev/null || true)"
+
+    if [ -z "$pk" ]; then
+        pk="$(ak_api GET "/flows/instances/?slug=${slug}" | json_get_first_pk || true)"
+    fi
+
     printf '%s' "$pk"
 }
 
@@ -1161,7 +1192,7 @@ function verify_authentik_outpost_302() {
         --header='X-Forwarded-Host: ${test_host}' \
         --header='X-Forwarded-Uri: /' \
         --header='X-Forwarded-Method: GET' \
-        http://authentik-server:9000/outpost.goauthentik.io/auth/traefik 2>&1 | awk '/HTTP\\// {code=\\$2} END {print code}'"
+        http://authentik-server:9000/outpost.goauthentik.io/auth/traefik 2>&1 | awk '/HTTP\\// {code=\$2} END {print code}'"
 
     forward_code="$(docker_cmd exec traefik sh -c "$forward_probe_cmd" 2>/dev/null | tail -n1 | tr -dc '0-9' || true)"
 
