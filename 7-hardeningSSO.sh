@@ -71,6 +71,7 @@ AUTHENTIK_APPLICATION_OK="no"
 AUTHENTIK_OUTPOST_ATTACH_OK="no"
 AUTHENTIK_OUTPOST_302_OK="no"
 AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="no"
+ADMIN_UI_DOMAIN_ROUTE_OK="no"
 PORTAINER_OIDC_STATUS="not-applicable"
 KOMODO_OIDC_STATUS="not-applicable"
 DOCKHAND_OIDC_STATUS="not-applicable"
@@ -713,7 +714,8 @@ function configure_admin_ui_bootstrap_context() {
             ADMIN_UI_DISPLAY_NAME="Dockge"
             ADMIN_UI_SERVICE_NAME="dockge"
             ADMIN_UI_PROJECT_NAME="dockge"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/13-dockge-compose.yml"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/dockge/compose.yaml"
+            [ -f "$ADMIN_UI_COMPOSE_FILE" ] || ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/13-dockge-compose.yml"
             ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/13-dockge-bootstrap-override.yml"
             ADMIN_UI_BOOTSTRAP_PORT="$DOCKGE_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="5001"
@@ -722,7 +724,8 @@ function configure_admin_ui_bootstrap_context() {
             ADMIN_UI_DISPLAY_NAME="Komodo"
             ADMIN_UI_SERVICE_NAME="komodo-core"
             ADMIN_UI_PROJECT_NAME="komodo"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/14-komodo-compose.yml"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/komodo/compose.yaml"
+            [ -f "$ADMIN_UI_COMPOSE_FILE" ] || ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/14-komodo-compose.yml"
             ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/14-komodo-bootstrap-override.yml"
             ADMIN_UI_BOOTSTRAP_PORT="$KOMODO_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="9120"
@@ -731,7 +734,8 @@ function configure_admin_ui_bootstrap_context() {
             ADMIN_UI_DISPLAY_NAME="Dockhand"
             ADMIN_UI_SERVICE_NAME="dockhand"
             ADMIN_UI_PROJECT_NAME="dockhand"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/15-dockhand-compose.yml"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/dockhand/compose.yaml"
+            [ -f "$ADMIN_UI_COMPOSE_FILE" ] || ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/15-dockhand-compose.yml"
             ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/15-dockhand-bootstrap-override.yml"
             ADMIN_UI_BOOTSTRAP_PORT="$DOCKHAND_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="3000"
@@ -741,7 +745,8 @@ function configure_admin_ui_bootstrap_context() {
             ADMIN_UI_DISPLAY_NAME="Portainer"
             ADMIN_UI_SERVICE_NAME="portainer"
             ADMIN_UI_PROJECT_NAME="portainer"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/01-portainer-compose.yml"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/portainer/compose.yaml"
+            [ -f "$ADMIN_UI_COMPOSE_FILE" ] || ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/01-portainer-compose.yml"
             ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/01-portainer-bootstrap-override.yml"
             ADMIN_UI_BOOTSTRAP_PORT="$PORTAINER_BOOTSTRAP_PORT"
             ADMIN_UI_INTERNAL_PORT="9443"
@@ -757,21 +762,6 @@ function configure_admin_ui_bootstrap_context() {
             ;;
     esac
 }
-
-# --- 9B. ADMIN UI DOCKGE STACK PATH RESOLUTION ---
-# Dockge stores managed stacks under ${COMPOSE_DIR}/<stack-name>/compose.yaml.
-# GitHub template files may also exist directly under ${COMPOSE_DIR}. Prefer the live Dockge path when present.
-function resolve_admin_ui_compose_paths() {
-    local live_compose=""
-
-    [ -z "${ADMIN_UI_PROJECT_NAME:-}" ] && return 0
-
-    live_compose="${COMPOSE_DIR}/${ADMIN_UI_PROJECT_NAME}/compose.yaml"
-    if [ -f "$live_compose" ]; then
-        ADMIN_UI_COMPOSE_FILE="$live_compose"
-    fi
-}
-
 # =========================================================
 #  PREFLIGHT
 # =========================================================
@@ -1161,11 +1151,80 @@ JSON
     fi
 }
 
+
+# --- 14A. AUTHENTIK OUTPOST REFRESH ---
+function refresh_authentik_after_api_changes() {
+    section "AUTHENTIK OUTPOST REFRESH"
+
+    if [ "$AUTHENTIK_OUTPOST_ATTACH_OK" != "yes" ]; then
+        msg_skip "AUTHENTIK API DID NOT ATTACH PROVIDER; REFRESH SKIPPED"
+        return 0
+    fi
+
+    echo -e "${YW}Refreshing Authentik after API provider/outpost changes so the embedded outpost reloads the new configuration.${CL}"
+
+    msg_info "Restarting Authentik server and worker"
+    docker_cmd restart authentik-server authentik-worker >/dev/null 2>&1 || true
+    msg_ok "AUTHENTIK CONTAINERS RESTART REQUESTED"
+
+    msg_info "Waiting for Authentik server health"
+    local i=""
+    local healthy="no"
+    for i in $(seq 1 60); do
+        if docker_cmd inspect -f '{{.State.Health.Status}}' authentik-server 2>/dev/null | grep -qx 'healthy'; then
+            healthy="yes"
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "$healthy" == "yes" ]; then
+        msg_ok "AUTHENTIK SERVER HEALTHY AFTER REFRESH"
+    else
+        msg_warn "AUTHENTIK SERVER DID NOT REPORT HEALTHY YET; CONTINUING WITH SAFE CHECKS"
+    fi
+
+    msg_info "Waiting for embedded outpost websocket reconnect"
+    local ws="no"
+    for i in $(seq 1 45); do
+        if docker_cmd logs authentik-server --tail=120 2>/dev/null | grep -qi 'Successfully connected websocket'; then
+            ws="yes"
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "$ws" == "yes" ]; then
+        msg_ok "AUTHENTIK EMBEDDED OUTPOST WEBSOCKET CONNECTED"
+    else
+        msg_warn "AUTHENTIK OUTPOST WEBSOCKET RECONNECT NOT CONFIRMED YET"
+    fi
+
+    msg_info "Restarting Traefik to refresh routes"
+    docker_cmd restart traefik >/dev/null 2>&1 || true
+    sleep 5
+    msg_ok "TRAEFIK REFRESHED"
+}
+
 # =========================================================
 #  AUTHENTIK OUTPOST VERIFICATION
 # =========================================================
 
 # --- 15. TRUE 302 TEST ---
+function selected_admin_host() {
+    if [ "$PORTAINER_SELECTED" == "yes" ]; then
+        printf 'portainer.%s' "$DOMAIN"
+    elif [ "$DOCKGE_SELECTED" == "yes" ]; then
+        printf 'dockge.%s' "$DOMAIN"
+    elif [ "$KOMODO_SELECTED" == "yes" ]; then
+        printf 'komodo.%s' "$DOMAIN"
+    elif [ "$DOCKHAND_SELECTED" == "yes" ]; then
+        printf 'dockhand.%s' "$DOMAIN"
+    else
+        printf 'traefik.%s' "$DOMAIN"
+    fi
+}
+
 function verify_authentik_outpost_302() {
     section "AUTHENTIK OUTPOST VERIFICATION"
 
@@ -1175,68 +1234,94 @@ function verify_authentik_outpost_302() {
     local forward_code=""
     local forward_probe_cmd=""
 
-    if [ "$PORTAINER_SELECTED" == "yes" ]; then
-        test_host="portainer.${DOMAIN}"
-    elif [ "$DOCKGE_SELECTED" == "yes" ]; then
-        test_host="dockge.${DOMAIN}"
-    elif [ "$KOMODO_SELECTED" == "yes" ]; then
-        test_host="komodo.${DOMAIN}"
-    elif [ "$DOCKHAND_SELECTED" == "yes" ]; then
-        test_host="dockhand.${DOMAIN}"
-    else
-        test_host="traefik.${DOMAIN}"
-    fi
-
+    test_host="$(selected_admin_host)"
     start_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
 
-    msg_info "Testing Authentik outpost start route without following redirects"
+    msg_info "Checking outpost start route"
     start_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$start_url" || true)"
 
     if [ "$start_code" == "302" ]; then
         AUTHENTIK_OUTPOST_302_OK="yes"
-        msg_ok "AUTHENTIK OUTPOST START ROUTE RETURNED TRUE HTTP 302"
+        msg_ok "AUTHENTIK START ROUTE READY"
     else
         AUTHENTIK_OUTPOST_302_OK="no"
-        msg_warn "Authentik start route returned HTTP ${start_code:-none}; expected 302 after provider is attached"
+        msg_warn "AUTHENTIK START ROUTE NOT READY: HTTP ${start_code:-none}"
     fi
 
-    msg_info "Testing internal Authentik forward-auth endpoint from Traefik"
-    forward_probe_cmd="wget -S -O- \
-        --header='X-Forwarded-Proto: https' \
-        --header='X-Forwarded-Host: ${test_host}' \
-        --header='X-Forwarded-Uri: /' \
-        --header='X-Forwarded-Method: GET' \
-        http://authentik-server:9000/outpost.goauthentik.io/auth/traefik 2>&1 | awk '/HTTP\\// {code=\$2} END {print code}'"
-
+    msg_info "Checking internal forward-auth endpoint"
+    forward_probe_cmd="wget -S -O- --header='X-Forwarded-Proto: https' --header='X-Forwarded-Host: ${test_host}' --header='X-Forwarded-Uri: /' --header='X-Forwarded-Method: GET' http://authentik-server:9000/outpost.goauthentik.io/auth/traefik 2>&1 | awk '/HTTP\\// {code=\$2} END {print code}'"
     forward_code="$(docker_cmd exec traefik sh -c "$forward_probe_cmd" 2>/dev/null | tail -n1 | tr -dc '0-9' || true)"
 
     case "$forward_code" in
         200|202|204|302|401|403)
             AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="yes"
-            msg_ok "AUTHENTIK FORWARD-AUTH ENDPOINT RESPONDED WITH HTTP ${forward_code}"
+            msg_ok "AUTHENTIK FORWARD-AUTH ENDPOINT READY: HTTP ${forward_code}"
             ;;
         *)
             AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="no"
-            msg_warn "Authentik forward-auth endpoint returned HTTP ${forward_code:-none}; expected non-5xx"
+            msg_warn "AUTHENTIK FORWARD-AUTH ENDPOINT NOT READY: HTTP ${forward_code:-none}"
             ;;
     esac
 
-    if [ "$AUTHENTIK_OUTPOST_302_OK" != "yes" ] || [ "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK" != "yes" ]; then
-        echo ""
-        echo -e "${YW}Manual Authentik check required if API automation was skipped or failed:${CL}"
-        echo -e "${YW}Applications → Outposts → authentik Embedded Outpost → Edit${CL}"
-        echo -e "${YW}Ensure Traefik Forward Auth is in Selected Applications, then Update.${CL}"
-        echo ""
-        echo -e "${YW}Retest start route:${CL}"
-        echo -e "${GN}curl -Ik \"${start_url}\"${CL}"
-        echo ""
-        echo -e "${YW}Retest internal forward-auth:${CL}"
-        echo -e "${GN}docker exec traefik wget -S -O- --header='X-Forwarded-Proto: https' --header='X-Forwarded-Host: ${test_host}' --header='X-Forwarded-Uri: /' --header='X-Forwarded-Method: GET' http://authentik-server:9000/outpost.goauthentik.io/auth/traefik 2>&1 | head -n 20${CL}"
-    fi
-
-    detail_line "Outpost start URL" "$start_url"
     detail_line "Start route HTTP" "${start_code:-none}"
     detail_line "Forward-auth HTTP" "${forward_code:-none}"
+
+    if [ "$AUTHENTIK_OUTPOST_302_OK" != "yes" ] || [ "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK" != "yes" ]; then
+        echo -e "${YW}Outpost checks are informational. The final lockout guard uses the selected admin UI domain route before closing direct access.${CL}"
+    fi
+}
+
+# --- 15A. ADMIN UI DOMAIN ROUTE LOCKOUT GUARD ---
+function verify_admin_ui_domain_route() {
+    section "ADMIN UI DOMAIN ROUTE CHECK"
+
+    local test_host=""
+    local route_url=""
+    local headers=""
+    local http_code=""
+    local location=""
+
+    if [ -z "$ADMIN_UI_SERVICE_NAME" ]; then
+        ADMIN_UI_DOMAIN_ROUTE_OK="not-applicable"
+        msg_skip "NO SUPPORTED ADMIN UI SELECTED; DOMAIN ROUTE CHECK SKIPPED"
+        return 0
+    fi
+
+    test_host="$(selected_admin_host)"
+    route_url="https://${test_host}/"
+
+    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} protected domain route"
+    headers="$(curl -ksS -I "$route_url" 2>/dev/null || true)"
+    http_code="$(printf '%s\n' "$headers" | awk 'toupper($0) ~ /^HTTP\// {code=$2} END {print code}')"
+    location="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^location:/ {sub(/^[Ll]ocation:[[:space:]]*/, ""); print; exit}' | tr -d '\r')"
+
+    case "$http_code" in
+        301|302|303|307|308)
+            if printf '%s' "$location" | grep -qi "auth.${DOMAIN}\|${AUTHENTIK_HOST#https://}"; then
+                ADMIN_UI_DOMAIN_ROUTE_OK="yes"
+                msg_ok "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ROUTE REDIRECTS TO AUTHENTIK"
+            else
+                ADMIN_UI_DOMAIN_ROUTE_OK="redirect-other"
+                msg_warn "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ROUTE REDIRECTS ELSEWHERE"
+            fi
+            ;;
+        200|401|403)
+            ADMIN_UI_DOMAIN_ROUTE_OK="yes"
+            msg_ok "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ROUTE IS REACHABLE WITH SAFE HTTP ${http_code}"
+            ;;
+        *)
+            ADMIN_UI_DOMAIN_ROUTE_OK="no"
+            msg_warn "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ROUTE NOT READY: HTTP ${http_code:-none}"
+            ;;
+    esac
+
+    detail_line "Admin UI route" "$route_url"
+    detail_line "HTTP result" "${http_code:-none}"
+    [ -n "$location" ] && detail_line "Redirect location" "$location"
+
+    if [ "$ADMIN_UI_DOMAIN_ROUTE_OK" != "yes" ]; then
+        echo -e "${YW}Direct bootstrap access will stay open to prevent lockout.${CL}"
+    fi
 }
 
 # =========================================================
@@ -1286,11 +1371,23 @@ function configure_admin_ui_sso() {
     msg_skip "NO SUPPORTED ADMIN UI DETECTED; SSO GUIDANCE SKIPPED"
 }
 
-# --- 17. PORTAINER BOOTSTRAP PORT CLOSURE ---
+# --- 17. ADMIN UI BOOTSTRAP PORT CLOSURE ---
 function close_admin_ui_bootstrap_exposure() {
     section "ADMIN UI BOOTSTRAP CLOSURE"
 
     local close_yn=""
+
+    if [ "$ADMIN_UI_DOMAIN_ROUTE_OK" != "yes" ]; then
+        ADMIN_UI_BOOTSTRAP_CLOSED="skipped-admin-route-not-ready"
+        PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
+        msg_warn "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ACCESS IS NOT VERIFIED; BOOTSTRAP PORT WILL STAY OPEN"
+        detail_line "Admin UI route" "$ADMIN_UI_DOMAIN_ROUTE_OK"
+        detail_line "Start route" "$AUTHENTIK_OUTPOST_302_OK"
+        detail_line "Forward-auth endpoint" "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK"
+        echo -e "${YW}This lockout guard applies to Dockge, Portainer, Komodo, and Dockhand.${CL}"
+        echo -e "${YW}Fix/verify Authentik access first, then rerun Script 7.${CL}"
+        return 0
+    fi
 
     if [ -z "$ADMIN_UI_SERVICE_NAME" ] || [ -z "$ADMIN_UI_COMPOSE_FILE" ]; then
         ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
@@ -1649,6 +1746,7 @@ Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
+Admin UI domain route OK: $ADMIN_UI_DOMAIN_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
@@ -1682,6 +1780,7 @@ Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
+Admin UI domain route OK: $ADMIN_UI_DOMAIN_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
@@ -1731,6 +1830,7 @@ Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
+Admin UI domain route OK: $ADMIN_UI_DOMAIN_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
@@ -1756,6 +1856,7 @@ Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
+Admin UI domain route OK: $ADMIN_UI_DOMAIN_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
@@ -1784,6 +1885,7 @@ function show_final_summary() {
     detail_line "AUTHENTIK OUTPOST ATTACH" "$AUTHENTIK_OUTPOST_ATTACH_OK"
     detail_line "AUTHENTIK OUTPOST 302" "$AUTHENTIK_OUTPOST_302_OK"
     detail_line "AUTHENTIK FORWARD-AUTH" "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK"
+    detail_line "ADMIN UI DOMAIN ROUTE" "$ADMIN_UI_DOMAIN_ROUTE_OK"
     detail_line "PORTAINER OIDC" "$PORTAINER_OIDC_STATUS"
     detail_line "KOMODO OIDC" "$KOMODO_OIDC_STATUS"
     detail_line "DOCKHAND OIDC" "$DOCKHAND_OIDC_STATUS"
@@ -1800,10 +1902,10 @@ function show_final_summary() {
     echo ""
     echo -e "${BL}IMPORTANT:${CL}"
 
-    if [ "$AUTHENTIK_OUTPOST_302_OK" != "yes" ] || [ "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK" != "yes" ]; then
-        echo -e "${YW}Authentik outpost verification did not pass. Attach the Traefik Forward Auth app/provider to the existing authentik Embedded Outpost, then rerun Script 7.${CL}"
+    if [ "$ADMIN_UI_DOMAIN_ROUTE_OK" == "yes" ]; then
+        echo -e "${GN}${ADMIN_UI_DISPLAY_NAME} domain access is verified, so bootstrap closure is safe when selected.${CL}"
     else
-        echo -e "${GN}Authentik forward-auth outpost route and internal endpoint are responding correctly.${CL}"
+        echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} domain access is not verified. Bootstrap access should stay open to prevent lockout.${CL}"
     fi
 
     if [ "$POSTIZ_TEMPORAL_GUARD_STOPPED" == "yes" ]; then
@@ -1835,7 +1937,9 @@ function main() {
     collect_authentik_api_token
     verify_authentik_api
     create_or_update_authentik_forward_auth
+    refresh_authentik_after_api_changes
     verify_authentik_outpost_302
+    verify_admin_ui_domain_route
 
     configure_admin_ui_sso
     close_admin_ui_bootstrap_exposure
