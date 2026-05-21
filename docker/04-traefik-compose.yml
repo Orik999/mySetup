@@ -72,10 +72,7 @@ services:
 networks:
   t2_proxy:
     name: t2_proxy
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 192.168.90.0/24
+    external: true
   socket_proxy:
     name: socket_proxy
     external: true

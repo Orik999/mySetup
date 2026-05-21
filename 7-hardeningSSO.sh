@@ -70,6 +70,7 @@ AUTHENTIK_PROVIDER_OK="no"
 AUTHENTIK_APPLICATION_OK="no"
 AUTHENTIK_OUTPOST_ATTACH_OK="no"
 AUTHENTIK_OUTPOST_302_OK="no"
+AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="no"
 PORTAINER_OIDC_STATUS="not-applicable"
 KOMODO_OIDC_STATUS="not-applicable"
 DOCKHAND_OIDC_STATUS="not-applicable"
@@ -849,10 +850,9 @@ function collect_authentik_api_token() {
     fi
 
     if [ -n "${AUTHENTIK_BOOTSTRAP_TOKEN:-}" ]; then
-        AUTHENTIK_API_TOKEN="$AUTHENTIK_BOOTSTRAP_TOKEN"
-        AUTHENTIK_TOKEN_SOURCE="AUTHENTIK_BOOTSTRAP_TOKEN"
-        msg_ok "AUTHENTIK BOOTSTRAP TOKEN FOUND IN .ENV"
-        return 0
+        msg_warn "AUTHENTIK_BOOTSTRAP_TOKEN FOUND, BUT IT IS NOT USED AS AN API BEARER TOKEN"
+        echo -e "${YW}Bootstrap token is for first-time Authentik setup only. Script 7 needs a real Authentik API token.${CL}"
+        echo ""
     fi
 
     echo -e "${YW}To automate Authentik app/provider/outpost setup, create or provide an Authentik API token with admin permission.${CL}"
@@ -1125,8 +1125,10 @@ function verify_authentik_outpost_302() {
     section "AUTHENTIK OUTPOST VERIFICATION"
 
     local test_host=""
-    local test_url=""
-    local http_code=""
+    local start_url=""
+    local start_code=""
+    local forward_code=""
+    local forward_probe_cmd=""
 
     if [ "$PORTAINER_SELECTED" == "yes" ]; then
         test_host="portainer.${DOMAIN}"
@@ -1140,28 +1142,56 @@ function verify_authentik_outpost_302() {
         test_host="traefik.${DOMAIN}"
     fi
 
-    test_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
+    start_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
 
-    msg_info "Testing Authentik outpost route without following redirects"
-    http_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$test_url" || true)"
+    msg_info "Testing Authentik outpost start route without following redirects"
+    start_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$start_url" || true)"
 
-    if [ "$http_code" == "302" ]; then
+    if [ "$start_code" == "302" ]; then
         AUTHENTIK_OUTPOST_302_OK="yes"
-        msg_ok "AUTHENTIK OUTPOST ROUTE RETURNED TRUE HTTP 302"
+        msg_ok "AUTHENTIK OUTPOST START ROUTE RETURNED TRUE HTTP 302"
     else
         AUTHENTIK_OUTPOST_302_OK="no"
-        msg_warn "Authentik outpost test returned HTTP ${http_code:-none}; expected 302"
+        msg_warn "Authentik start route returned HTTP ${start_code:-none}; expected 302 after provider is attached"
+    fi
+
+    msg_info "Testing internal Authentik forward-auth endpoint from Traefik"
+    forward_probe_cmd="wget -S -O- \
+        --header='X-Forwarded-Proto: https' \
+        --header='X-Forwarded-Host: ${test_host}' \
+        --header='X-Forwarded-Uri: /' \
+        --header='X-Forwarded-Method: GET' \
+        http://authentik-server:9000/outpost.goauthentik.io/auth/traefik 2>&1 | awk '/HTTP\\// {code=\\$2} END {print code}'"
+
+    forward_code="$(docker_cmd exec traefik sh -c "$forward_probe_cmd" 2>/dev/null | tail -n1 | tr -dc '0-9' || true)"
+
+    case "$forward_code" in
+        200|202|204|302|401|403)
+            AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="yes"
+            msg_ok "AUTHENTIK FORWARD-AUTH ENDPOINT RESPONDED WITH HTTP ${forward_code}"
+            ;;
+        *)
+            AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="no"
+            msg_warn "Authentik forward-auth endpoint returned HTTP ${forward_code:-none}; expected non-5xx"
+            ;;
+    esac
+
+    if [ "$AUTHENTIK_OUTPOST_302_OK" != "yes" ] || [ "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK" != "yes" ]; then
         echo ""
-        echo -e "${YW}Manual Authentik check required:${CL}"
+        echo -e "${YW}Manual Authentik check required if API automation was skipped or failed:${CL}"
         echo -e "${YW}Applications → Outposts → authentik Embedded Outpost → Edit${CL}"
         echo -e "${YW}Ensure Traefik Forward Auth is in Selected Applications, then Update.${CL}"
         echo ""
-        echo -e "${YW}Retest:${CL}"
-        echo -e "${GN}curl -Ik \"${test_url}\"${CL}"
+        echo -e "${YW}Retest start route:${CL}"
+        echo -e "${GN}curl -Ik \"${start_url}\"${CL}"
+        echo ""
+        echo -e "${YW}Retest internal forward-auth:${CL}"
+        echo -e "${GN}docker exec traefik wget -S -O- --header='X-Forwarded-Proto: https' --header='X-Forwarded-Host: ${test_host}' --header='X-Forwarded-Uri: /' --header='X-Forwarded-Method: GET' http://authentik-server:9000/outpost.goauthentik.io/auth/traefik 2>&1 | head -n 20${CL}"
     fi
 
-    detail_line "Outpost test URL" "$test_url"
-    detail_line "HTTP result" "${http_code:-none}"
+    detail_line "Outpost start URL" "$start_url"
+    detail_line "Start route HTTP" "${start_code:-none}"
+    detail_line "Forward-auth HTTP" "${forward_code:-none}"
 }
 
 # =========================================================
@@ -1329,16 +1359,16 @@ function verify_postiz_health() {
         return 0
     fi
 
-    msg_info "Checking Postiz backend port 3000"
-    backend_port_found="$(docker_cmd exec postiz sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i ':0BB8' || true" 2>/dev/null || true)"
+    msg_info "Checking Postiz backend port 5000"
+    backend_port_found="$(docker_cmd exec postiz sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i ':1388' || true" 2>/dev/null || true)"
 
     if [ -n "$backend_port_found" ]; then
         POSTIZ_BACKEND_PORT_OK="yes"
-        msg_ok "POSTIZ BACKEND PORT 3000 IS LISTENING"
+        msg_ok "POSTIZ BACKEND PORT 5000 IS LISTENING"
     else
         POSTIZ_BACKEND_PORT_OK="no"
         POSTIZ_HEALTH_OK="no"
-        msg_warn "POSTIZ BACKEND PORT 3000 IS NOT LISTENING; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
+        msg_warn "POSTIZ BACKEND PORT 5000 IS NOT LISTENING; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
         return 0
     fi
 
@@ -1360,7 +1390,7 @@ function verify_postiz_health() {
     esac
 
     detail_line "Postiz health" "$POSTIZ_HEALTH_OK"
-    detail_line "Backend port 3000" "$POSTIZ_BACKEND_PORT_OK"
+    detail_line "Backend port 5000" "$POSTIZ_BACKEND_PORT_OK"
     detail_line "Web route" "${auth_url} -> ${auth_code}"
 }
 
@@ -1371,7 +1401,10 @@ function stop_postiz_temporal_guard_if_safe() {
     section "POSTIZ TEMPORAL GUARD CLEANUP"
 
     local guard_container="postiz-temporal-guard"
-    local stop_yn=""
+    local guard_project="postiz-temporal-guard"
+    local guard_stack_dir="${COMPOSE_DIR}/postiz-temporal-guard"
+    local cleanup_yn=""
+    local image_in_use=""
 
     if ! docker_cmd ps -a --format '{{.Names}}' | grep -qx "$guard_container"; then
         POSTIZ_TEMPORAL_GUARD_STATUS="not-found"
@@ -1384,31 +1417,58 @@ function stop_postiz_temporal_guard_if_safe() {
 
     if [ "$POSTIZ_HEALTH_OK" != "yes" ]; then
         POSTIZ_TEMPORAL_GUARD_STOPPED="kept-postiz-not-healthy"
-        msg_warn "POSTIZ IS NOT CONFIRMED HEALTHY; TEMPORAL GUARD WILL BE LEFT RUNNING"
+        msg_warn "POSTIZ IS NOT CONFIRMED HEALTHY; TEMPORAL GUARD ARTIFACTS WILL BE KEPT"
         return 0
     fi
 
-    echo -e "${YW}The temporary Postiz Temporal Guard is no longer needed because Postiz is healthy.${CL}"
-    echo -e "${YW}This will only stop the guard container. It will not delete Portainer stack data or GitHub backup.${CL}"
+    echo -e "${YW}The Postiz Temporal Guard was a temporary one-shot deployment helper.${CL}"
+    echo -e "${YW}Postiz is healthy, so Script 7 can remove guard leftovers safely.${CL}"
+    echo -e "${YW}This removes the stopped/running guard container and temporary Dockge stack folder if present.${CL}"
+    echo -e "${YW}It does not touch Temporal, Postiz, PostgreSQL data, Redis data, or running application volumes.${CL}"
     echo ""
 
-    stop_yn="$(timed_yes_no "Stop temporary Postiz Temporal guard now?" "y")"
+    cleanup_yn="$(timed_yes_no "Clean Postiz Temporal Guard temporary artifacts now?" "y")"
 
-    if [[ "$stop_yn" =~ ^[Nn] ]]; then
+    if [[ "$cleanup_yn" =~ ^[Nn] ]]; then
         POSTIZ_TEMPORAL_GUARD_STOPPED="user-skipped"
-        msg_skip "POSTIZ TEMPORAL GUARD STOP SKIPPED"
+        msg_skip "POSTIZ TEMPORAL GUARD CLEANUP SKIPPED"
         return 0
     fi
 
-    msg_info "Stopping Postiz Temporal guard"
-    docker_cmd stop "$guard_container" >/dev/null 2>&1 || true
+    msg_info "Removing Postiz Temporal Guard container"
+    docker_cmd rm -f "$guard_container" >/dev/null 2>&1 || true
 
-    if docker_cmd ps --format '{{.Names}}' | grep -qx "$guard_container"; then
-        POSTIZ_TEMPORAL_GUARD_STOPPED="failed"
-        msg_warn "POSTIZ TEMPORAL GUARD STILL APPEARS RUNNING"
+    if docker_cmd ps -a --format '{{.Names}}' | grep -qx "$guard_container"; then
+        POSTIZ_TEMPORAL_GUARD_STOPPED="container-remove-failed"
+        msg_warn "POSTIZ TEMPORAL GUARD CONTAINER STILL EXISTS"
     else
         POSTIZ_TEMPORAL_GUARD_STOPPED="yes"
-        msg_ok "POSTIZ TEMPORAL GUARD STOPPED"
+        msg_ok "POSTIZ TEMPORAL GUARD CONTAINER REMOVED"
+    fi
+
+    msg_info "Removing Postiz Temporal Guard compose project if present"
+    docker_cmd compose -p "$guard_project" down --remove-orphans >/dev/null 2>&1 || true
+    msg_ok "POSTIZ TEMPORAL GUARD COMPOSE PROJECT CLEANED"
+
+    if [ -d "$guard_stack_dir" ]; then
+        msg_info "Removing temporary Postiz Temporal Guard stack folder"
+        rm -rf "$guard_stack_dir" 2>/dev/null || run_optional rm -rf "$guard_stack_dir"
+        if [ -d "$guard_stack_dir" ]; then
+            msg_warn "POSTIZ TEMPORAL GUARD STACK FOLDER COULD NOT BE REMOVED: ${guard_stack_dir}"
+        else
+            msg_ok "POSTIZ TEMPORAL GUARD STACK FOLDER REMOVED"
+        fi
+    else
+        msg_skip "NO POSTIZ TEMPORAL GUARD STACK FOLDER FOUND"
+    fi
+
+    msg_info "Checking if temporalio/admin-tools image can be removed"
+    image_in_use="$(docker_cmd ps -a --format '{{.Image}}' | grep -x 'temporalio/admin-tools:latest' || true)"
+    if [ -z "$image_in_use" ]; then
+        docker_cmd image rm temporalio/admin-tools:latest >/dev/null 2>&1 || true
+        msg_ok "TEMPORARY TEMPORAL ADMIN TOOLS IMAGE REMOVAL ATTEMPTED"
+    else
+        msg_skip "TEMPORAL ADMIN TOOLS IMAGE STILL IN USE; IMAGE KEPT"
     fi
 }
 
@@ -1543,6 +1603,7 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
@@ -1575,6 +1636,7 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
@@ -1623,6 +1685,7 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
@@ -1647,6 +1710,7 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
@@ -1674,6 +1738,7 @@ function show_final_summary() {
     detail_line "AUTHENTIK APPLICATION" "$AUTHENTIK_APPLICATION_OK"
     detail_line "AUTHENTIK OUTPOST ATTACH" "$AUTHENTIK_OUTPOST_ATTACH_OK"
     detail_line "AUTHENTIK OUTPOST 302" "$AUTHENTIK_OUTPOST_302_OK"
+    detail_line "AUTHENTIK FORWARD-AUTH" "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK"
     detail_line "PORTAINER OIDC" "$PORTAINER_OIDC_STATUS"
     detail_line "KOMODO OIDC" "$KOMODO_OIDC_STATUS"
     detail_line "DOCKHAND OIDC" "$DOCKHAND_OIDC_STATUS"
@@ -1681,7 +1746,7 @@ function show_final_summary() {
     detail_line "UFW ADMIN UI RULE REMOVED" "$UFW_ADMIN_UI_RULE_REMOVED"
     detail_line "NOPASSWD HARDENED" "$NOPASSWD_HARDENED"
     detail_line "POSTIZ HEALTH" "$POSTIZ_HEALTH_OK"
-    detail_line "POSTIZ BACKEND 3000" "$POSTIZ_BACKEND_PORT_OK"
+    detail_line "POSTIZ BACKEND 5000" "$POSTIZ_BACKEND_PORT_OK"
     detail_line "POSTIZ WEB ROUTE" "$POSTIZ_WEB_ROUTE_OK"
     detail_line "POSTIZ TEMPORAL GUARD" "$POSTIZ_TEMPORAL_GUARD_STOPPED"
     detail_line "DOCKER-USER REVIEW" "$DOCKER_USER_RULES_REVIEWED"
@@ -1690,10 +1755,10 @@ function show_final_summary() {
     echo ""
     echo -e "${BL}IMPORTANT:${CL}"
 
-    if [ "$AUTHENTIK_OUTPOST_302_OK" != "yes" ]; then
+    if [ "$AUTHENTIK_OUTPOST_302_OK" != "yes" ] || [ "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK" != "yes" ]; then
         echo -e "${YW}Authentik outpost verification did not pass. Attach the Traefik Forward Auth app/provider to the existing authentik Embedded Outpost, then rerun Script 7.${CL}"
     else
-        echo -e "${GN}Authentik forward-auth outpost route is responding with true HTTP 302.${CL}"
+        echo -e "${GN}Authentik forward-auth outpost route and internal endpoint are responding correctly.${CL}"
     fi
 
     if [ "$POSTIZ_TEMPORAL_GUARD_STOPPED" == "yes" ]; then

@@ -20,7 +20,7 @@ services:
       - ${DOCKER_DIR}/compose:/data/docker/compose
       - ${DOCKER_DIR}/shared:/data/docker/shared
       - ${DOCKER_DIR}/backups:/data/docker/backups
-      - ${DOCKER_DIR}/appdata/vscode/config:/config
+      - ${DOCKER_DIR}/appdata:/config
     environment:
       TZ: ${TZ}
       PUID: ${PUID}

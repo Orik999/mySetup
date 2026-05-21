@@ -1,27 +1,22 @@
-# 09-cf-companion-compose.yml
+# 10-cf-companion-compose.yml
 # Project: Traefik Cloudflare Companion
 # Purpose: Automatically creates/updates Cloudflare DNS records from Traefik Docker labels.
 #
 # Public-GitHub-safe:
 # - No Cloudflare token is stored in this file.
 # - Script 6 writes the real token to ${CF_API_TOKEN_FILE}.
-# - Docker mounts it as /run/secrets/cf_api_token.
-# - The entrypoint reads the secret file and exports:
-#     CF_API_TOKEN
-#     CLOUDFLARE_API_TOKEN
-# - This avoids relying on unsupported *_FILE environment syntax.
+# - Docker mounts it as the official companion secret name: cf_token.
+# - Companion receives the official email variable: CF_EMAIL.
 #
 # Notes:
 # - Docker label discovery is enabled through socket-proxy.
-# - Traefik polling is intentionally disabled because Docker label discovery is sufficient
-#   for this stack and avoids needing to expose/query the Traefik API URL.
-# - If future testing shows polling is required, set ENABLE_TRAEFIK_POLL=true and add
-#   the correct TRAEFIK_URL for the internal Traefik endpoint.
+# - Traefik polling is intentionally disabled because Docker label discovery is sufficient.
+# - Uses official tiredofit/traefik-cloudflare-companion Cloudflare auth naming.
 
 name: cf-companion
 
 secrets:
-  cf_api_token:
+  cf_token:
     file: ${CF_API_TOKEN_FILE}
 
 services:
@@ -39,7 +34,7 @@ services:
       - socket_proxy
 
     secrets:
-      - cf_api_token
+      - cf_token
 
     environment:
       # Timezone.
@@ -58,25 +53,6 @@ services:
       DOMAIN1_ZONE_ID: ${CF_ZONE_ID}
       DOMAIN1_PROXIED: "true"
       DEFAULT_TTL: 1
-
-      # Non-secret Cloudflare account metadata.
-      CF_API_EMAIL: ${CF_API_EMAIL}
-
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-
-        if [ ! -s /run/secrets/cf_api_token ]; then
-          echo "ERROR: Cloudflare token secret is missing or empty: /run/secrets/cf_api_token" >&2
-          exit 1
-        fi
-
-        export CF_API_TOKEN="$(cat /run/secrets/cf_api_token)"
-        export CLOUDFLARE_API_TOKEN="${CF_API_TOKEN}"
-
-        exec /init
 
 networks:
   socket_proxy:
