@@ -1,4 +1,8 @@
 # 04-traefik-compose.yml
+# Project: Traefik
+# Purpose: Reverse proxy and Cloudflare DNS-01 certificate resolver.
+# Runtime config is rendered by Script 6 into ${DOCKER_DIR}/appdata/traefik.
+
 name: traefik
 
 secrets:
@@ -11,27 +15,11 @@ services:
   traefik:
     env_file:
       - /home/orik/docker/.env
-    image: traefik:latest
+    image: traefik:v3.7.1
     container_name: traefik
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
-    command:
-      - --global.checkNewVersion=false
-      - --global.sendAnonymousUsage=false
-      - --api.dashboard=true
-      - --entrypoints.http.address=:80
-      - --entrypoints.https.address=:443
-      - --entrypoints.http.http.redirections.entrypoint.to=https
-      - --entrypoints.http.http.redirections.entrypoint.scheme=https
-      - --providers.docker=true
-      - --providers.docker.endpoint=tcp://socket-proxy:2375
-      - --providers.docker.exposedByDefault=false
-      - --providers.docker.network=t2_proxy
-      - --certificatesresolvers.cloudflare.acme.email=${CF_API_EMAIL}
-      - --certificatesresolvers.cloudflare.acme.storage=/acme/acme.json
-      - --certificatesresolvers.cloudflare.acme.dnschallenge=true
-      - --certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare
     networks:
       t2_proxy:
         ipv4_address: 192.168.90.254
@@ -44,30 +32,14 @@ services:
       - htpasswd
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - ${DOCKER_DIR}/appdata/traefik:/etc/traefik
+      - ${DOCKER_DIR}/appdata/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ${DOCKER_DIR}/appdata/traefik/dynamic-config.yml:/etc/traefik/dynamic-config.yml:ro
       - ${DOCKER_DIR}/appdata/traefik/acme:/acme
     environment:
       TZ: ${TZ}
       CF_DNS_API_TOKEN_FILE: /run/secrets/cf_api_token
     labels:
       traefik.enable: "true"
-
-      traefik.http.routers.traefik.rule: Host(`traefik.${DOMAIN}`)
-      traefik.http.routers.traefik.entrypoints: https
-      traefik.http.routers.traefik.tls: "true"
-      traefik.http.routers.traefik.tls.certresolver: cloudflare
-      traefik.http.routers.traefik.middlewares: chain-authentik@file
-      traefik.http.routers.traefik.service: api@internal
-
-      # Optional Traefik basic-auth middleware.
-      # Script 6 creates ${DOCKER_SECRETS_DIR}/htpasswd.
-      # Leave these commented when Authentik/Authelia/SSO is your main protection.
-      # To enable basic-auth only:
-      # traefik.http.routers.traefik.middlewares: basic-auth@docker
-      # To chain Authentik + basic-auth:
-      # traefik.http.routers.traefik.middlewares: chain-authentik@file,basic-auth@docker
-      # traefik.http.middlewares.basic-auth.basicauth.usersfile: /run/secrets/htpasswd
-      # traefik.http.middlewares.basic-auth.basicauth.removeheader: "true"
 
 networks:
   t2_proxy:

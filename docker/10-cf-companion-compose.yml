@@ -6,7 +6,7 @@
 # - No Cloudflare token is stored in this file.
 # - Script 6 writes the real token to ${CF_API_TOKEN_FILE}.
 # - Docker mounts it as the official companion secret name: cf_token.
-# - Companion receives the official email variable: CF_EMAIL.
+# - API token auth uses only the official cf_token Docker secret; CF_EMAIL is not rendered for token auth.
 #
 # Notes:
 # - Docker label discovery is enabled through socket-proxy.

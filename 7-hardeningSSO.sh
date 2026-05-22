@@ -46,18 +46,6 @@ ADMIN_UI="auto"
 PORTAINER_SELECTED="no"
 DOCKGE_SELECTED="no"
 KOMODO_SELECTED="no"
-DOCKHAND_SELECTED="no"
-ADMIN_UI_DISPLAY_NAME="Unknown"
-ADMIN_UI_SERVICE_NAME=""
-ADMIN_UI_PROJECT_NAME=""
-ADMIN_UI_COMPOSE_FILE=""
-ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE=""
-ADMIN_UI_BOOTSTRAP_PORT=""
-ADMIN_UI_INTERNAL_PORT=""
-DOCKGE_BOOTSTRAP_PORT="${DOCKGE_BOOTSTRAP_PORT:-5001}"
-KOMODO_BOOTSTRAP_PORT="${KOMODO_BOOTSTRAP_PORT:-9120}"
-DOCKHAND_BOOTSTRAP_PORT="${DOCKHAND_BOOTSTRAP_PORT:-3000}"
-PORTAINER_BOOTSTRAP_PORT="${PORTAINER_BOOTSTRAP_PORT:-9443}"
 
 SUDO_CMD=""
 DOCKER_NEEDS_SUDO="no"
@@ -70,13 +58,8 @@ AUTHENTIK_PROVIDER_OK="no"
 AUTHENTIK_APPLICATION_OK="no"
 AUTHENTIK_OUTPOST_ATTACH_OK="no"
 AUTHENTIK_OUTPOST_302_OK="no"
-AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="no"
-ADMIN_UI_DOMAIN_ROUTE_OK="no"
 PORTAINER_OIDC_STATUS="not-applicable"
 KOMODO_OIDC_STATUS="not-applicable"
-DOCKHAND_OIDC_STATUS="not-applicable"
-ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
-UFW_ADMIN_UI_RULE_REMOVED="not-applicable"
 PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
 UFW_PORTAINER_RULE_REMOVED="not-applicable"
 NOPASSWD_HARDENED="no"
@@ -105,11 +88,11 @@ echo -e "${BL}
 ${CL}"
 }
 
-function msg_info() { local text="${1:-}"; echo -ne " ${HOLD} ${YW}${text}...${CL}"; }
-function msg_ok() { local text="${1:-}"; echo -e "${BFR} ${CM} ${GN}${text}${CL}"; }
-function msg_warn() { local text="${1:-}"; echo -e "${BFR} ${WARN} ${YW}${text}${CL}"; }
-function msg_skip() { local text="${1:-}"; echo -e "${BFR} ${WARN} ${YW}${text}${CL}"; }
-function msg_error() { local text="${1:-Unknown error}"; echo -e "${BFR} ${CROSS} ${RD}${text}${CL}"; exit 1; }
+function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
+function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
+function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
 function section() {
     echo ""
@@ -126,8 +109,8 @@ function section_flash_success() {
 }
 
 function detail_line() {
-    local label="${1:-}"
-    local value="${2:-}"
+    local label="$1"
+    local value="$2"
     echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
 }
 
@@ -154,7 +137,6 @@ function tty_println() {
 # --- 4. CLEANUP ---
 function cleanup() {
     local exit_code="$?"
-    stty sane < /dev/tty 2>/dev/null || true
     local file=""
 
     if [ -n "${SUDO_CMD:-}" ] && [ -n "${RUNTIME_LOG_FILE:-}" ] && [ -s "$RUNTIME_LOG_FILE" ]; then
@@ -481,38 +463,18 @@ function timed_text_input() {
 }
 
 function sensitive_line_input() {
-    local prompt="${1:-Sensitive input}"
+    local prompt="$1"
     local answer=""
-    local cols="80"
-    local visible_len="0"
-    local lines_to_clear="1"
-    local i=""
 
-    # Match Script 6 proven behavior:
-    # - read a full pasted/typed line directly from /dev/tty
-    # - do NOT use read -s because some consoles appear blocked while echo is disabled
-    # - do NOT flush here because flushing can consume pasted token characters
-    # - clear the visible prompt/token line immediately after ENTER
     tty_print "${YW}${prompt}: ${CL}"
 
     if [ -r /dev/tty ]; then
-        IFS= read -r answer < /dev/tty || answer=""
+        IFS= read -rs answer < /dev/tty || true
     else
-        IFS= read -r answer || answer=""
+        IFS= read -rs answer || true
     fi
 
-    cols="$(tput cols 2>/dev/null || echo 80)"
-    [[ "$cols" =~ ^[0-9]+$ ]] || cols="80"
-    [ "$cols" -lt 20 ] && cols="80"
-
-    visible_len=$(( ${#prompt} + 2 + ${#answer} ))
-    lines_to_clear=$(( (visible_len + cols - 1) / cols ))
-    [ "$lines_to_clear" -lt 1 ] && lines_to_clear="1"
-
-    for ((i=0; i<lines_to_clear; i++)); do
-        tty_print $'\033[1A\n\033[2K'
-    done
-
+    tty_println ""
     printf '%s' "$answer"
 }
 
@@ -575,7 +537,6 @@ function validate_dependencies() {
         id
         mkdir
         mktemp
-        python3
         rm
         sed
         tee
@@ -676,10 +637,7 @@ function detect_admin_ui() {
 
     msg_info "Detecting selected admin UI"
 
-    if docker_cmd ps -a --format '{{.Names}}' | grep -qx 'dockhand'; then
-        ADMIN_UI="dockhand"
-        DOCKHAND_SELECTED="yes"
-    elif docker_cmd ps -a --format '{{.Names}}' | grep -qx 'dockge'; then
+    if docker_cmd ps -a --format '{{.Names}}' | grep -qx 'dockge'; then
         ADMIN_UI="dockge"
         DOCKGE_SELECTED="yes"
     elif docker_cmd ps -a --format '{{.Names}}' | grep -qx 'komodo-core'; then
@@ -692,76 +650,14 @@ function detect_admin_ui() {
         ADMIN_UI="${ADMIN_UI:-unknown}"
     fi
 
-    configure_admin_ui_bootstrap_context
-    resolve_admin_ui_compose_paths
-
     msg_ok "ADMIN UI DETECTION COMPLETE"
-    detail_line "Selected admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    [ -n "$ADMIN_UI_COMPOSE_FILE" ] && detail_line "Admin UI compose" "$ADMIN_UI_COMPOSE_FILE"
-    [ -n "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" ] && detail_line "Bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+    detail_line "Selected admin UI" "$ADMIN_UI"
 
     if [ "$ADMIN_UI" == "unknown" ]; then
-        msg_warn "No Dockhand, Dockge, Komodo, or Portainer container detected. Admin UI-specific hardening will be skipped."
+        msg_warn "No Dockge, Komodo, or Portainer container detected. Admin UI-specific hardening will be skipped."
     fi
 }
 
-
-# --- 9A. ADMIN UI BOOTSTRAP CONTEXT ---
-# Maps the selected admin UI to its compose file, temporary bootstrap override and service port.
-function configure_admin_ui_bootstrap_context() {
-    case "$ADMIN_UI" in
-        dockge)
-            ADMIN_UI_DISPLAY_NAME="Dockge"
-            ADMIN_UI_SERVICE_NAME="dockge"
-            ADMIN_UI_PROJECT_NAME="dockge"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/dockge/compose.yaml"
-            [ -f "$ADMIN_UI_COMPOSE_FILE" ] || ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/13-dockge-compose.yml"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/13-dockge-bootstrap-override.yml"
-            ADMIN_UI_BOOTSTRAP_PORT="$DOCKGE_BOOTSTRAP_PORT"
-            ADMIN_UI_INTERNAL_PORT="5001"
-            ;;
-        komodo)
-            ADMIN_UI_DISPLAY_NAME="Komodo"
-            ADMIN_UI_SERVICE_NAME="komodo-core"
-            ADMIN_UI_PROJECT_NAME="komodo"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/komodo/compose.yaml"
-            [ -f "$ADMIN_UI_COMPOSE_FILE" ] || ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/14-komodo-compose.yml"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/14-komodo-bootstrap-override.yml"
-            ADMIN_UI_BOOTSTRAP_PORT="$KOMODO_BOOTSTRAP_PORT"
-            ADMIN_UI_INTERNAL_PORT="9120"
-            ;;
-        dockhand)
-            ADMIN_UI_DISPLAY_NAME="Dockhand"
-            ADMIN_UI_SERVICE_NAME="dockhand"
-            ADMIN_UI_PROJECT_NAME="dockhand"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/dockhand/compose.yaml"
-            [ -f "$ADMIN_UI_COMPOSE_FILE" ] || ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/15-dockhand-compose.yml"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/15-dockhand-bootstrap-override.yml"
-            ADMIN_UI_BOOTSTRAP_PORT="$DOCKHAND_BOOTSTRAP_PORT"
-            ADMIN_UI_INTERNAL_PORT="3000"
-            ;;
-        portainer|portainer-ce)
-            ADMIN_UI="portainer"
-            ADMIN_UI_DISPLAY_NAME="Portainer"
-            ADMIN_UI_SERVICE_NAME="portainer"
-            ADMIN_UI_PROJECT_NAME="portainer"
-            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/portainer/compose.yaml"
-            [ -f "$ADMIN_UI_COMPOSE_FILE" ] || ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/01-portainer-compose.yml"
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/01-portainer-bootstrap-override.yml"
-            ADMIN_UI_BOOTSTRAP_PORT="$PORTAINER_BOOTSTRAP_PORT"
-            ADMIN_UI_INTERNAL_PORT="9443"
-            ;;
-        *)
-            ADMIN_UI_DISPLAY_NAME="Unknown"
-            ADMIN_UI_SERVICE_NAME=""
-            ADMIN_UI_PROJECT_NAME=""
-            ADMIN_UI_COMPOSE_FILE=""
-            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE=""
-            ADMIN_UI_BOOTSTRAP_PORT=""
-            ADMIN_UI_INTERNAL_PORT=""
-            ;;
-    esac
-}
 # =========================================================
 #  PREFLIGHT
 # =========================================================
@@ -877,14 +773,14 @@ function collect_authentik_api_token() {
     fi
 
     if [ -n "${AUTHENTIK_BOOTSTRAP_TOKEN:-}" ]; then
-        msg_warn "AUTHENTIK_BOOTSTRAP_TOKEN FOUND, BUT IT IS NOT USED AS AN API BEARER TOKEN"
-        echo -e "${YW}Bootstrap token is for first-time Authentik setup only. Script 7 needs a real Authentik API token.${CL}"
-        echo ""
+        AUTHENTIK_API_TOKEN="$AUTHENTIK_BOOTSTRAP_TOKEN"
+        AUTHENTIK_TOKEN_SOURCE="AUTHENTIK_BOOTSTRAP_TOKEN"
+        msg_ok "AUTHENTIK BOOTSTRAP TOKEN FOUND IN .ENV"
+        return 0
     fi
 
-    echo -e "${YW}To automate Authentik app/provider/outpost setup, paste an Authentik API token with admin permission.${CL}"
+    echo -e "${YW}To automate Authentik app/provider/outpost setup, create or provide an Authentik API token with admin permission.${CL}"
     echo -e "${YW}Leave blank to skip API automation and keep verification/manual guidance only.${CL}"
-    echo -e "${YW}AUTHENTIK_BOOTSTRAP_TOKEN is not an API token and will not be used here.${CL}"
     echo ""
 
     disable_logging
@@ -964,17 +860,10 @@ function verify_authentik_api() {
 
 # --- 14. AUTHENTIK FORWARD AUTH AUTOMATION ---
 function authentik_get_flow_pk() {
-    local slug="${1:-}"
+    local slug="$1"
     local pk=""
 
-    [ -z "$slug" ] && { printf ''; return 0; }
-
-    pk="$(ak_api GET "/flows/instances/?search=${slug}" | python3 -c 'import json,sys; slug=sys.argv[1]; data=json.load(sys.stdin); items=data.get("results", data if isinstance(data, list) else []); print(next((i.get("pk", "") for i in items if i.get("slug") == slug), ""))' "$slug" 2>/dev/null || true)"
-
-    if [ -z "$pk" ]; then
-        pk="$(ak_api GET "/flows/instances/?slug=${slug}" | json_get_first_pk || true)"
-    fi
-
+    pk="$(ak_api GET "/flows/instances/?slug=${slug}" | json_get_first_pk || true)"
     printf '%s' "$pk"
 }
 
@@ -1151,177 +1040,50 @@ JSON
     fi
 }
 
-
-# --- 14A. AUTHENTIK OUTPOST REFRESH ---
-function refresh_authentik_after_api_changes() {
-    section "AUTHENTIK OUTPOST REFRESH"
-
-    if [ "$AUTHENTIK_OUTPOST_ATTACH_OK" != "yes" ]; then
-        msg_skip "AUTHENTIK API DID NOT ATTACH PROVIDER; REFRESH SKIPPED"
-        return 0
-    fi
-
-    echo -e "${YW}Refreshing Authentik after API provider/outpost changes so the embedded outpost reloads the new configuration.${CL}"
-
-    msg_info "Restarting Authentik server and worker"
-    docker_cmd restart authentik-server authentik-worker >/dev/null 2>&1 || true
-    msg_ok "AUTHENTIK CONTAINERS RESTART REQUESTED"
-
-    msg_info "Waiting for Authentik server health"
-    local i=""
-    local healthy="no"
-    for i in $(seq 1 60); do
-        if docker_cmd inspect -f '{{.State.Health.Status}}' authentik-server 2>/dev/null | grep -qx 'healthy'; then
-            healthy="yes"
-            break
-        fi
-        sleep 2
-    done
-
-    if [ "$healthy" == "yes" ]; then
-        msg_ok "AUTHENTIK SERVER HEALTHY AFTER REFRESH"
-    else
-        msg_warn "AUTHENTIK SERVER DID NOT REPORT HEALTHY YET; CONTINUING WITH SAFE CHECKS"
-    fi
-
-    msg_info "Waiting for embedded outpost websocket reconnect"
-    local ws="no"
-    for i in $(seq 1 45); do
-        if docker_cmd logs authentik-server --tail=120 2>/dev/null | grep -qi 'Successfully connected websocket'; then
-            ws="yes"
-            break
-        fi
-        sleep 2
-    done
-
-    if [ "$ws" == "yes" ]; then
-        msg_ok "AUTHENTIK EMBEDDED OUTPOST WEBSOCKET CONNECTED"
-    else
-        msg_warn "AUTHENTIK OUTPOST WEBSOCKET RECONNECT NOT CONFIRMED YET"
-    fi
-
-    msg_info "Restarting Traefik to refresh routes"
-    docker_cmd restart traefik >/dev/null 2>&1 || true
-    sleep 5
-    msg_ok "TRAEFIK REFRESHED"
-}
-
 # =========================================================
 #  AUTHENTIK OUTPOST VERIFICATION
 # =========================================================
 
 # --- 15. TRUE 302 TEST ---
-function selected_admin_host() {
-    if [ "$PORTAINER_SELECTED" == "yes" ]; then
-        printf 'portainer.%s' "$DOMAIN"
-    elif [ "$DOCKGE_SELECTED" == "yes" ]; then
-        printf 'dockge.%s' "$DOMAIN"
-    elif [ "$KOMODO_SELECTED" == "yes" ]; then
-        printf 'komodo.%s' "$DOMAIN"
-    elif [ "$DOCKHAND_SELECTED" == "yes" ]; then
-        printf 'dockhand.%s' "$DOMAIN"
-    else
-        printf 'traefik.%s' "$DOMAIN"
-    fi
-}
-
 function verify_authentik_outpost_302() {
     section "AUTHENTIK OUTPOST VERIFICATION"
 
     local test_host=""
-    local start_url=""
-    local start_code=""
-    local forward_code=""
-    local forward_probe_cmd=""
+    local test_url=""
+    local http_code=""
 
-    test_host="$(selected_admin_host)"
-    start_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
+    if [ "$PORTAINER_SELECTED" == "yes" ]; then
+        test_host="portainer.${DOMAIN}"
+    elif [ "$DOCKGE_SELECTED" == "yes" ]; then
+        test_host="dockge.${DOMAIN}"
+    elif [ "$KOMODO_SELECTED" == "yes" ]; then
+        test_host="komodo.${DOMAIN}"
+    else
+        test_host="traefik.${DOMAIN}"
+    fi
 
-    msg_info "Checking outpost start route"
-    start_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$start_url" || true)"
+    test_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
 
-    if [ "$start_code" == "302" ]; then
+    msg_info "Testing Authentik outpost route without following redirects"
+    http_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$test_url" || true)"
+
+    if [ "$http_code" == "302" ]; then
         AUTHENTIK_OUTPOST_302_OK="yes"
-        msg_ok "AUTHENTIK START ROUTE READY"
+        msg_ok "AUTHENTIK OUTPOST ROUTE RETURNED TRUE HTTP 302"
     else
         AUTHENTIK_OUTPOST_302_OK="no"
-        msg_warn "AUTHENTIK START ROUTE NOT READY: HTTP ${start_code:-none}"
+        msg_warn "Authentik outpost test returned HTTP ${http_code:-none}; expected 302"
+        echo ""
+        echo -e "${YW}Manual Authentik check required:${CL}"
+        echo -e "${YW}Applications → Outposts → authentik Embedded Outpost → Edit${CL}"
+        echo -e "${YW}Ensure Traefik Forward Auth is in Selected Applications, then Update.${CL}"
+        echo ""
+        echo -e "${YW}Retest:${CL}"
+        echo -e "${GN}curl -Ik \"${test_url}\"${CL}"
     fi
 
-    msg_info "Checking internal forward-auth endpoint"
-    forward_probe_cmd="wget -S -O- --header='X-Forwarded-Proto: https' --header='X-Forwarded-Host: ${test_host}' --header='X-Forwarded-Uri: /' --header='X-Forwarded-Method: GET' http://authentik-server:9000/outpost.goauthentik.io/auth/traefik 2>&1 | awk '/HTTP\\// {code=\$2} END {print code}'"
-    forward_code="$(docker_cmd exec traefik sh -c "$forward_probe_cmd" 2>/dev/null | tail -n1 | tr -dc '0-9' || true)"
-
-    case "$forward_code" in
-        200|202|204|302|401|403)
-            AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="yes"
-            msg_ok "AUTHENTIK FORWARD-AUTH ENDPOINT READY: HTTP ${forward_code}"
-            ;;
-        *)
-            AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK="no"
-            msg_warn "AUTHENTIK FORWARD-AUTH ENDPOINT NOT READY: HTTP ${forward_code:-none}"
-            ;;
-    esac
-
-    detail_line "Start route HTTP" "${start_code:-none}"
-    detail_line "Forward-auth HTTP" "${forward_code:-none}"
-
-    if [ "$AUTHENTIK_OUTPOST_302_OK" != "yes" ] || [ "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK" != "yes" ]; then
-        echo -e "${YW}Outpost checks are informational. The final lockout guard uses the selected admin UI domain route before closing direct access.${CL}"
-    fi
-}
-
-# --- 15A. ADMIN UI DOMAIN ROUTE LOCKOUT GUARD ---
-function verify_admin_ui_domain_route() {
-    section "ADMIN UI DOMAIN ROUTE CHECK"
-
-    local test_host=""
-    local route_url=""
-    local headers=""
-    local http_code=""
-    local location=""
-
-    if [ -z "$ADMIN_UI_SERVICE_NAME" ]; then
-        ADMIN_UI_DOMAIN_ROUTE_OK="not-applicable"
-        msg_skip "NO SUPPORTED ADMIN UI SELECTED; DOMAIN ROUTE CHECK SKIPPED"
-        return 0
-    fi
-
-    test_host="$(selected_admin_host)"
-    route_url="https://${test_host}/"
-
-    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} protected domain route"
-    headers="$(curl -ksS -I "$route_url" 2>/dev/null || true)"
-    http_code="$(printf '%s\n' "$headers" | awk 'toupper($0) ~ /^HTTP\// {code=$2} END {print code}')"
-    location="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^location:/ {sub(/^[Ll]ocation:[[:space:]]*/, ""); print; exit}' | tr -d '\r')"
-
-    case "$http_code" in
-        301|302|303|307|308)
-            if printf '%s' "$location" | grep -qi "auth.${DOMAIN}\|${AUTHENTIK_HOST#https://}"; then
-                ADMIN_UI_DOMAIN_ROUTE_OK="yes"
-                msg_ok "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ROUTE REDIRECTS TO AUTHENTIK"
-            else
-                ADMIN_UI_DOMAIN_ROUTE_OK="redirect-other"
-                msg_warn "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ROUTE REDIRECTS ELSEWHERE"
-            fi
-            ;;
-        200|401|403)
-            ADMIN_UI_DOMAIN_ROUTE_OK="yes"
-            msg_ok "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ROUTE IS REACHABLE WITH SAFE HTTP ${http_code}"
-            ;;
-        *)
-            ADMIN_UI_DOMAIN_ROUTE_OK="no"
-            msg_warn "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ROUTE NOT READY: HTTP ${http_code:-none}"
-            ;;
-    esac
-
-    detail_line "Admin UI route" "$route_url"
+    detail_line "Outpost test URL" "$test_url"
     detail_line "HTTP result" "${http_code:-none}"
-    [ -n "$location" ] && detail_line "Redirect location" "$location"
-
-    if [ "$ADMIN_UI_DOMAIN_ROUTE_OK" != "yes" ]; then
-        echo -e "${YW}Direct bootstrap access will stay open to prevent lockout.${CL}"
-    fi
 }
 
 # =========================================================
@@ -1360,109 +1122,88 @@ function configure_admin_ui_sso() {
         return 0
     fi
 
-    if [ "$DOCKHAND_SELECTED" == "yes" ]; then
-        DOCKHAND_OIDC_STATUS="manual-oidc-required"
-        echo -e "${YW}Dockhand supports app-level OIDC/SSO and should be paired with Authentik for clean session handling.${CL}"
-        echo -e "${YW}This script closes bootstrap exposure now; final Dockhand OIDC automation can be added after its env/API schema is locked.${CL}"
-        msg_ok "DOCKHAND OIDC REQUIREMENT RECORDED"
-        return 0
-    fi
-
     msg_skip "NO SUPPORTED ADMIN UI DETECTED; SSO GUIDANCE SKIPPED"
 }
 
-# --- 17. ADMIN UI BOOTSTRAP PORT CLOSURE ---
-function close_admin_ui_bootstrap_exposure() {
-    section "ADMIN UI BOOTSTRAP CLOSURE"
+# --- 17. PORTAINER BOOTSTRAP PORT CLOSURE ---
+function close_portainer_bootstrap_exposure() {
+    section "PORTAINER BOOTSTRAP CLOSURE"
 
+    if [ "$PORTAINER_SELECTED" != "yes" ]; then
+        PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
+        msg_skip "PORTAINER NOT SELECTED; BOOTSTRAP CLOSURE SKIPPED"
+        return 0
+    fi
+
+    local yml_01="${COMPOSE_DIR}/01-portainer-compose.yml"
+    local yml_override="${COMPOSE_DIR}/01-portainer-bootstrap-override.yml"
     local close_yn=""
 
-    if [ "$ADMIN_UI_DOMAIN_ROUTE_OK" != "yes" ]; then
-        ADMIN_UI_BOOTSTRAP_CLOSED="skipped-admin-route-not-ready"
-        PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
-        msg_warn "${ADMIN_UI_DISPLAY_NAME^^} DOMAIN ACCESS IS NOT VERIFIED; BOOTSTRAP PORT WILL STAY OPEN"
-        detail_line "Admin UI route" "$ADMIN_UI_DOMAIN_ROUTE_OK"
-        detail_line "Start route" "$AUTHENTIK_OUTPOST_302_OK"
-        detail_line "Forward-auth endpoint" "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK"
-        echo -e "${YW}This lockout guard applies to Dockge, Portainer, Komodo, and Dockhand.${CL}"
-        echo -e "${YW}Fix/verify Authentik access first, then rerun Script 7.${CL}"
+    if [ ! -f "$yml_01" ]; then
+        PORTAINER_BOOTSTRAP_CLOSED="missing-compose"
+        msg_warn "Portainer compose file not found: ${yml_01}"
         return 0
     fi
 
-    if [ -z "$ADMIN_UI_SERVICE_NAME" ] || [ -z "$ADMIN_UI_COMPOSE_FILE" ]; then
-        ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
-        msg_skip "NO SUPPORTED ADMIN UI SELECTED; BOOTSTRAP CLOSURE SKIPPED"
+    if [ ! -f "$yml_override" ]; then
+        PORTAINER_BOOTSTRAP_CLOSED="already-no-override"
+        msg_ok "NO PORTAINER BOOTSTRAP OVERRIDE FILE FOUND"
         return 0
     fi
 
-    if [ ! -f "$ADMIN_UI_COMPOSE_FILE" ]; then
-        ADMIN_UI_BOOTSTRAP_CLOSED="missing-compose"
-        msg_warn "${ADMIN_UI_DISPLAY_NAME} compose file not found: ${ADMIN_UI_COMPOSE_FILE}"
-        return 0
-    fi
-
-    echo -e "${YW}This redeploys ${ADMIN_UI_DISPLAY_NAME} without its temporary bootstrap override so direct port ${ADMIN_UI_BOOTSTRAP_PORT} closes.${CL}"
-    echo -e "${YW}Traefik/AuthentiK domain access remains available after DNS, Traefik and Authentik are healthy.${CL}"
+    echo -e "${YW}This redeploys Portainer without the bootstrap override so direct 9443 exposure closes.${CL}"
+    echo -e "${YW}Traefik/AuthentiK domain access remains available.${CL}"
     echo ""
 
-    close_yn="$(timed_yes_no "Close temporary ${ADMIN_UI_DISPLAY_NAME} bootstrap port now?" "y")"
+    close_yn="$(timed_yes_no "Close temporary Portainer bootstrap port now?" "y")"
 
     if [[ "$close_yn" =~ ^[Nn] ]]; then
-        ADMIN_UI_BOOTSTRAP_CLOSED="user-skipped"
-        PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
-        msg_skip "${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP PORT CLOSURE SKIPPED"
+        PORTAINER_BOOTSTRAP_CLOSED="user-skipped"
+        msg_skip "PORTAINER BOOTSTRAP PORT CLOSURE SKIPPED"
         return 0
     fi
 
-    msg_info "Redeploying ${ADMIN_UI_DISPLAY_NAME} without bootstrap override"
-    docker_cmd compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" up -d >/dev/null
-    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} REDEPLOYED WITHOUT BOOTSTRAP OVERRIDE"
+    msg_info "Redeploying Portainer without bootstrap override"
+    docker_cmd compose --env-file "$ENV_FILE" -p portainer -f "$yml_01" up -d >/dev/null
+    msg_ok "PORTAINER REDEPLOYED WITHOUT BOOTSTRAP OVERRIDE"
 
-    msg_info "Checking direct ${ADMIN_UI_DISPLAY_NAME} bootstrap port mapping"
-    if docker_cmd port "$ADMIN_UI_SERVICE_NAME" "${ADMIN_UI_INTERNAL_PORT}/tcp" >/dev/null 2>&1; then
-        ADMIN_UI_BOOTSTRAP_CLOSED="not-confirmed"
-        msg_warn "${ADMIN_UI_DISPLAY_NAME} still appears to have direct ${ADMIN_UI_BOOTSTRAP_PORT} mapping. Check compose ports."
+    msg_info "Checking direct Portainer 9443 mapping"
+    if docker_cmd port portainer 9443/tcp >/dev/null 2>&1; then
+        PORTAINER_BOOTSTRAP_CLOSED="not-confirmed"
+        msg_warn "Portainer still appears to have direct 9443 mapping. Check compose labels/ports."
     else
-        ADMIN_UI_BOOTSTRAP_CLOSED="yes"
-        msg_ok "${ADMIN_UI_DISPLAY_NAME^^} DIRECT BOOTSTRAP PORT CLOSED"
+        PORTAINER_BOOTSTRAP_CLOSED="yes"
+        msg_ok "PORTAINER DIRECT BOOTSTRAP PORT CLOSED"
     fi
-
-    PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
 }
 
-
 # --- 18. UFW CLEANUP ---
-function remove_admin_ui_ufw_rule() {
+function remove_portainer_ufw_rule() {
     section "UFW BOOTSTRAP RULE CLEANUP"
 
-    if [ -z "$ADMIN_UI_BOOTSTRAP_PORT" ]; then
-        UFW_ADMIN_UI_RULE_REMOVED="not-applicable"
-        UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
-        msg_skip "NO SUPPORTED ADMIN UI SELECTED; UFW CLEANUP SKIPPED"
+    if [ "$PORTAINER_SELECTED" != "yes" ]; then
+        UFW_PORTAINER_RULE_REMOVED="not-applicable"
+        msg_skip "PORTAINER NOT SELECTED; UFW CLEANUP SKIPPED"
         return 0
     fi
 
     if ! command -v ufw >/dev/null 2>&1; then
-        UFW_ADMIN_UI_RULE_REMOVED="ufw-not-found"
-        UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
+        UFW_PORTAINER_RULE_REMOVED="ufw-not-found"
         msg_skip "UFW NOT FOUND; RULE CLEANUP SKIPPED"
         return 0
     fi
 
     if ! ufw status 2>/dev/null | grep -qi "Status: active" && ! { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" ufw status 2>/dev/null | grep -qi "Status: active"; }; then
-        UFW_ADMIN_UI_RULE_REMOVED="ufw-not-active"
-        UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
+        UFW_PORTAINER_RULE_REMOVED="ufw-not-active"
         msg_skip "UFW NOT ACTIVE; RULE CLEANUP SKIPPED"
         return 0
     fi
 
-    msg_info "Removing temporary ${ADMIN_UI_DISPLAY_NAME} ${ADMIN_UI_BOOTSTRAP_PORT}/tcp UFW rule"
-    run_optional ufw delete allow "${ADMIN_UI_BOOTSTRAP_PORT}/tcp"
-    UFW_ADMIN_UI_RULE_REMOVED="attempted"
-    UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
-    msg_ok "TEMPORARY ${ADMIN_UI_DISPLAY_NAME^^} UFW RULE REMOVAL ATTEMPTED"
+    msg_info "Removing temporary Portainer 9443 UFW rule"
+    run_optional ufw delete allow 9443/tcp
+    UFW_PORTAINER_RULE_REMOVED="attempted"
+    msg_ok "TEMPORARY PORTAINER UFW RULE REMOVAL ATTEMPTED"
 }
-
 
 
 # =========================================================
@@ -1470,20 +1211,19 @@ function remove_admin_ui_ufw_rule() {
 # =========================================================
 
 # --- 19. POSTIZ HEALTH VERIFICATION ---
-# Confirms the real Postiz stack is healthy before stopping the temporary Postiz Temporal Guard stack.
-# The guard exists only to remove Temporal default Text search attributes before Postiz starts.
+# Confirms the real Postiz stack is healthy before stopping the temporary yml 07 guard.
+# The guard exists only to remove Temporal's default Text search attributes before Postiz starts.
 function verify_postiz_health() {
     section "POSTIZ HEALTH CHECK"
 
-    local postiz_running="no"
-    local temporal_running="no"
-    local backend_port_found=""
+    local api_url="https://postiz.${DOMAIN}/api/user/self"
     local auth_url="https://postiz.${DOMAIN}/auth"
+    local api_code=""
     local auth_code=""
+    local backend_port_found=""
 
     msg_info "Checking Temporal container"
     if docker_cmd ps --format '{{.Names}}' | grep -qx 'temporal'; then
-        temporal_running="yes"
         msg_ok "TEMPORAL RUNNING"
     else
         POSTIZ_HEALTH_OK="no"
@@ -1493,7 +1233,6 @@ function verify_postiz_health() {
 
     msg_info "Checking Postiz container"
     if docker_cmd ps --format '{{.Names}}' | grep -qx 'postiz'; then
-        postiz_running="yes"
         msg_ok "POSTIZ RUNNING"
     else
         POSTIZ_HEALTH_OK="no"
@@ -1501,52 +1240,68 @@ function verify_postiz_health() {
         return 0
     fi
 
-    msg_info "Checking Postiz backend port 5000"
-    backend_port_found="$(docker_cmd exec postiz sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i ':1388' || true" 2>/dev/null || true)"
+    msg_info "Checking Postiz backend port 3000"
+    backend_port_found="$(docker_cmd exec postiz sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i ':0BB8' || true" 2>/dev/null || true)"
 
     if [ -n "$backend_port_found" ]; then
         POSTIZ_BACKEND_PORT_OK="yes"
-        msg_ok "POSTIZ BACKEND PORT 5000 IS LISTENING"
+        msg_ok "POSTIZ BACKEND PORT 3000 IS LISTENING"
     else
         POSTIZ_BACKEND_PORT_OK="no"
         POSTIZ_HEALTH_OK="no"
-        msg_warn "POSTIZ BACKEND PORT 5000 IS NOT LISTENING; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
+        msg_warn "POSTIZ BACKEND PORT 3000 IS NOT LISTENING; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
         return 0
     fi
 
-    msg_info "Checking Postiz web route"
-    auth_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$auth_url" || true)"
+    msg_info "Checking Postiz API route"
+    api_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$api_url" || true)"
 
-    case "$auth_code" in
+    if [ "$api_code" == "502" ]; then
+        POSTIZ_WEB_ROUTE_OK="no"
+        POSTIZ_HEALTH_OK="no"
+        msg_warn "POSTIZ API RETURNED 502; TEMPORAL GUARD CLEANUP WILL BE SKIPPED"
+        return 0
+    fi
+
+    case "$api_code" in
         200|301|302|307|308|401|403)
             POSTIZ_WEB_ROUTE_OK="yes"
-            POSTIZ_HEALTH_OK="yes"
-            msg_ok "POSTIZ WEB ROUTE RESPONDED WITH HTTP ${auth_code}"
             ;;
         *)
-            POSTIZ_WEB_ROUTE_OK="no"
+            POSTIZ_WEB_ROUTE_OK="warn-${api_code:-none}"
+            msg_warn "POSTIZ API RETURNED HTTP ${api_code:-none}; GUARD CLEANUP WILL BE SKIPPED UNTIL VERIFIED"
             POSTIZ_HEALTH_OK="no"
-            msg_warn "POSTIZ WEB ROUTE RETURNED HTTP ${auth_code:-none}; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
+            return 0
+            ;;
+    esac
+
+    auth_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$auth_url" || true)"
+    case "$auth_code" in
+        200|301|302|307|308|401|403)
+            POSTIZ_HEALTH_OK="yes"
+            msg_ok "POSTIZ API AND WEB ROUTES ARE HEALTHY"
+            ;;
+        *)
+            POSTIZ_HEALTH_OK="no"
+            msg_warn "POSTIZ AUTH PAGE RETURNED HTTP ${auth_code:-none}; GUARD CLEANUP WILL BE SKIPPED"
             return 0
             ;;
     esac
 
     detail_line "Postiz health" "$POSTIZ_HEALTH_OK"
-    detail_line "Backend port 5000" "$POSTIZ_BACKEND_PORT_OK"
-    detail_line "Web route" "${auth_url} -> ${auth_code}"
+    detail_line "Backend port 3000" "$POSTIZ_BACKEND_PORT_OK"
+    detail_line "API route" "${api_url} -> ${api_code}"
+    detail_line "Auth route" "${auth_url} -> ${auth_code}"
 }
 
 # --- 20. POSTIZ TEMPORAL GUARD STOPPER ---
-# Stops the temporary Postiz Temporal Guard after Postiz is confirmed healthy.
+# Stops the temporary yml 07 guard after Postiz is confirmed healthy.
 # It does not delete Portainer stack definitions or compose files.
 function stop_postiz_temporal_guard_if_safe() {
     section "POSTIZ TEMPORAL GUARD CLEANUP"
 
     local guard_container="postiz-temporal-guard"
-    local guard_project="postiz-temporal-guard"
-    local guard_stack_dir="${COMPOSE_DIR}/postiz-temporal-guard"
-    local cleanup_yn=""
-    local image_in_use=""
+    local stop_yn=""
 
     if ! docker_cmd ps -a --format '{{.Names}}' | grep -qx "$guard_container"; then
         POSTIZ_TEMPORAL_GUARD_STATUS="not-found"
@@ -1559,58 +1314,31 @@ function stop_postiz_temporal_guard_if_safe() {
 
     if [ "$POSTIZ_HEALTH_OK" != "yes" ]; then
         POSTIZ_TEMPORAL_GUARD_STOPPED="kept-postiz-not-healthy"
-        msg_warn "POSTIZ IS NOT CONFIRMED HEALTHY; TEMPORAL GUARD ARTIFACTS WILL BE KEPT"
+        msg_warn "POSTIZ IS NOT CONFIRMED HEALTHY; TEMPORAL GUARD WILL BE LEFT RUNNING"
         return 0
     fi
 
-    echo -e "${YW}The Postiz Temporal Guard was a temporary one-shot deployment helper.${CL}"
-    echo -e "${YW}Postiz is healthy, so Script 7 can remove guard leftovers safely.${CL}"
-    echo -e "${YW}This removes the stopped/running guard container and temporary Dockge stack folder if present.${CL}"
-    echo -e "${YW}It does not touch Temporal, Postiz, PostgreSQL data, Redis data, or running application volumes.${CL}"
+    echo -e "${YW}The temporary yml 07 Postiz Temporal guard is no longer needed because Postiz is healthy.${CL}"
+    echo -e "${YW}This will only stop the guard container. It will not delete Portainer stack data or GitHub backup.${CL}"
     echo ""
 
-    cleanup_yn="$(timed_yes_no "Clean Postiz Temporal Guard temporary artifacts now?" "y")"
+    stop_yn="$(timed_yes_no "Stop temporary Postiz Temporal guard now?" "y")"
 
-    if [[ "$cleanup_yn" =~ ^[Nn] ]]; then
+    if [[ "$stop_yn" =~ ^[Nn] ]]; then
         POSTIZ_TEMPORAL_GUARD_STOPPED="user-skipped"
-        msg_skip "POSTIZ TEMPORAL GUARD CLEANUP SKIPPED"
+        msg_skip "POSTIZ TEMPORAL GUARD STOP SKIPPED"
         return 0
     fi
 
-    msg_info "Removing Postiz Temporal Guard container"
-    docker_cmd rm -f "$guard_container" >/dev/null 2>&1 || true
+    msg_info "Stopping Postiz Temporal guard"
+    docker_cmd stop "$guard_container" >/dev/null 2>&1 || true
 
-    if docker_cmd ps -a --format '{{.Names}}' | grep -qx "$guard_container"; then
-        POSTIZ_TEMPORAL_GUARD_STOPPED="container-remove-failed"
-        msg_warn "POSTIZ TEMPORAL GUARD CONTAINER STILL EXISTS"
+    if docker_cmd ps --format '{{.Names}}' | grep -qx "$guard_container"; then
+        POSTIZ_TEMPORAL_GUARD_STOPPED="failed"
+        msg_warn "POSTIZ TEMPORAL GUARD STILL APPEARS RUNNING"
     else
         POSTIZ_TEMPORAL_GUARD_STOPPED="yes"
-        msg_ok "POSTIZ TEMPORAL GUARD CONTAINER REMOVED"
-    fi
-
-    msg_info "Removing Postiz Temporal Guard compose project if present"
-    docker_cmd compose -p "$guard_project" down --remove-orphans >/dev/null 2>&1 || true
-    msg_ok "POSTIZ TEMPORAL GUARD COMPOSE PROJECT CLEANED"
-
-    if [ -d "$guard_stack_dir" ]; then
-        msg_info "Removing temporary Postiz Temporal Guard stack folder"
-        rm -rf "$guard_stack_dir" 2>/dev/null || run_optional rm -rf "$guard_stack_dir"
-        if [ -d "$guard_stack_dir" ]; then
-            msg_warn "POSTIZ TEMPORAL GUARD STACK FOLDER COULD NOT BE REMOVED: ${guard_stack_dir}"
-        else
-            msg_ok "POSTIZ TEMPORAL GUARD STACK FOLDER REMOVED"
-        fi
-    else
-        msg_skip "NO POSTIZ TEMPORAL GUARD STACK FOLDER FOUND"
-    fi
-
-    msg_info "Checking if temporalio/admin-tools image can be removed"
-    image_in_use="$(docker_cmd ps -a --format '{{.Image}}' | grep -x 'temporalio/admin-tools:latest' || true)"
-    if [ -z "$image_in_use" ]; then
-        docker_cmd image rm temporalio/admin-tools:latest >/dev/null 2>&1 || true
-        msg_ok "TEMPORARY TEMPORAL ADMIN TOOLS IMAGE REMOVAL ATTEMPTED"
-    else
-        msg_skip "TEMPORAL ADMIN TOOLS IMAGE STILL IN USE; IMAGE KEPT"
+        msg_ok "POSTIZ TEMPORAL GUARD STOPPED"
     fi
 }
 
@@ -1745,13 +1473,10 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
-Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
-Admin UI domain route OK: $ADMIN_UI_DOMAIN_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
-Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
-Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
-UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
+Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
+UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 Postiz health OK: $POSTIZ_HEALTH_OK
 Postiz backend port OK: $POSTIZ_BACKEND_PORT_OK
@@ -1779,13 +1504,10 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
-Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
-Admin UI domain route OK: $ADMIN_UI_DOMAIN_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
-Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
-Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
-UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
+Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
+UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 Postiz health OK: $POSTIZ_HEALTH_OK
 Postiz backend port OK: $POSTIZ_BACKEND_PORT_OK
@@ -1829,13 +1551,10 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
-Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
-Admin UI domain route OK: $ADMIN_UI_DOMAIN_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
-Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
-Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
-UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
+Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
+UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 Verify log: $VERIFY_LOG
@@ -1855,13 +1574,10 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
-Authentik forward-auth endpoint OK: $AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK
-Admin UI domain route OK: $ADMIN_UI_DOMAIN_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
-Dockhand OIDC status: $DOCKHAND_OIDC_STATUS
-Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
-UFW Admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
+Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
+UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 Verify log: $VERIFY_LOG
@@ -1876,7 +1592,7 @@ function show_final_summary() {
     section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
     detail_line "DOMAIN" "$DOMAIN"
-    detail_line "ADMIN UI" "$ADMIN_UI_DISPLAY_NAME"
+    detail_line "ADMIN UI" "$ADMIN_UI"
     detail_line "TRAEFIK CONFIG OK" "$TRAEFIK_CONFIG_OK"
     detail_line "AUTHENTIK CONTAINERS OK" "$AUTHENTIK_CONTAINERS_OK"
     detail_line "AUTHENTIK API OK" "$AUTHENTIK_API_OK"
@@ -1884,16 +1600,13 @@ function show_final_summary() {
     detail_line "AUTHENTIK APPLICATION" "$AUTHENTIK_APPLICATION_OK"
     detail_line "AUTHENTIK OUTPOST ATTACH" "$AUTHENTIK_OUTPOST_ATTACH_OK"
     detail_line "AUTHENTIK OUTPOST 302" "$AUTHENTIK_OUTPOST_302_OK"
-    detail_line "AUTHENTIK FORWARD-AUTH" "$AUTHENTIK_FORWARD_AUTH_ENDPOINT_OK"
-    detail_line "ADMIN UI DOMAIN ROUTE" "$ADMIN_UI_DOMAIN_ROUTE_OK"
     detail_line "PORTAINER OIDC" "$PORTAINER_OIDC_STATUS"
     detail_line "KOMODO OIDC" "$KOMODO_OIDC_STATUS"
-    detail_line "DOCKHAND OIDC" "$DOCKHAND_OIDC_STATUS"
-    detail_line "ADMIN UI BOOTSTRAP CLOSED" "$ADMIN_UI_BOOTSTRAP_CLOSED"
-    detail_line "UFW ADMIN UI RULE REMOVED" "$UFW_ADMIN_UI_RULE_REMOVED"
+    detail_line "PORTAINER BOOTSTRAP CLOSED" "$PORTAINER_BOOTSTRAP_CLOSED"
+    detail_line "UFW PORTAINER RULE REMOVED" "$UFW_PORTAINER_RULE_REMOVED"
     detail_line "NOPASSWD HARDENED" "$NOPASSWD_HARDENED"
     detail_line "POSTIZ HEALTH" "$POSTIZ_HEALTH_OK"
-    detail_line "POSTIZ BACKEND 5000" "$POSTIZ_BACKEND_PORT_OK"
+    detail_line "POSTIZ BACKEND 3000" "$POSTIZ_BACKEND_PORT_OK"
     detail_line "POSTIZ WEB ROUTE" "$POSTIZ_WEB_ROUTE_OK"
     detail_line "POSTIZ TEMPORAL GUARD" "$POSTIZ_TEMPORAL_GUARD_STOPPED"
     detail_line "DOCKER-USER REVIEW" "$DOCKER_USER_RULES_REVIEWED"
@@ -1902,10 +1615,10 @@ function show_final_summary() {
     echo ""
     echo -e "${BL}IMPORTANT:${CL}"
 
-    if [ "$ADMIN_UI_DOMAIN_ROUTE_OK" == "yes" ]; then
-        echo -e "${GN}${ADMIN_UI_DISPLAY_NAME} domain access is verified, so bootstrap closure is safe when selected.${CL}"
+    if [ "$AUTHENTIK_OUTPOST_302_OK" != "yes" ]; then
+        echo -e "${YW}Authentik outpost verification did not pass. Attach the Traefik Forward Auth app/provider to the existing authentik Embedded Outpost, then rerun Script 7.${CL}"
     else
-        echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} domain access is not verified. Bootstrap access should stay open to prevent lockout.${CL}"
+        echo -e "${GN}Authentik forward-auth outpost route is responding with true HTTP 302.${CL}"
     fi
 
     if [ "$POSTIZ_TEMPORAL_GUARD_STOPPED" == "yes" ]; then
@@ -1939,11 +1652,10 @@ function main() {
     create_or_update_authentik_forward_auth
     refresh_authentik_after_api_changes
     verify_authentik_outpost_302
-    verify_admin_ui_domain_route
 
     configure_admin_ui_sso
-    close_admin_ui_bootstrap_exposure
-    remove_admin_ui_ufw_rule
+    close_portainer_bootstrap_exposure
+    remove_portainer_ufw_rule
 
     verify_postiz_health
     stop_postiz_temporal_guard_if_safe
