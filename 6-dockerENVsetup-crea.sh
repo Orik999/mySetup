@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.2.2"
+SCRIPT_VERSION="v1.2.3"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="cloudflare-return-dynamic-proxmox-ready-apply-fix"
+SCRIPT_BUILD="cloudflare-token-no-logging-redirect-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1293,9 +1293,11 @@ function collect_domain_cloudflare_inputs() {
         msg_warn "Invalid Cloudflare Zone ID. Leave empty or enter the hex zone ID."
     done
 
-    disable_logging
-    CF_API_TOKEN_VALUE="$(sensitive_line_input "Enter Cloudflare API Token, or leave empty")"
-    enable_logging
+    # Read token directly from /dev/tty through command substitution.
+    # Do NOT toggle global logging here: switching exec redirections mid-prompt can terminate
+    # the streamed script flow on some terminals. The token itself is returned through command
+    # substitution and is not printed to the log by tee.
+    CF_API_TOKEN_VALUE="$(sensitive_line_input "Enter Cloudflare API Token, or leave empty")" || CF_API_TOKEN_VALUE=""
 
     CF_API_TOKEN_VALUE="$(printf '%s' "$CF_API_TOKEN_VALUE" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
