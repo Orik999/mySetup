@@ -35,6 +35,11 @@ WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
+SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
+SCRIPT_VERSION="v2.0.3"
+SCRIPT_UPDATED="2026-05-22"
+SCRIPT_BUILD="pro-first-collected-inputs-versioned"
+
 # --- 2. GLOBAL VARIABLES ---
 T=15
 REBOOT_T=30
@@ -117,6 +122,13 @@ function msg_ok() { local text="${1:-}"; echo -e "${BFR} ${CM} ${GN}${text}${CL}
 function msg_warn() { local text="${1:-}"; echo -e "${BFR} ${WARN} ${YW}${text}${CL}"; }
 function msg_skip() { local text="${1:-}"; echo -e "${BFR} ${WARN} ${YW}${text}${CL}"; }
 function msg_error() { local text="${1:-Unknown error}"; echo -e "${BFR} ${CROSS} ${RD}${text}${CL}"; exit 1; }
+
+# --- SCRIPT VERSION DISPLAY ---
+# Prints the currently running script version immediately under the ASCII banner.
+function show_script_version() {
+    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
+    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
+}
 
 # --- 5. SECTION HEADER HELPER ---
 function section() {
@@ -618,6 +630,7 @@ function init_script() {
 
     clear
     header_info
+    show_script_version
 
     validate_dependencies
 }

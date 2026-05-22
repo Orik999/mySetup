@@ -24,6 +24,11 @@ WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
+SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
+SCRIPT_VERSION="v1.1.0"
+SCRIPT_UPDATED="2026-05-22"
+SCRIPT_BUILD="versioned-ready-apply-stability"
+
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
 T=15
@@ -123,6 +128,13 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
+
+# --- SCRIPT VERSION DISPLAY ---
+# Prints the currently running script version immediately under the ASCII banner.
+function show_script_version() {
+    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
+    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
+}
 
 # --- 5. SECTION HEADER HELPER ---
 # Keeps terminal output clean and grouped by stage.
@@ -608,17 +620,64 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Text/path/name inputs are deliberately NOT timed.
-    # This prevents accepting defaults while the user is away and gives time to type/paste.
-    answer="$(editable_input_loop "$prompt" "$default" "")"
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    flush_input_buffer
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    flush_input_buffer
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    flush_input_buffer
+
     echo "$answer"
 }
-
 
 # --- 28. HIDDEN INPUT HELPER ---
 # Reads sensitive input without echoing it to terminal.
@@ -981,6 +1040,7 @@ function init_script() {
 
     clear
     header_info
+    show_script_version
 
     validate_dependencies
 }
@@ -1338,38 +1398,6 @@ function collect_htpasswd_inputs() {
 
 # --- 48. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
-
-# --- 55A. READY TO APPLY SUMMARY ---
-# Shows every collected setting before directories, secrets, .env, templates or permissions are written.
-function show_ready_summary_and_confirm() {
-    local apply_yn=""
-
-    section "READY TO APPLY"
-
-    echo -e "${YW}All questions have been collected. No Docker ENV files/secrets have been written yet.${CL}"
-    echo ""
-    detail_line "Docker user" "$DOCKER_USER"
-    detail_line "User directory" "$USERDIR"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line "Secrets directory" "$DOCKER_SECRETS_DIR"
-    detail_line "PUID / PGID" "${PUID_VALUE} / ${PGID_VALUE}"
-    detail_line "Timezone" "$TZ_VALUE"
-    detail_line "Domain" "$DOMAIN_VALUE"
-    detail_line "Cloudflare email" "$CF_API_EMAIL_VALUE"
-    detail_line "Cloudflare zone ID" "${CF_ZONE_ID_VALUE:-not set}"
-    detail_line "Authentik host" "$AUTHENTIK_HOST_VALUE"
-    detail_line "Authentik browser host" "$AUTHENTIK_HOST_BROWSER_VALUE"
-    detail_line "Authentik bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
-    detail_line "Admin UI" "${ADMIN_UI:-not selected}"
-    detail_line "Regenerate secrets" "$(yes_no_label "$REGENERATE_SECRETS")"
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will create/update folders, .env, secrets and templates.${CL}"
-    echo ""
-
-    apply_yn="$(timed_yes_no "Apply this Docker ENV setup plan now?" "y")"
-    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
-}
-
 function create_docker_directories() {
     section "DOCKER FOLDER STRUCTURE"
 

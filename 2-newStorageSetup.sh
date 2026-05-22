@@ -24,6 +24,11 @@ WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
+SCRIPT_SOURCE="2-newStorageSetup.sh"
+SCRIPT_VERSION="v1.1.0"
+SCRIPT_UPDATED="2026-05-22"
+SCRIPT_BUILD="versioned-finished-header-stability"
+
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, selected disk state, LVM/Proxmox storage values and tuning state.
 T=15
@@ -41,14 +46,14 @@ DISK_SIZE_GB="0"
 HAS_DATA="no"
 DATA_RISK_REPORT=""
 
-VG_NAME_DEFAULT="vg_crea_vm"
-THINPOOL_NAME_DEFAULT="crea_vm_thin"
-STORAGE_ID_DEFAULT="crea-vm"
+VG_NAME_DEFAULT="vg_data"
+THINPOOL_NAME_DEFAULT="data-thin"
+STORAGE_ID_DEFAULT="data-storage"
 
 VG_NAME=""
 THINPOOL_NAME=""
 STORAGE_ID=""
-CONTENT_TYPES="images,rootdir"
+CONTENT_TYPES="images,rootdir,backup"
 THIN_PERCENT="95"
 
 IS_SSD="no"
@@ -95,6 +100,13 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
+# --- SCRIPT VERSION DISPLAY ---
+# Prints the currently running script version immediately under the ASCII banner.
+function show_script_version() {
+    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
+    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
+}
+
 # --- 5. SECTION HEADER HELPER ---
 # Keeps output clean and avoids repeated overwritten status messages.
 function section() {
@@ -102,6 +114,23 @@ function section() {
     echo -e "${BORDER}"
     echo -e "${BL}$1${CL}"
     echo -e "${BORDER}"
+}
+
+# --- FLASHING SUCCESS SECTION HEADER HELPER ---
+# Uses the standard final success layout with bold flashing green text.
+function section_flash_success() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${GN}${CLF}$1${CL}"
+    echo -e "${BORDER}"
+}
+
+# --- DETAIL LINE HELPER ---
+# Prints clean script 1-style detail lines for summaries and audit output.
+function detail_line() {
+    local label="$1"
+    local value="$2"
+    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
 }
 
 # --- 6. TTY PRINT HELPER ---
@@ -433,10 +462,53 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Non-yes/no input is intentionally blocking with no countdown.
-    # This prevents missed prompts and gives enough time to type or paste values.
-    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
@@ -456,12 +528,67 @@ function timed_number_input() {
     local min_value="${3:-1}"
     local max_value="${4:-}"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Non-yes/no input is intentionally blocking with no countdown.
-    # This prevents missed prompts and gives enough time to type or paste values.
     while true; do
-        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-        [ -z "$answer" ] && answer="$default"
+        deadline=$(( $(date +%s) + T ))
+
+        while true; do
+            now=$(date +%s)
+            remaining=$(( deadline - now ))
+
+            if [ "$remaining" -le 0 ]; then
+                answer="$default"
+                break
+            fi
+
+            tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+            if [ -r /dev/tty ]; then
+                if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                    if [[ "$key" == " " ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+                        break
+                    elif [[ -z "$key" ]]; then
+                        answer="$default"
+                        break
+                    elif [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
+                        break
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer="INVALID"
+                        break
+                    fi
+                fi
+            else
+                if IFS= read -rsn1 -t 1 key; then
+                    if [[ "$key" == " " ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+                        break
+                    elif [[ -z "$key" ]]; then
+                        answer="$default"
+                        break
+                    elif [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
+                        break
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer="INVALID"
+                        break
+                    fi
+                fi
+            fi
+        done
+
+        if [ "$answer" == "INVALID" ]; then
+            continue
+        fi
 
         if validate_number "$answer" "$min_value" "$max_value"; then
             tty_print "${BFR}"
@@ -766,6 +893,7 @@ function init_script() {
 
     clear
     header_info
+    show_script_version
 
     validate_proxmox
     validate_dependencies
@@ -992,17 +1120,18 @@ function show_selected_disk_summary() {
 # --- 38. FIRST DESTRUCTIVE CONFIRMATION ---
 # If disk has data, default is NO. If disk looks empty, default is YES.
 function first_destructive_confirmation() {
-    section "DESTRUCTIVE ACTION WARNING"
-
-    echo -e "${YW}No disk changes have been made yet.${CL}"
-    echo -e "${YW}All remaining answers will be collected first, then a final READY TO CREATE STORAGE screen will appear.${CL}"
-    echo ""
+    local proceed_yn=""
 
     if [ "$HAS_DATA" == "yes" ]; then
+        echo ""
         echo -e "${RD}WARNING: Existing data, partitions, or signatures were detected on ${SELECTED_DISK}.${CL}"
-        echo -e "${YW}The final confirmation will default to NO before any wipe happens.${CL}"
+        proceed_yn="$(timed_yes_no "Destroy all data on ${SELECTED_DISK} and create Proxmox storage?" "n")"
     else
-        echo -e "${GN}Selected disk appears empty, but the final wipe confirmation will still be required.${CL}"
+        proceed_yn="$(timed_yes_no "Create Proxmox storage on empty disk ${SELECTED_DISK}?" "y")"
+    fi
+
+    if [[ "$proceed_yn" =~ ^[Nn] ]]; then
+        msg_error "Aborted by user."
     fi
 
     return 0
@@ -1016,19 +1145,19 @@ function first_destructive_confirmation() {
 # Generates defaults based on SSD/HDD/NVMe/SATA/USB.
 function set_adaptive_storage_defaults() {
     if [ "$IS_SSD" == "yes" ]; then
-        STORAGE_ID_DEFAULT="crea-vm-ssd"
-        VG_NAME_DEFAULT="vg_crea_vm_ssd"
-        THINPOOL_NAME_DEFAULT="crea_vm_ssd_thin"
+        STORAGE_ID_DEFAULT="data-ssd"
+        VG_NAME_DEFAULT="vg_data_ssd"
+        THINPOOL_NAME_DEFAULT="data_ssd_thin"
     else
-        STORAGE_ID_DEFAULT="crea-vm-hdd"
-        VG_NAME_DEFAULT="vg_crea_vm_hdd"
-        THINPOOL_NAME_DEFAULT="crea_vm_hdd_thin"
+        STORAGE_ID_DEFAULT="data-hdd"
+        VG_NAME_DEFAULT="vg_data_hdd"
+        THINPOOL_NAME_DEFAULT="data_hdd_thin"
     fi
 
     if [ "$IS_NVME" == "yes" ]; then
-        STORAGE_ID_DEFAULT="crea-vm-nvme"
-        VG_NAME_DEFAULT="vg_crea_vm_nvme"
-        THINPOOL_NAME_DEFAULT="crea_vm_nvme_thin"
+        STORAGE_ID_DEFAULT="data-nvme"
+        VG_NAME_DEFAULT="vg_data_nvme"
+        THINPOOL_NAME_DEFAULT="data_nvme_thin"
     fi
 }
 
@@ -1480,7 +1609,7 @@ EOF
 # --- 56. FINAL SUMMARY ---
 # Shows final storage details.
 function show_final_summary() {
-    section "FINISHED"
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
     echo -e "${BL}NEW PROXMOX STORAGE CREATED:${CL}"
     echo -e " ${BL}━━━━━▶${CL} DISK: ${GN}${SELECTED_DISK}${CL}"

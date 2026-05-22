@@ -24,6 +24,11 @@ WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
+SCRIPT_SOURCE="5-dockerSetup.sh"
+SCRIPT_VERSION="v1.1.1"
+SCRIPT_UPDATED="2026-05-22"
+SCRIPT_BUILD="ready-apply-reboot-sete-fix"
+
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log paths, user choices, environment state and final status values.
 T=15
@@ -52,9 +57,10 @@ DOCKER_SERVICE_ACTIVE="no"
 CONTAINERD_SERVICE_ACTIVE="no"
 
 DISABLE_SWAP="y"
-INSTALL_DOCKER_GC="n"
+INSTALL_DOCKER_GC="y"
 CONFIGURE_UFW="y"
 DOCKER_FIREWALL_MODE="docker-iptables-enabled"
+REBOOT_AFTER_FINISH="y"
 
 DOCKER_INSTALLED="no"
 DOCKER_SERVICE_ENABLED="no"
@@ -98,6 +104,13 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
+
+# --- SCRIPT VERSION DISPLAY ---
+# Prints the currently running script version immediately under the ASCII banner.
+function show_script_version() {
+    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
+    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
+}
 
 # --- 5. SECTION HEADER HELPER ---
 # Keeps terminal output organized into readable stages.
@@ -453,17 +466,62 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Text/path/name inputs are deliberately NOT timed.
-    # This prevents accepting defaults while the user is away and gives time to type/paste.
-    answer="$(editable_input_loop "$prompt" "$default" "")"
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    flush_input_buffer
+
     echo "$answer"
 }
-
 
 # --- 21. REBOOT COUNTDOWN HELPER ---
 # Offers Ubuntu VM Setup-compatible reboot flow so Docker group membership applies cleanly.
@@ -679,6 +737,7 @@ function init_script() {
 
     clear
     header_info
+    show_script_version
 
     validate_dependencies
 }
@@ -861,6 +920,7 @@ function collect_user_options() {
     local swap_yn=""
     local gc_yn=""
     local ufw_yn=""
+    local reboot_yn=""
 
     section "USER OPTIONS"
 
@@ -900,37 +960,53 @@ function collect_user_options() {
         CONFIGURE_UFW="y"
     fi
 
-    gc_yn="$(timed_yes_no "Install safe Docker cleanup helper and weekly systemd timer?" "n")"
+    gc_yn="$(timed_yes_no "Install safe Docker cleanup helper and weekly systemd timer?" "y")"
     if [[ "$gc_yn" =~ ^[Yy] ]]; then
         INSTALL_DOCKER_GC="y"
     else
         INSTALL_DOCKER_GC="n"
     fi
+
+    if [ "$IS_CONTAINER" == "yes" ]; then
+        REBOOT_AFTER_FINISH="n"
+    else
+        reboot_yn="$(timed_yes_no "Reboot automatically after Docker setup finishes?" "y")"
+        if [[ "$reboot_yn" =~ ^[Nn] ]]; then
+            REBOOT_AFTER_FINISH="n"
+        else
+            REBOOT_AFTER_FINISH="y"
+        fi
+    fi
 }
 
 
-# --- 33A. READY TO APPLY SUMMARY ---
-# Shows every collected answer before any Docker/system changes are made.
-function show_ready_summary_and_confirm() {
+# --- READY TO APPLY SUMMARY ---
+# Shows all collected answers before any Docker/system-changing actions are applied.
+function show_ready_to_apply() {
     local apply_yn=""
 
     section "READY TO APPLY"
 
     echo -e "${YW}All questions have been collected. No Docker/system-changing actions have been applied yet.${CL}"
     echo ""
-    detail_line "Environment" "${VIRT_TYPE}"
+    detail_line "Environment" "$VIRT_TYPE"
     detail_line "Target user" "$TARGET_USER"
     detail_line "Existing Docker setup" "$EXISTING_SETUP"
-    detail_line "Disable swap" "$(yes_no_label "$DISABLE_SWAP")"
-    detail_line "Configure UFW" "$(yes_no_label "$CONFIGURE_UFW")"
-    detail_line "Install safe Docker cleanup timer" "$(yes_no_label "$INSTALL_DOCKER_GC")"
+    detail_line "Disable swap" "$DISABLE_SWAP"
+    detail_line "Configure UFW" "$CONFIGURE_UFW"
+    detail_line "Install safe Docker cleanup timer" "$INSTALL_DOCKER_GC"
+    detail_line "Reboot after finish" "$REBOOT_AFTER_FINISH"
     detail_line "Docker firewall mode" "$DOCKER_FIREWALL_MODE"
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will begin installing/configuring Docker.${CL}"
     echo ""
 
     apply_yn="$(timed_yes_no "Apply this Docker setup plan now?" "y")"
-    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+
+    if [[ "$apply_yn" =~ ^[Nn] ]]; then
+        echo -e "${YW}Docker Setup cancelled. No Docker/system-changing actions were applied.${CL}"
+        exit 0
+    fi
+
+    return 0
 }
 
 # =========================================================
@@ -1629,6 +1705,11 @@ ${YW}Safe Docker cleanup uses host-side /usr/local/sbin/docker-gc-safe and never
 function reboot_prompt() {
     section "REBOOT"
 
+    if [ "$REBOOT_AFTER_FINISH" != "y" ]; then
+        echo -e "${YW}Reboot was disabled during question collection. Reboot manually when ready.${CL}"
+        return 0
+    fi
+
     if [ "$IS_CONTAINER" == "yes" ]; then
         echo -e "${YW}Container mode detected. Restart may be controlled from the Proxmox host.${CL}"
         echo -e "${YW}Reboot skipped. Log out/in or restart the container from Proxmox if needed.${CL}"
@@ -1663,7 +1744,7 @@ function main() {
     detect_existing_setup
     start_confirmation
     collect_user_options
-    show_ready_summary_and_confirm
+    show_ready_to_apply
 
     handle_swap
     configure_redis_host_tuning

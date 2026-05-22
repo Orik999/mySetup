@@ -22,6 +22,11 @@ WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
+SCRIPT_SOURCE="7-hardeningSSO.sh"
+SCRIPT_VERSION="v1.1.1"
+SCRIPT_UPDATED="2026-05-22"
+SCRIPT_BUILD="versioned-start-return-stability"
+
 # --- 2. GLOBAL VARIABLES ---
 T=15
 
@@ -93,6 +98,13 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
+
+# --- SCRIPT VERSION DISPLAY ---
+# Prints the currently running script version immediately under the ASCII banner.
+function show_script_version() {
+    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
+    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
+}
 
 function section() {
     echo ""
@@ -405,17 +417,62 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Text/path/name inputs are deliberately NOT timed.
-    # This prevents accepting defaults while the user is away and gives time to type/paste.
-    answer="$(editable_input_loop "$prompt" "$default" "")"
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    flush_input_buffer
+
     echo "$answer"
 }
-
 
 function sensitive_line_input() {
     local prompt="$1"
@@ -519,6 +576,7 @@ function init_script() {
 
     clear
     header_info
+    show_script_version
 
     validate_dependencies
 }
@@ -664,6 +722,9 @@ function start_confirmation() {
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
+
+
+    return 0
 }
 
 # =========================================================
@@ -711,33 +772,6 @@ function verify_traefik_dynamic_config() {
     fi
 
     TRAEFIK_CONFIG_OK="yes"
-}
-
-
-# --- 13A. READY TO APPLY SUMMARY ---
-# Shows the final hardening plan before Authentik, firewall/bootstrap or cleanup changes are made.
-function show_ready_summary_and_confirm() {
-    local apply_yn=""
-
-    section "READY TO APPLY"
-
-    echo -e "${YW}All required inputs and preflight checks have been collected.${CL}"
-    echo -e "${YW}No Authentik provider/outpost, bootstrap firewall or cleanup changes have been applied yet.${CL}"
-    echo ""
-    detail_line "Docker user" "$DOCKER_USER"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line "Compose directory" "$COMPOSE_DIR"
-    detail_line "Domain" "$DOMAIN"
-    detail_line "Authentik host" "$AUTHENTIK_HOST"
-    detail_line "Selected admin UI" "$ADMIN_UI"
-    detail_line "Authentik token source" "$AUTHENTIK_TOKEN_SOURCE"
-    detail_line "Authentik API status" "$AUTHENTIK_API_OK"
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script may update Authentik, close bootstrap exposure, harden sudo and clean guard artifacts.${CL}"
-    echo ""
-
-    apply_yn="$(timed_yes_no "Apply final hardening and SSO plan now?" "y")"
-    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
 }
 
 # =========================================================
@@ -1614,7 +1648,6 @@ function main() {
     verify_traefik_dynamic_config
     collect_authentik_api_token
     verify_authentik_api
-    show_ready_summary_and_confirm
     create_or_update_authentik_forward_auth
     verify_authentik_outpost_302
 

@@ -26,6 +26,11 @@ FLASH_ON=$'\033[5m'
 FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
+SCRIPT_SOURCE="1-proxmoxSetupCrea.sh"
+SCRIPT_VERSION="v1.1.0"
+SCRIPT_UPDATED="2026-05-22"
+SCRIPT_BUILD="versioned-finished-summary-stability"
+
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
 T=15
@@ -67,10 +72,6 @@ ENABLE_PASSTHROUGH="n"
 ENABLE_PERFORMANCE="n"
 ENABLE_CROWDSEC="y"
 ALLOW_PUBLIC_WEB="n"
-AUTO_REBOOT_AFTER_APPLY="y"
-STORAGE_LAYOUT_MODE="merge_all"
-ROOT_DISK_SIZE_GB="0"
-LOCAL_LVM_EXISTS="no"
 
 SSH_HARDENING_APPLIED="no"
 SSH_ROOT_KEY_FILE=""
@@ -109,6 +110,13 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
 
+# --- SCRIPT VERSION DISPLAY ---
+# Prints the currently running script version immediately under the ASCII banner.
+function show_script_version() {
+    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
+    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
+}
+
 # --- 5. SECTION HEADER HELPER ---
 # Prevents messy repeated msg_info output by giving each major stage a clean heading.
 function section() {
@@ -116,6 +124,23 @@ function section() {
     echo -e "${BORDER}"
     echo -e "${BL}$1${CL}"
     echo -e "${BORDER}"
+}
+
+# --- FLASHING SUCCESS SECTION HEADER HELPER ---
+# Uses the standard final success layout with bold flashing green text.
+function section_flash_success() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${GN}${CLF}$1${CL}"
+    echo -e "${BORDER}"
+}
+
+# --- DETAIL LINE HELPER ---
+# Prints clean script 1-style detail lines for summaries and audit output.
+function detail_line() {
+    local label="$1"
+    local value="$2"
+    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
 }
 
 # --- 6. TTY PRINT HELPER ---
@@ -686,7 +711,6 @@ function validate_dependencies() {
         apt-get
         awk
         basename
-        blockdev
         cat
         chmod
         cp
@@ -765,6 +789,7 @@ function init_script() {
 
     clear
     header_info
+    show_script_version
 
     validate_dependencies
     validate_proxmox
@@ -827,20 +852,6 @@ function audit_hardware() {
     STORAGE_SUMMARY="$(build_storage_summary)"
     ROOT_FS_TYPE="$(findmnt -n -o FSTYPE / 2>/dev/null || true)"
     ROOT_SOURCE="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-
-    root_disk=""
-    if [ -n "$ROOT_SOURCE" ] && [ -b "$ROOT_SOURCE" ]; then
-        root_disk="$(lsblk -no PKNAME "$ROOT_SOURCE" 2>/dev/null | head -n1 | xargs || true)"
-        if [ -n "$root_disk" ] && [ -b "/dev/$root_disk" ]; then
-            ROOT_DISK_SIZE_GB="$(( $(blockdev --getsize64 "/dev/$root_disk" 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))"
-        fi
-    fi
-
-    if grep -q "^lvmthin: local-lvm" /etc/pve/storage.cfg 2>/dev/null && lvdisplay /dev/pve/data >/dev/null 2>&1; then
-        LOCAL_LVM_EXISTS="yes"
-    else
-        LOCAL_LVM_EXISTS="no"
-    fi
 
     msg_ok "HOST HARDWARE AUDITED"
 }
@@ -937,47 +948,6 @@ function show_storage_detection() {
     echo -e " ${BL}━━━━━▶${CL} ROOT FILESYSTEM: ${ROOT_FS_TYPE:-unknown} (${ROOT_SOURCE:-unknown})"
 }
 
-
-# --- 35A. STORAGE LAYOUT OPTION COLLECTION ---
-# Collects the storage layout decision before any disk/LVM changes are made.
-# Systems with 128GB or less are automatically merged into local for simplicity.
-# Larger systems can keep local-lvm as snapshot-capable VM storage.
-function collect_storage_layout_option() {
-    local keep_lvm_yn=""
-
-    section "PROXMOX STORAGE LAYOUT"
-
-    echo -e " ${BL}━━━━━▶${CL} ROOT DISK SIZE: ${GN}${ROOT_DISK_SIZE_GB:-0}GB${CL}"
-    echo -e " ${BL}━━━━━▶${CL} LOCAL-LVM DETECTED: ${GN}${LOCAL_LVM_EXISTS}${CL}"
-    echo ""
-
-    if [ "${ROOT_DISK_SIZE_GB:-0}" -le 128 ]; then
-        STORAGE_LAYOUT_MODE="merge_all"
-        echo -e "${YW}Root disk is 128GB or smaller. Snapshot split is not recommended on this disk.${CL}"
-        echo -e "${YW}Storage mode selected automatically: merge all local-lvm space into local.${CL}"
-        return 0
-    fi
-
-    if [ "$LOCAL_LVM_EXISTS" != "yes" ]; then
-        STORAGE_LAYOUT_MODE="merge_all"
-        echo -e "${YW}No usable local-lvm thinpool was detected. Storage merge mode selected.${CL}"
-        echo -e "${YW}Use Script 2 with a separate SSD to create snapshot-capable VM storage.${CL}"
-        return 0
-    fi
-
-    echo -e "${YW}Recommended for 256GB+ Proxmox disks:${CL} keep local-lvm for VM disks/snapshots."
-    echo -e "${YW}Use local for ISOs, templates and emergency backups; use local-lvm for VM disks.${CL}"
-    echo ""
-
-    keep_lvm_yn="$(timed_yes_no "Keep local-lvm for VM snapshots instead of merging all space into local?" "y")"
-
-    if [[ "$keep_lvm_yn" =~ ^[Yy] ]]; then
-        STORAGE_LAYOUT_MODE="keep_local_lvm"
-    else
-        STORAGE_LAYOUT_MODE="merge_all"
-    fi
-}
-
 # --- 35. USER OPTION COLLECTION ---
 # Collects optional choices using timed prompts.
 function collect_user_options() {
@@ -1013,13 +983,6 @@ function collect_user_options() {
     else
         ALLOW_PUBLIC_WEB="n"
     fi
-
-    reboot_yn="$(timed_yes_no "Automatically reboot when finished?" "y")"
-    if [[ "$reboot_yn" =~ ^[Nn] ]]; then
-        AUTO_REBOOT_AFTER_APPLY="n"
-    else
-        AUTO_REBOOT_AFTER_APPLY="y"
-    fi
 }
 
 # --- 36. FINAL START PROMPT ---
@@ -1038,8 +1001,6 @@ function final_start_prompt() {
     echo -e "CPU PERFORMANCE: ${GN}${ENABLE_PERFORMANCE}${CL}"
     echo -e "CROWDSEC: ${GN}${ENABLE_CROWDSEC}${CL}"
     echo -e "PUBLIC HOST 80/443: ${GN}${ALLOW_PUBLIC_WEB}${CL}"
-    echo -e "STORAGE LAYOUT: ${GN}${STORAGE_LAYOUT_MODE}${CL}"
-    echo -e "AUTO REBOOT: ${GN}${AUTO_REBOOT_AFTER_APPLY}${CL}"
     echo ""
 
     start_yn="$(timed_yes_no "Start the PVE9 Post Install Script?" "y")"
@@ -1061,20 +1022,6 @@ function final_start_prompt() {
 # Supports ext filesystems through resize2fs and XFS through xfs_growfs.
 function apply_storage_merge() {
     local pve_free_extents=""
-
-    if [ "$STORAGE_LAYOUT_MODE" == "keep_local_lvm" ]; then
-        section "STORAGE LAYOUT"
-        msg_info "Keeping local-lvm snapshot-capable storage"
-        if grep -q "^lvmthin: local-lvm" /etc/pve/storage.cfg 2>/dev/null && lvdisplay /dev/pve/data >/dev/null 2>&1; then
-            run_optional pvesm set local-lvm --content images,rootdir
-            msg_ok "LOCAL-LVM KEPT FOR VM DISKS AND SNAPSHOTS"
-            echo -e " ${BL}━━━━━▶${CL} local = ISOs/templates/backups"
-            echo -e " ${BL}━━━━━▶${CL} local-lvm = VM disks/snapshots"
-            return 0
-        fi
-        msg_warn "Storage mode requested keep_local_lvm, but local-lvm is unavailable. Falling back to merge mode."
-        STORAGE_LAYOUT_MODE="merge_all"
-    fi
 
     section "STORAGE MERGE"
 
@@ -2078,6 +2025,25 @@ EOF
     msg_ok "PVE9 POST-INSTALL COMPLETION MARKER WRITTEN"
 }
 
+
+# --- FINAL SUMMARY ---
+# Shows a visible finished marker before reboot so the user can confirm the script completed.
+function show_final_summary() {
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+
+    detail_line "SYSTEM TYPE" "$SYSTEM_TYPE"
+    detail_line "STORAGE LAYOUT MODE" "$STORAGE_LAYOUT_MODE"
+    detail_line "GPU PASSTHROUGH" "$ENABLE_PASSTHROUGH"
+    detail_line "CPU PERFORMANCE" "$ENABLE_PERFORMANCE"
+    detail_line "CROWDSEC" "$ENABLE_CROWDSEC"
+    detail_line "PROXMOX FIREWALL" "$PVE_FIREWALL_APPLIED"
+    detail_line "SSH HARDENING" "$SSH_HARDENING_APPLIED"
+    detail_line "REALTEK OPTIMIZED" "$REALTEK_OPTIMIZED"
+    detail_line "NUMLOCK" "$NUMLOCK_CONFIGURED"
+    detail_line "VERIFY LOG" "$VERIFY_LOG"
+    echo ""
+}
+
 # --- 54. FINAL REBOOT COUNTDOWN ---
 # ENTER/Y reboots immediately.
 # SPACE/N cancels reboot.
@@ -2085,14 +2051,8 @@ EOF
 function final_reboot_prompt() {
     section "REBOOT"
 
-    if [ "$AUTO_REBOOT_AFTER_APPLY" == "y" ]; then
-        echo -e "${BL}${CLF}AUTO-REBOOT SELECTED BEFORE APPLY.${CL}"
-        echo -e "${YW}Rebooting in 10 seconds. Press Ctrl+C only if you must stop it.${CL}"
-        sleep 10
+    if timed_reboot_countdown "$REBOOT_T"; then
         reboot
-    else
-        echo -e "${YW}Auto-reboot was disabled before apply.${CL}"
-        echo -e "${YW}Reboot manually when ready to activate kernel/IOMMU/initramfs changes:${CL} ${GN}reboot${CL}"
     fi
 }
 
@@ -2110,7 +2070,6 @@ function main() {
     check_fresh_install_state
     detect_gpu_and_collect_choice
     show_storage_detection
-    collect_storage_layout_option
     collect_user_options
     final_start_prompt
 
@@ -2131,6 +2090,7 @@ function main() {
     apply_numlock_service
     create_auto_verifier
     write_completion_marker
+    show_final_summary
     final_reboot_prompt
 
     exit 0

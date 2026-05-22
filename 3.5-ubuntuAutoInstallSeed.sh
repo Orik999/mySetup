@@ -24,6 +24,11 @@ CROSS="${RD}✗${CL}"
 
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
+SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
+SCRIPT_VERSION="v1.1.0"
+SCRIPT_UPDATED="2026-05-22"
+SCRIPT_BUILD="versioned-finished-header-stability"
+
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
 T=15
@@ -117,6 +122,13 @@ msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
 msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
+
+# --- SCRIPT VERSION DISPLAY ---
+# Prints the currently running script version immediately under the ASCII banner.
+function show_script_version() {
+    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
+    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
+}
 
 section() {
     echo ""
@@ -453,18 +465,60 @@ timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Text/path/name inputs are deliberately NOT timed.
-    # This prevents the script from accepting defaults while the user is away
-    # and gives enough time to type or paste values safely.
-    answer="$(editable_input_loop "$prompt" "$default" "")"
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+
     echo "$answer"
 }
-
 
 # --- 16. TIMED NUMERIC INPUT HELPER ---
 timed_number_input() {
@@ -473,12 +527,67 @@ timed_number_input() {
     local min_value="${3:-1}"
     local max_value="${4:-}"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Numeric inputs are deliberately NOT timed.
-    # Countdown prompts are only used for simple Y/n decisions.
     while true; do
-        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-        [ -z "$answer" ] && answer="$default"
+        deadline=$(( $(date +%s) + T ))
+
+        while true; do
+            now=$(date +%s)
+            remaining=$(( deadline - now ))
+
+            if [ "$remaining" -le 0 ]; then
+                answer="$default"
+                break
+            fi
+
+            tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+            if [ -r /dev/tty ]; then
+                if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                    if [[ "$key" == " " ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+                        break
+                    elif [[ -z "$key" ]]; then
+                        answer="$default"
+                        break
+                    elif [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
+                        break
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer="INVALID"
+                        break
+                    fi
+                fi
+            else
+                if IFS= read -rsn1 -t 1 key; then
+                    if [[ "$key" == " " ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+                        break
+                    elif [[ -z "$key" ]]; then
+                        answer="$default"
+                        break
+                    elif [[ "$key" =~ ^[0-9]$ ]]; then
+                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
+                        break
+                    else
+                        tty_print "${BFR}"
+                        print_number_error "$min_value" "$max_value"
+                        answer="INVALID"
+                        break
+                    fi
+                fi
+            fi
+        done
+
+        if [ "$answer" == "INVALID" ]; then
+            continue
+        fi
 
         if validate_number "$answer" "$min_value" "$max_value"; then
             tty_print "${BFR}"
@@ -491,7 +600,6 @@ timed_number_input() {
         print_number_error "$min_value" "$max_value"
     done
 }
-
 
 # --- 17. MENU SELECTION HELPER ---
 timed_menu_select() {
@@ -1179,6 +1287,7 @@ init_script() {
 
     clear
     header_info
+    show_script_version
 
     validate_dependencies
     validate_proxmox
@@ -1939,7 +2048,7 @@ show_generated_iso_only_summary() {
 
 # --- 64. FINAL OUTPUT ---
 show_final_output() {
-    section_flash_success "FINISHED"
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
 
     echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
     echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
@@ -1987,7 +2096,6 @@ show_final_output() {
 
 main() {
     local start_yn=""
-    local create_iso_yn=""
     local attach_yn=""
 
     init_script
@@ -2000,9 +2108,8 @@ main() {
         exit 0
     fi
 
-    # Phase 1: collect every user answer first. No ISO tools are installed,
-    # no ISO is generated, and no VM media is attached until after the READY TO APPLY confirmation.
     collect_early_cleanup_preferences
+
     select_vm
     detect_vm_mac
     collect_user_locale_inputs
@@ -2011,25 +2118,16 @@ main() {
     collect_post_install_options
     select_ubuntu_iso
     show_ubuntu_pro_note
+
     precheck_generated_iso_reuse
 
-    show_apply_summary
-    echo -e "${YW}All answers have been collected. No system-changing actions have been applied yet.${CL}"
-    create_iso_yn="$(timed_yes_no "Create/reuse generated autoinstall ISO now?" "y")"
-
-    if [[ "$create_iso_yn" =~ ^[Nn] ]]; then
-        show_generated_iso_only_summary
-        exit 0
-    fi
-
-    # Phase 2: apply after final confirmation.
     if [ "$REUSE_EXISTING_AUTOINSTALL_ISO" != "yes" ]; then
         ensure_tools
-        generate_autoinstall_iso
-    else
-        verify_reused_generated_iso
     fi
 
+    generate_autoinstall_iso
+
+    show_apply_summary
     attach_yn="$(timed_yes_no "Attach generated autoinstall ISO and start VM now?" "y")"
 
     if [[ "$attach_yn" =~ ^[Nn] ]]; then
@@ -2037,7 +2135,6 @@ main() {
         exit 0
     fi
 
-    ensure_vm_stopped_before_apply
     attach_iso_and_start_install
     post_install_cleanup
     start_installed_vm_and_detect_ip
@@ -2045,6 +2142,5 @@ main() {
     create_host_verification_report
     show_final_output
 }
-
 
 main "$@"

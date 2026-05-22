@@ -24,6 +24,11 @@ WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
+SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
+SCRIPT_VERSION="v1.1.0"
+SCRIPT_UPDATED="2026-05-22"
+SCRIPT_BUILD="versioned-ready-apply-stability"
+
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
 T=15
@@ -160,6 +165,13 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
+
+# --- SCRIPT VERSION DISPLAY ---
+# Prints the currently running script version immediately under the ASCII banner.
+function show_script_version() {
+    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
+    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
+}
 
 # --- 5. SECTION HEADER HELPER ---
 # Keeps terminal output clean and grouped by stage.
@@ -472,17 +484,62 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Text/path/name inputs are deliberately NOT timed.
-    # This prevents accepting defaults while the user is away and gives time to type/paste.
-    answer="$(editable_input_loop "$prompt" "$default" "")"
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    flush_input_buffer
+
     echo "$answer"
 }
-
 
 # =========================================================
 #  VALIDATION HELPERS
@@ -611,6 +668,7 @@ function init_script() {
 
     clear
     header_info
+    show_script_version
 
     validate_dependencies
 }
@@ -1583,34 +1641,6 @@ function show_final_summary() {
     echo ""
 }
 
-
-# --- 22A. READY TO APPLY SUMMARY ---
-# Shows the collected bootstrap/deploy plan before networks, compose files, firewall rules or containers are changed.
-function show_ready_summary_and_confirm() {
-    local apply_yn=""
-
-    section "READY TO APPLY"
-
-    echo -e "${YW}All questions have been collected and preflight checks are complete.${CL}"
-    echo -e "${YW}No Docker networks, compose files, firewall rules or containers have been changed yet in this apply phase.${CL}"
-    echo ""
-    detail_line "Docker user" "$DOCKER_USER"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line "Compose directory" "$COMPOSE_DIR"
-    detail_line "Env file" "$ENV_FILE"
-    detail_line "GitHub raw base" "$GITHUB_RAW_BASE"
-    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "Admin UI project" "$ADMIN_UI_PROJECT"
-    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
-    detail_line "Bootstrap URL" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will create networks, download compose files and deploy containers.${CL}"
-    echo ""
-
-    apply_yn="$(timed_yes_no "Apply this Docker bootstrap/deploy plan now?" "y")"
-    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
-}
-
 # =========================================================
 #  MAIN ORCHESTRATION
 # =========================================================
@@ -1632,7 +1662,6 @@ function main() {
     verify_authentik_folders
     verify_cf_companion_secret_file
     verify_filebrowser_folders
-    show_ready_summary_and_confirm
     create_shared_networks
     verify_shared_networks
 
