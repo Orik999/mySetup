@@ -67,11 +67,6 @@ POSTGRES_PASSWORD=""
 REDIS_PASSWORD=""
 AUTHENTIK_SECRET_KEY=""
 AUTHENTIK_POSTGRES_PASSWORD=""
-AUTHENTIK_HOST_VALUE=""
-AUTHENTIK_HOST_BROWSER_VALUE=""
-AUTHENTIK_BOOTSTRAP_EMAIL_VALUE=""
-AUTHENTIK_BOOTSTRAP_PASSWORD=""
-AUTHENTIK_BOOTSTRAP_TOKEN=""
 POSTIZ_POSTGRES_PASSWORD=""
 POSTIZ_JWT_SECRET=""
 TEMPORAL_POSTGRES_PASSWORD=""
@@ -613,64 +608,17 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    flush_input_buffer
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    flush_input_buffer
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    flush_input_buffer
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # This prevents accepting defaults while the user is away and gives time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer
-
     echo "$answer"
 }
+
 
 # --- 28. HIDDEN INPUT HELPER ---
 # Reads sensitive input without echoing it to terminal.
@@ -1384,79 +1332,44 @@ function collect_htpasswd_inputs() {
     fi
 }
 
-
-# --- 47B. AUTHENTIK BOOTSTRAP INPUTS ---
-# Collects first-login Authentik bootstrap values and keeps them separate from Authentik API tokens.
-# AUTHENTIK_BOOTSTRAP_TOKEN is not an API bearer token; Script 7 asks for a real API token later if automation is desired.
-function collect_authentik_bootstrap_inputs() {
-    local default_auth_host="https://auth.${DOMAIN_VALUE}"
-    local use_cf_email=""
-    local create_password=""
-    local create_token=""
-
-    section "AUTHENTIK BOOTSTRAP"
-
-    echo -e "${BL}Authentik needs bootstrap admin values for the first fresh deployment.${CL}"
-    echo -e "${YW}These are written to .env and displayed once with other secrets.${CL}"
-    echo -e "${YW}Important: AUTHENTIK_BOOTSTRAP_TOKEN is NOT an Authentik API token.${CL}"
-    echo ""
-
-    AUTHENTIK_HOST_VALUE="$(timed_text_input "Enter Authentik external host, example https://auth.example.com" "$default_auth_host")"
-    AUTHENTIK_HOST_BROWSER_VALUE="$(timed_text_input "Enter Authentik browser host, example https://auth.example.com" "$AUTHENTIK_HOST_VALUE")"
-
-    use_cf_email="$(timed_yes_no "Use Cloudflare email as Authentik bootstrap admin email?" "y")"
-    if [[ "$use_cf_email" =~ ^[Yy]$ ]]; then
-        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$CF_API_EMAIL_VALUE"
-        msg_ok "AUTHENTIK BOOTSTRAP EMAIL SET FROM CLOUDFLARE EMAIL"
-    else
-        while true; do
-            AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(timed_text_input "Enter Authentik bootstrap admin email" "$CF_API_EMAIL_VALUE")"
-            if validate_email "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"; then
-                break
-            fi
-            msg_warn "Invalid email format."
-        done
-    fi
-
-    create_password="$(timed_yes_no "Auto-generate Authentik bootstrap password?" "y")"
-    if [[ "$create_password" =~ ^[Yy]$ ]]; then
-        AUTHENTIK_BOOTSTRAP_PASSWORD="$(generate_secret)"
-        msg_ok "AUTHENTIK BOOTSTRAP PASSWORD GENERATED"
-    else
-        disable_logging
-        AUTHENTIK_BOOTSTRAP_PASSWORD="$(sensitive_line_input "Enter Authentik bootstrap password")"
-        enable_logging
-        if [ -z "$AUTHENTIK_BOOTSTRAP_PASSWORD" ]; then
-            AUTHENTIK_BOOTSTRAP_PASSWORD="$(generate_secret)"
-            msg_warn "Empty password entered; generated one instead."
-        fi
-    fi
-
-    create_token="$(timed_yes_no "Auto-generate Authentik bootstrap token?" "y")"
-    if [[ "$create_token" =~ ^[Yy]$ ]]; then
-        AUTHENTIK_BOOTSTRAP_TOKEN="$(generate_secret)"
-        msg_ok "AUTHENTIK BOOTSTRAP TOKEN GENERATED"
-    else
-        disable_logging
-        AUTHENTIK_BOOTSTRAP_TOKEN="$(sensitive_line_input "Enter Authentik bootstrap token")"
-        enable_logging
-        if [ -z "$AUTHENTIK_BOOTSTRAP_TOKEN" ]; then
-            AUTHENTIK_BOOTSTRAP_TOKEN="$(generate_secret)"
-            msg_warn "Empty token entered; generated one instead."
-        fi
-    fi
-
-    detail_line "Authentik host" "$AUTHENTIK_HOST_VALUE"
-    detail_line "Authentik bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
-    echo -e "${YW}Script 7 will ask separately for an Authentik API token if API automation is wanted.${CL}"
-}
-
 # =========================================================
 #  FILE / SECRET CREATION
 # =========================================================
 
 # --- 48. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
+
+# --- 55A. READY TO APPLY SUMMARY ---
+# Shows every collected setting before directories, secrets, .env, templates or permissions are written.
+function show_ready_summary_and_confirm() {
+    local apply_yn=""
+
+    section "READY TO APPLY"
+
+    echo -e "${YW}All questions have been collected. No Docker ENV files/secrets have been written yet.${CL}"
+    echo ""
+    detail_line "Docker user" "$DOCKER_USER"
+    detail_line "User directory" "$USERDIR"
+    detail_line "Docker directory" "$DOCKER_DIR"
+    detail_line "Secrets directory" "$DOCKER_SECRETS_DIR"
+    detail_line "PUID / PGID" "${PUID_VALUE} / ${PGID_VALUE}"
+    detail_line "Timezone" "$TZ_VALUE"
+    detail_line "Domain" "$DOMAIN_VALUE"
+    detail_line "Cloudflare email" "$CF_API_EMAIL_VALUE"
+    detail_line "Cloudflare zone ID" "${CF_ZONE_ID_VALUE:-not set}"
+    detail_line "Authentik host" "$AUTHENTIK_HOST_VALUE"
+    detail_line "Authentik browser host" "$AUTHENTIK_HOST_BROWSER_VALUE"
+    detail_line "Authentik bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
+    detail_line "Admin UI" "${ADMIN_UI:-not selected}"
+    detail_line "Regenerate secrets" "$(yes_no_label "$REGENERATE_SECRETS")"
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script will create/update folders, .env, secrets and templates.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply this Docker ENV setup plan now?" "y")"
+    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+}
+
 function create_docker_directories() {
     section "DOCKER FOLDER STRUCTURE"
 
@@ -1470,8 +1383,6 @@ function create_docker_directories() {
 
     run_cmd "creating PostgreSQL data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
-    run_cmd "creating Redis data directory" mkdir -p "${DOCKER_DIR}/appdata/redis"
-    run_cmd "creating Postiz uploads directory" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
 
     run_cmd "creating Traefik config directory" mkdir -p "${TRAEFIK_DIR}"
     run_cmd "creating Traefik ACME directory" mkdir -p "${TRAEFIK_ACME_DIR}"
@@ -1653,7 +1564,6 @@ DOMAIN="${DOMAIN_VALUE}"
 CF_API_EMAIL="${CF_API_EMAIL_VALUE}"
 CF_ZONE_ID="${CF_ZONE_ID_VALUE}"
 CF_API_TOKEN_FILE="${CF_API_TOKEN_FILE}"
-CF_AUTH_METHOD="api_token"
 
 # --- PostgreSQL root/admin password ---
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
@@ -1664,11 +1574,6 @@ REDIS_PASSWORD="${REDIS_PASSWORD}"
 # --- Authentik ---
 AUTHENTIK_SECRET_KEY="${AUTHENTIK_SECRET_KEY}"
 AUTHENTIK_POSTGRES_PASSWORD="${AUTHENTIK_POSTGRES_PASSWORD}"
-AUTHENTIK_HOST="${AUTHENTIK_HOST_VALUE}"
-AUTHENTIK_HOST_BROWSER="${AUTHENTIK_HOST_BROWSER_VALUE}"
-AUTHENTIK_BOOTSTRAP_EMAIL="${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}"
-AUTHENTIK_BOOTSTRAP_PASSWORD="${AUTHENTIK_BOOTSTRAP_PASSWORD}"
-AUTHENTIK_BOOTSTRAP_TOKEN="${AUTHENTIK_BOOTSTRAP_TOKEN}"
 
 # --- Postiz ---
 POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
@@ -1687,64 +1592,38 @@ EOF
 function apply_permissions() {
     section "PERMISSIONS"
 
-    msg_info "Applying service-specific ownership and permissions"
+    msg_info "Setting Docker folder ownership"
 
-    # Base project ownership: keep only top-level project folders user-owned.
-    # Do not recursively chown all appdata because database containers use service UIDs.
-    run_cmd "setting Docker root ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR" "${DOCKER_DIR}/compose" "${DOCKER_DIR}/backups" "${DOCKER_DIR}/shared" "${DOCKER_SECRETS_DIR}"
-    run_cmd "setting appdata root ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata"
+    run_cmd "setting Docker folder ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
 
-    # Database services: must be owned by the container UID, not by the login user.
-    run_cmd "setting PostgreSQL data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL data permissions" chmod 700 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
-    run_cmd "setting PostgreSQL init permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
+    msg_ok "DOCKER FOLDER OWNERSHIP SET"
+
+    msg_info "Applying Docker folder permissions"
+
+    run_cmd "setting Docker root directory permissions" chmod 750 "$DOCKER_DIR"
+    run_cmd "setting appdata permissions" chmod 750 "${DOCKER_DIR}/appdata"
+    run_cmd "setting compose permissions" chmod 750 "${DOCKER_DIR}/compose"
+    run_cmd "setting backups permissions" chmod 750 "${DOCKER_DIR}/backups"
+    run_cmd "setting shared permissions" chmod 750 "${DOCKER_DIR}/shared"
+    run_cmd "setting PostgreSQL appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/postgres"
+    run_cmd "setting PostgreSQL data permissions" chmod 750 "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "setting PostgreSQL init directory permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
-    run_cmd "setting Redis data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
-    run_cmd "setting Redis writable permissions" chmod -R u+rwX,g-rwx,o-rwx "${DOCKER_DIR}/appdata/redis"
-
-    # Authentik runs non-root and needs write access to media/templates/certs bind mounts.
-    run_cmd "setting Authentik ownership" chown -R 1000:1000 "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "setting Authentik permissions" chmod -R u+rwX,g-rwx,o-rwx "${DOCKER_DIR}/appdata/authentik"
-
-    # User-facing safe folders.
-    run_cmd "setting compose/shared/backups ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/compose" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups"
-    run_cmd "setting compose/shared/backups permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/compose" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups"
-
-    run_cmd "setting Filebrowser ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser"
-    run_cmd "setting Filebrowser permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/filebrowser"
-
-    run_cmd "setting Postiz uploads ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
-    run_cmd "setting Postiz uploads permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
-
-    # Traefik config and ACME.
-    run_cmd "setting Traefik ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${TRAEFIK_DIR}"
     run_cmd "setting Traefik config directory permissions" chmod 750 "${TRAEFIK_DIR}"
     run_cmd "setting Traefik ACME directory permissions" chmod 700 "${TRAEFIK_ACME_DIR}"
     run_cmd "setting Traefik static config permissions" chmod 644 "${TRAEFIK_STATIC_CONFIG_FILE}"
     run_cmd "setting Traefik dynamic config permissions" chmod 644 "${TRAEFIK_DYNAMIC_CONFIG_FILE}"
     run_cmd "setting Traefik ACME storage permissions" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
 
-    # Optional admin UI data directories.
-    case "$ADMIN_UI" in
-        dockge) run_cmd "setting Dockge ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockge" ;;
-        portainer) run_cmd "setting Portainer ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/portainer" ;;
-        komodo) run_cmd "setting Komodo ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo" ;;
-        dockhand) run_cmd "setting Dockhand ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockhand" ;;
-    esac
-
-    # Secrets and .env.
-    run_cmd "setting .env ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/.env"
     run_cmd "setting .env permissions" chmod 600 "${DOCKER_DIR}/.env"
-    run_cmd "setting secrets directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_SECRETS_DIR"
     run_cmd "setting secrets directory permissions" chmod 700 "$DOCKER_SECRETS_DIR"
 
     if compgen -G "${DOCKER_SECRETS_DIR}/*" > /dev/null; then
         run_cmd "setting secret file permissions" chmod 600 "${DOCKER_SECRETS_DIR}"/*
     fi
 
-    msg_ok "SERVICE-SPECIFIC PERMISSIONS SET"
+    msg_ok "PERMISSIONS SET"
 }
 
 # =========================================================
@@ -1945,12 +1824,6 @@ function show_secrets_once_without_logging() {
     echo -e "REDIS_PASSWORD=${GN}${REDIS_PASSWORD}${CL}"
     echo -e "AUTHENTIK_SECRET_KEY=${GN}${AUTHENTIK_SECRET_KEY}${CL}"
     echo -e "AUTHENTIK_POSTGRES_PASSWORD=${GN}${AUTHENTIK_POSTGRES_PASSWORD}${CL}"
-    echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_HOST_VALUE}${CL}"
-    echo -e "AUTHENTIK_HOST_BROWSER=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_EMAIL=${GN}${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${GN}${AUTHENTIK_BOOTSTRAP_PASSWORD}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_TOKEN=${GN}${AUTHENTIK_BOOTSTRAP_TOKEN}${CL}"
-    echo -e "${YW}Reminder: AUTHENTIK_BOOTSTRAP_TOKEN is not an Authentik API token.${CL}"
     echo -e "POSTIZ_POSTGRES_PASSWORD=${GN}${POSTIZ_POSTGRES_PASSWORD}${CL}"
     echo -e "POSTIZ_JWT_SECRET=${GN}${POSTIZ_JWT_SECRET}${CL}"
     echo -e "TEMPORAL_POSTGRES_PASSWORD=${GN}${TEMPORAL_POSTGRES_PASSWORD}${CL}"
@@ -2006,7 +1879,7 @@ function show_clean_final_summary() {
     echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Run Script 6.5 to deploy selected stacks hands-free from GitHub into admin-UI-compatible stack folders.${CL}"
+    echo -e "${YW}Run script 6.5 to create Docker networks and bootstrap socket-proxy + Portainer.${CL}"
     echo ""
 }
 
@@ -2027,8 +1900,6 @@ function main() {
     collect_domain_cloudflare_inputs
     collect_traefik_inputs
     collect_htpasswd_inputs
-    collect_admin_ui_selection
-    collect_authentik_bootstrap_inputs
 
     create_docker_directories
     generate_or_reuse_secrets

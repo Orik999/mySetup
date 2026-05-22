@@ -453,62 +453,17 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    flush_input_buffer
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # This prevents accepting defaults while the user is away and gives time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer
-
     echo "$answer"
 }
+
 
 # --- 21. REBOOT COUNTDOWN HELPER ---
 # Offers Ubuntu VM Setup-compatible reboot flow so Docker group membership applies cleanly.
@@ -951,6 +906,31 @@ function collect_user_options() {
     else
         INSTALL_DOCKER_GC="n"
     fi
+}
+
+
+# --- 33A. READY TO APPLY SUMMARY ---
+# Shows every collected answer before any Docker/system changes are made.
+function show_ready_summary_and_confirm() {
+    local apply_yn=""
+
+    section "READY TO APPLY"
+
+    echo -e "${YW}All questions have been collected. No Docker/system-changing actions have been applied yet.${CL}"
+    echo ""
+    detail_line "Environment" "${VIRT_TYPE}"
+    detail_line "Target user" "$TARGET_USER"
+    detail_line "Existing Docker setup" "$EXISTING_SETUP"
+    detail_line "Disable swap" "$(yes_no_label "$DISABLE_SWAP")"
+    detail_line "Configure UFW" "$(yes_no_label "$CONFIGURE_UFW")"
+    detail_line "Install safe Docker cleanup timer" "$(yes_no_label "$INSTALL_DOCKER_GC")"
+    detail_line "Docker firewall mode" "$DOCKER_FIREWALL_MODE"
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script will begin installing/configuring Docker.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply this Docker setup plan now?" "y")"
+    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
 }
 
 # =========================================================
@@ -1683,6 +1663,7 @@ function main() {
     detect_existing_setup
     start_confirmation
     collect_user_options
+    show_ready_summary_and_confirm
 
     handle_swap
     configure_redis_host_tuning

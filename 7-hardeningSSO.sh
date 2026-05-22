@@ -405,62 +405,17 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    flush_input_buffer
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # This prevents accepting defaults while the user is away and gives time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer
-
     echo "$answer"
 }
+
 
 function sensitive_line_input() {
     local prompt="$1"
@@ -756,6 +711,33 @@ function verify_traefik_dynamic_config() {
     fi
 
     TRAEFIK_CONFIG_OK="yes"
+}
+
+
+# --- 13A. READY TO APPLY SUMMARY ---
+# Shows the final hardening plan before Authentik, firewall/bootstrap or cleanup changes are made.
+function show_ready_summary_and_confirm() {
+    local apply_yn=""
+
+    section "READY TO APPLY"
+
+    echo -e "${YW}All required inputs and preflight checks have been collected.${CL}"
+    echo -e "${YW}No Authentik provider/outpost, bootstrap firewall or cleanup changes have been applied yet.${CL}"
+    echo ""
+    detail_line "Docker user" "$DOCKER_USER"
+    detail_line "Docker directory" "$DOCKER_DIR"
+    detail_line "Compose directory" "$COMPOSE_DIR"
+    detail_line "Domain" "$DOMAIN"
+    detail_line "Authentik host" "$AUTHENTIK_HOST"
+    detail_line "Selected admin UI" "$ADMIN_UI"
+    detail_line "Authentik token source" "$AUTHENTIK_TOKEN_SOURCE"
+    detail_line "Authentik API status" "$AUTHENTIK_API_OK"
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script may update Authentik, close bootstrap exposure, harden sudo and clean guard artifacts.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply final hardening and SSO plan now?" "y")"
+    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
 }
 
 # =========================================================
@@ -1216,14 +1198,15 @@ function remove_portainer_ufw_rule() {
 function verify_postiz_health() {
     section "POSTIZ HEALTH CHECK"
 
-    local api_url="https://postiz.${DOMAIN}/api/user/self"
-    local auth_url="https://postiz.${DOMAIN}/auth"
-    local api_code=""
-    local auth_code=""
+    local postiz_running="no"
+    local temporal_running="no"
     local backend_port_found=""
+    local auth_url="https://postiz.${DOMAIN}/auth"
+    local auth_code=""
 
     msg_info "Checking Temporal container"
     if docker_cmd ps --format '{{.Names}}' | grep -qx 'temporal'; then
+        temporal_running="yes"
         msg_ok "TEMPORAL RUNNING"
     else
         POSTIZ_HEALTH_OK="no"
@@ -1233,6 +1216,7 @@ function verify_postiz_health() {
 
     msg_info "Checking Postiz container"
     if docker_cmd ps --format '{{.Names}}' | grep -qx 'postiz'; then
+        postiz_running="yes"
         msg_ok "POSTIZ RUNNING"
     else
         POSTIZ_HEALTH_OK="no"
@@ -1253,45 +1237,26 @@ function verify_postiz_health() {
         return 0
     fi
 
-    msg_info "Checking Postiz API route"
-    api_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$api_url" || true)"
-
-    if [ "$api_code" == "502" ]; then
-        POSTIZ_WEB_ROUTE_OK="no"
-        POSTIZ_HEALTH_OK="no"
-        msg_warn "POSTIZ API RETURNED 502; TEMPORAL GUARD CLEANUP WILL BE SKIPPED"
-        return 0
-    fi
-
-    case "$api_code" in
-        200|301|302|307|308|401|403)
-            POSTIZ_WEB_ROUTE_OK="yes"
-            ;;
-        *)
-            POSTIZ_WEB_ROUTE_OK="warn-${api_code:-none}"
-            msg_warn "POSTIZ API RETURNED HTTP ${api_code:-none}; GUARD CLEANUP WILL BE SKIPPED UNTIL VERIFIED"
-            POSTIZ_HEALTH_OK="no"
-            return 0
-            ;;
-    esac
-
+    msg_info "Checking Postiz web route"
     auth_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$auth_url" || true)"
+
     case "$auth_code" in
         200|301|302|307|308|401|403)
+            POSTIZ_WEB_ROUTE_OK="yes"
             POSTIZ_HEALTH_OK="yes"
-            msg_ok "POSTIZ API AND WEB ROUTES ARE HEALTHY"
+            msg_ok "POSTIZ WEB ROUTE RESPONDED WITH HTTP ${auth_code}"
             ;;
         *)
+            POSTIZ_WEB_ROUTE_OK="no"
             POSTIZ_HEALTH_OK="no"
-            msg_warn "POSTIZ AUTH PAGE RETURNED HTTP ${auth_code:-none}; GUARD CLEANUP WILL BE SKIPPED"
+            msg_warn "POSTIZ WEB ROUTE RETURNED HTTP ${auth_code:-none}; POSTIZ GUARD CLEANUP WILL BE SKIPPED"
             return 0
             ;;
     esac
 
     detail_line "Postiz health" "$POSTIZ_HEALTH_OK"
     detail_line "Backend port 3000" "$POSTIZ_BACKEND_PORT_OK"
-    detail_line "API route" "${api_url} -> ${api_code}"
-    detail_line "Auth route" "${auth_url} -> ${auth_code}"
+    detail_line "Web route" "${auth_url} -> ${auth_code}"
 }
 
 # --- 20. POSTIZ TEMPORAL GUARD STOPPER ---
@@ -1649,8 +1614,8 @@ function main() {
     verify_traefik_dynamic_config
     collect_authentik_api_token
     verify_authentik_api
+    show_ready_summary_and_confirm
     create_or_update_authentik_forward_auth
-    refresh_authentik_after_api_changes
     verify_authentik_outpost_302
 
     configure_admin_ui_sso

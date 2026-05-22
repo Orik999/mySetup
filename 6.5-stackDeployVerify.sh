@@ -3,174 +3,1652 @@ set -euo pipefail
 shopt -s inherit_errexit nullglob
 
 # =========================================================
-#  Docker Stack Deploy + Verify
+#  Docker Bootstrap Setup
 # =========================================================
-# Deploys Crea stacks hands-free from GitHub into admin-UI-compatible stack folders.
-# Scripts deploy first; Dockge/Dockhand/Portainer/Komodo manage afterwards.
 
-YW="$(printf '\033[33m')"; BL="$(printf '\033[36m')"; RD="$(printf '\033[01;31m')"; GN="$(printf '\033[1;92m')"; CL="$(printf '\033[m')"; CLF="$(printf '\033[5m')"; BFR="\\r\\033[K"
-HOLD="-"; CM="${GN}✓${CL}"; WARN="${YW}!${CL}"; CROSS="${RD}✗${CL}"; BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+# --- 1. COLOR VARIABLES (KEEP ALL FOR FUTURE MODIFICATIONS) ---
+# Central visual theme aligned with Script 1 / Script 4 / Script 5 / Script 6.
+YW="$(printf '\033[33m')"
+BL="$(printf '\033[36m')"
+RD="$(printf '\033[01;31m')"
+BGN="$(printf '\033[4;92m')"
+GN="$(printf '\033[1;92m')"
+DGN="$(printf '\033[32m')"
+CL="$(printf '\033[m')"
+CLF="$(printf '\033[5m')"
+BFR="\\r\\033[K"
+
+HOLD="-"
+CM="${GN}✓${CL}"
+WARN="${YW}!${CL}"
+CROSS="${RD}✗${CL}"
+BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
+
+# --- 2. GLOBAL VARIABLES ---
+# Stores timers, paths, GitHub source, Docker state and final bootstrap results.
 T=15
-LOG_FILE="/var/log/docker-stack-deploy-verify.log"; RUNTIME_LOG_FILE=""; VERIFY_LOG="/var/log/docker-stack-deploy-verify-report.log"; COMPLETED_MARKER="/root/.docker-stack-deploy-verify-completed"
-DEFAULT_DOCKER_USER="${SUDO_USER:-orik}"; DOCKER_USER="${DOCKER_USER:-$DEFAULT_DOCKER_USER}"; DOCKER_DIR="${DOCKER_DIR:-/home/${DOCKER_USER}/docker}"; COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"; ENV_FILE="${ENV_FILE:-${DOCKER_DIR}/.env}"
+
+LOG_FILE="/var/log/docker-bootstrap-setup.log"
+RUNTIME_LOG_FILE=""
+VERIFY_LOG="/var/log/docker-bootstrap-setup-verify.log"
+COMPLETED_MARKER="/root/.docker-bootstrap-setup-completed"
+
+DEFAULT_DOCKER_USER="${SUDO_USER:-orik}"
+DOCKER_USER="${DOCKER_USER:-$DEFAULT_DOCKER_USER}"
+DOCKER_DIR="${DOCKER_DIR:-/home/${DOCKER_USER}/docker}"
+COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"
+ENV_FILE="${ENV_FILE:-${DOCKER_DIR}/.env}"
+
 GITHUB_RAW_BASE="${GITHUB_RAW_BASE:-https://raw.githubusercontent.com/Orik999/mySetup/main/docker}"
-GITHUB_API_TREE_URL="${GITHUB_API_TREE_URL:-https://api.github.com/repos/Orik999/mySetup/git/trees/main?recursive=1}"
-SUDO_CMD=""; DOCKER_NEEDS_SUDO="no"; DOMAIN=""; ADMIN_UI="dockge"; ADMIN_UI_DISPLAY_NAME="Dockge"; ADMIN_UI_PROJECT="dockge"; ADMIN_UI_SERVICE="dockge"; ADMIN_UI_BOOTSTRAP_PORT="5001"; ADMIN_UI_INTERNAL_PORT="5001"; ADMIN_UI_BOOTSTRAP_SCHEME="http"
-SELECT_CF_DDNS="n"; SELECT_CF_COMPANION="y"; SELECT_VSCODE="n"; SELECT_FILEBROWSER="n"; SELECT_EXTRA_STACKS="n"
-DEPLOYED_STACKS=(); TEMP_FILES=(); EXTRA_STACK_PATHS=(); EXTRA_STACK_NAMES=()
+SOCKET_PROXY_STACK_FILE="00-socket-proxy-compose.yml"
+PORTAINER_STACK_FILE="01-portainer-compose.yml"
+PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME="01-portainer-bootstrap-override.yml"
+DOCKGE_STACK_FILE="13-dockge-compose.yml"
+KOMODO_STACK_FILE="14-komodo-compose.yml"
+DOCKHAND_STACK_FILE="15-dockhand-compose.yml"
 
-declare -A STACK_FILE STACK_FOLDER STACK_PROJECT STACK_SERVICE STACK_REQUIRED STACK_OPTIONAL STACK_DESC STACK_BOOTSTRAP_FILE
-STACK_FILE[socket-proxy]="00-socket-proxy-compose.yml"; STACK_FOLDER[socket-proxy]="socket-proxy"; STACK_PROJECT[socket-proxy]="socket-proxy"; STACK_SERVICE[socket-proxy]="socket-proxy"; STACK_DESC[socket-proxy]="Docker socket proxy"
-STACK_FILE[postgres]="02-postgres-compose.yml"; STACK_FOLDER[postgres]="postgres"; STACK_PROJECT[postgres]="postgres"; STACK_SERVICE[postgres]="postgres"; STACK_DESC[postgres]="Shared PostgreSQL"
-STACK_FILE[redis]="03-redis-compose.yml"; STACK_FOLDER[redis]="redis"; STACK_PROJECT[redis]="redis"; STACK_SERVICE[redis]="redis"; STACK_DESC[redis]="Shared Redis"
-STACK_FILE[traefik]="04-traefik-compose.yml"; STACK_FOLDER[traefik]="traefik"; STACK_PROJECT[traefik]="traefik"; STACK_SERVICE[traefik]="traefik"; STACK_DESC[traefik]="Traefik reverse proxy"
-STACK_FILE[authentik]="05-authentik-compose.yml"; STACK_FOLDER[authentik]="authentik"; STACK_PROJECT[authentik]="authentik"; STACK_SERVICE[authentik]="authentik-server"; STACK_DESC[authentik]="Authentik SSO"
-STACK_FILE[temporal]="06-temporal-compose.yml"; STACK_FOLDER[temporal]="temporal"; STACK_PROJECT[temporal]="temporal"; STACK_SERVICE[temporal]="temporal"; STACK_DESC[temporal]="Temporal workflow engine"
-STACK_FILE[postiz-temporal-guard]="07-postiz-temporal-guard-compose.yml"; STACK_FOLDER[postiz-temporal-guard]="postiz-temporal-guard"; STACK_PROJECT[postiz-temporal-guard]="postiz-temporal-guard"; STACK_SERVICE[postiz-temporal-guard]="postiz-temporal-guard"; STACK_DESC[postiz-temporal-guard]="One-shot Temporal cleanup helper"
-STACK_FILE[postiz]="08-postiz-compose.yml"; STACK_FOLDER[postiz]="postiz"; STACK_PROJECT[postiz]="postiz"; STACK_SERVICE[postiz]="postiz"; STACK_DESC[postiz]="Postiz application"
-STACK_FILE[cf-ddns]="09-cf-ddns-compose.yml"; STACK_FOLDER[cf-ddns]="cf-ddns"; STACK_PROJECT[cf-ddns]="cf-ddns"; STACK_SERVICE[cf-ddns]="cf-ddns"; STACK_DESC[cf-ddns]="Cloudflare DDNS optional"
-STACK_FILE[cf-companion]="10-cf-companion-compose.yml"; STACK_FOLDER[cf-companion]="cf-companion"; STACK_PROJECT[cf-companion]="cf-companion"; STACK_SERVICE[cf-companion]="cf-companion"; STACK_DESC[cf-companion]="Cloudflare DNS companion"
-STACK_FILE[vscode]="11-vscode-compose.yml"; STACK_FOLDER[vscode]="vscode"; STACK_PROJECT[vscode]="vscode"; STACK_SERVICE[vscode]="vscode"; STACK_DESC[vscode]="VS Code Server optional"
-STACK_FILE[filebrowser]="12-filebrowser-compose.yml"; STACK_FOLDER[filebrowser]="filebrowser"; STACK_PROJECT[filebrowser]="filebrowser"; STACK_SERVICE[filebrowser]="filebrowser"; STACK_DESC[filebrowser]="Filebrowser optional"
-STACK_FILE[dockge]="01-[1]-dockge-compose.yml"; STACK_FOLDER[dockge]="dockge"; STACK_PROJECT[dockge]="dockge"; STACK_SERVICE[dockge]="dockge"; STACK_BOOTSTRAP_FILE[dockge]="01-[1]-dockge-bootstrap-override.yml"
-STACK_FILE[dockhand]="01-[2]-dockhand-compose.yml"; STACK_FOLDER[dockhand]="dockhand"; STACK_PROJECT[dockhand]="dockhand"; STACK_SERVICE[dockhand]="dockhand"; STACK_BOOTSTRAP_FILE[dockhand]="01-[2]-dockhand-bootstrap-override.yml"
-STACK_FILE[komodo]="01-[3]-komodo-compose.yml"; STACK_FOLDER[komodo]="komodo"; STACK_PROJECT[komodo]="komodo"; STACK_SERVICE[komodo]="komodo-core"; STACK_BOOTSTRAP_FILE[komodo]="01-[3]-komodo-bootstrap-override.yml"
-STACK_FILE[portainer]="01-[4]-portainer-compose.yml"; STACK_FOLDER[portainer]="portainer"; STACK_PROJECT[portainer]="portainer"; STACK_SERVICE[portainer]="portainer"; STACK_BOOTSTRAP_FILE[portainer]="01-[4]-portainer-bootstrap-override.yml"
+# Optional environment overrides for advanced/testing workflows.
+# If these are not set, URLs are rebuilt from GITHUB_RAW_BASE after user input.
+SOCKET_PROXY_STACK_URL_OVERRIDE="${SOCKET_PROXY_STACK_URL:-}"
+PORTAINER_STACK_URL_OVERRIDE="${PORTAINER_STACK_URL:-}"
+PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${PORTAINER_BOOTSTRAP_OVERRIDE_URL:-}"
+DOCKGE_STACK_URL_OVERRIDE="${DOCKGE_STACK_URL:-}"
+DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME="13-dockge-bootstrap-override.yml"
+DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${DOCKGE_BOOTSTRAP_OVERRIDE_URL:-}"
+KOMODO_STACK_URL_OVERRIDE="${KOMODO_STACK_URL:-}"
+KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME="14-komodo-bootstrap-override.yml"
+KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${KOMODO_BOOTSTRAP_OVERRIDE_URL:-}"
+DOCKHAND_STACK_URL_OVERRIDE="${DOCKHAND_STACK_URL:-}"
+DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME="15-dockhand-bootstrap-override.yml"
+DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${DOCKHAND_BOOTSTRAP_OVERRIDE_URL:-}"
+SOCKET_PROXY_STACK_URL="${SOCKET_PROXY_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${SOCKET_PROXY_STACK_FILE}}"
+PORTAINER_STACK_URL="${PORTAINER_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${PORTAINER_STACK_FILE}}"
+PORTAINER_BOOTSTRAP_OVERRIDE_URL="${PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
+DOCKGE_STACK_URL="${DOCKGE_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKGE_STACK_FILE}}"
+DOCKGE_BOOTSTRAP_OVERRIDE_URL="${DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
+KOMODO_STACK_URL="${KOMODO_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${KOMODO_STACK_FILE}}"
+KOMODO_BOOTSTRAP_OVERRIDE_URL="${KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
+DOCKHAND_STACK_URL="${DOCKHAND_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKHAND_STACK_FILE}}"
+DOCKHAND_BOOTSTRAP_OVERRIDE_URL="${DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
 
-header_info(){ echo -e "${BL}DOCKER STACK DEPLOY + VERIFY${CL}"; }
-msg_info(){ echo -ne " ${HOLD} ${YW}${1:-}...${CL}"; }; msg_ok(){ echo -e "${BFR} ${CM} ${GN}${1:-}${CL}"; }; msg_warn(){ echo -e "${BFR} ${WARN} ${YW}${1:-}${CL}"; }; msg_skip(){ echo -e "${BFR} ${WARN} ${YW}${1:-}${CL}"; }; msg_error(){ echo -e "${BFR} ${CROSS} ${RD}${1:-Unknown error}${CL}"; exit 1; }
-section(){ echo ""; echo -e "$BORDER"; echo -e "${BL}$1${CL}"; echo -e "$BORDER"; }
-detail_line(){ echo -e " ${BL}━━━━━▶${CL} ${1:-}: ${GN}${2:-}${CL}"; }
-tty_print(){ if [ -w /dev/tty ]; then echo -ne "$*" >/dev/tty; else echo -ne "$*" >&2; fi; }
-tty_println(){ if [ -w /dev/tty ]; then echo -e "$*" >/dev/tty; else echo -e "$*" >&2; fi; }
-flush_input_buffer(){ local junk="" i=""; [ -r /dev/tty ] || return 0; for i in {1..20}; do IFS= read -rsn1 -t 0.02 junk </dev/tty 2>/dev/null || break; done; }
-yes_no_label(){ [[ "$1" =~ ^[Yy]$ ]] && echo yes || echo no; }
-tty_read_yes_no_blocking(){ local prompt="$1" default="$2" key="" label="Y/n"; [[ "$default" =~ ^[Nn]$ ]] && label="y/N"; flush_input_buffer; while true; do tty_print "${BFR}${YW}${prompt} (${label}): ${CL}"; IFS= read -rsn1 key </dev/tty || true; if [[ -z "$key" ]]; then tty_print "$BFR"; echo "$default"; return; elif [[ "$key" =~ ^[YyNn]$ ]]; then tty_print "$BFR"; echo "$key"; return; fi; done; }
-timed_yes_no(){ local prompt="$1" default="$2" answer="" key="" label="Y/n" deadline now remaining; [[ "$default" =~ ^[Nn]$ ]] && label="y/N"; flush_input_buffer; deadline=$(( $(date +%s)+T )); while true; do now=$(date +%s); remaining=$((deadline-now)); [ "$remaining" -le 0 ] && { answer="$default"; break; }; tty_print "${BFR}${YW}${prompt} (${label}) [${remaining}s]${CL} "; if IFS= read -rsn1 -t 1 key </dev/tty; then if [[ "$key" == " " ]]; then answer="$(tty_read_yes_no_blocking "$prompt" "$default")"; break; elif [[ "$key" =~ ^[YyNn]$ ]]; then answer="$key"; break; elif [[ -z "$key" ]]; then answer="$default"; break; fi; fi; done; tty_print "$BFR"; tty_println "${CM} ${GN}${prompt} $(yes_no_label "$answer")${CL}"; echo "$answer"; }
-editable_input_loop(){ local prompt="$1" default="$2" answer="${3:-}" key=""; flush_input_buffer; while true; do tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"; IFS= read -rsn1 key </dev/tty || true; case "$key" in "") [ -z "$answer" ] && answer="$default"; tty_print "$BFR"; echo "$answer"; return;; $'\177'|$'\b') answer="${answer%?}";; *) answer+="$key";; esac; done; }
-timed_text_input(){ local prompt="$1" default="$2" answer="" key="" deadline now remaining; flush_input_buffer; deadline=$(( $(date +%s)+T )); while true; do now=$(date +%s); remaining=$((deadline-now)); [ "$remaining" -le 0 ] && { answer="$default"; break; }; tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"; if IFS= read -rsn1 -t 1 key </dev/tty; then if [[ "$key" == " " ]]; then answer="$(editable_input_loop "$prompt" "$default" "")"; break; elif [[ -z "$key" ]]; then answer="$default"; break; else answer="$(editable_input_loop "$prompt" "$default" "$key")"; break; fi; fi; done; [ -z "$answer" ] && answer="$default"; tty_print "$BFR"; tty_println "${CM} ${GN}${prompt} ${answer}${CL}"; echo "$answer"; }
-cleanup(){ local ec="$?" f=""; if [ -n "${SUDO_CMD:-}" ] && [ -n "${RUNTIME_LOG_FILE:-}" ] && [ -s "$RUNTIME_LOG_FILE" ]; then "$SUDO_CMD" cp "$RUNTIME_LOG_FILE" "$LOG_FILE" 2>/dev/null || true; "$SUDO_CMD" chmod 0644 "$LOG_FILE" 2>/dev/null || true; fi; for f in "${TEMP_FILES[@]:-}"; do [ -f "$f" ] && rm -f "$f"; done; exit "$ec"; }
-on_error(){ echo -e "${RD}ERROR:${CL} Script failed at line $1. Check ${LOG_FILE}"; }
-detect_root_or_sudo(){ [ "$EUID" -eq 0 ] && SUDO_CMD="" || SUDO_CMD="sudo"; }
-validate_sudo_access(){ if [ -n "$SUDO_CMD" ]; then msg_info "Validating sudo access"; "$SUDO_CMD" -n true >/dev/null 2>&1 || "$SUDO_CMD" -v || msg_error "Sudo authentication failed"; msg_ok "SUDO ACCESS CONFIRMED"; fi; }
-init_logging(){ if [ -n "$SUDO_CMD" ]; then RUNTIME_LOG_FILE="$(mktemp /tmp/docker-stack-deploy-log.XXXXXX)"; TEMP_FILES+=("$RUNTIME_LOG_FILE"); exec > >(tee -a "$RUNTIME_LOG_FILE") 2>&1; else RUNTIME_LOG_FILE="$LOG_FILE"; exec > >(tee -a "$LOG_FILE") 2>&1; fi; }
-validate_dependencies(){ for c in awk cat chmod curl date docker grep head id mkdir mktemp python3 rm sed tee timeout; do command -v "$c" >/dev/null 2>&1 || msg_error "Required command not found: $c"; done; }
-init_script(){ detect_root_or_sudo; validate_sudo_access; init_logging; trap 'on_error "$LINENO"' ERR; trap cleanup EXIT; clear; header_info; validate_dependencies; }
-docker_cmd(){ if [ "$DOCKER_NEEDS_SUDO" = "yes" ]; then "$SUDO_CMD" docker "$@"; else docker "$@"; fi; }
-run_cmd(){ local desc="$1"; shift; local err; err="$(mktemp)"; TEMP_FILES+=("$err"); if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" "$@" >/dev/null 2>"$err" || { echo; echo -e "${RD}Command failed:${CL} $desc"; cat "$err"; exit 1; }; else "$@" >/dev/null 2>"$err" || { echo; echo -e "${RD}Command failed:${CL} $desc"; cat "$err"; exit 1; }; fi; rm -f "$err"; }
-run_docker(){ local desc="$1"; shift; local err; err="$(mktemp)"; TEMP_FILES+=("$err"); docker_cmd "$@" >/dev/null 2>"$err" || { echo; echo -e "${RD}Docker command failed:${CL} $desc"; cat "$err"; exit 1; }; rm -f "$err"; }
-env_value(){ awk -F= -v k="$1" '$1==k {v=$0; sub("^[^=]*=","",v); gsub(/^"|"$/,"",v); print v; exit}' "$ENV_FILE" 2>/dev/null || true; }
+SOCKET_PROXY_SUBNET_EXPECTED="192.168.91.0/24"
+T2_PROXY_SUBNET_EXPECTED="192.168.90.0/24"
+SOCKET_PROXY_SUBNET_ACTUAL=""
+T2_PROXY_SUBNET_ACTUAL=""
+DATABASE_NETWORK_NAME=""
 
-detect_docker_access(){ section "DOCKER ACCESS"; if docker ps >/dev/null 2>&1; then DOCKER_NEEDS_SUDO="no"; msg_ok "DOCKER ACCESS CONFIRMED"; elif [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker ps >/dev/null 2>&1; then DOCKER_NEEDS_SUDO="yes"; msg_ok "DOCKER ACCESS CONFIRMED WITH SUDO"; else msg_error "Docker daemon not reachable. Run Script 5 first."; fi; }
-load_project_inputs(){ section "PROJECT SETTINGS"; DOCKER_USER="$(timed_text_input "Enter Docker Linux user" "$DOCKER_USER")"; DOCKER_DIR="$(timed_text_input "Enter Docker directory" "$DOCKER_DIR")"; COMPOSE_DIR="$(timed_text_input "Enter Docker compose directory" "$COMPOSE_DIR")"; ENV_FILE="$(timed_text_input "Enter Docker .env path" "$ENV_FILE")"; GITHUB_RAW_BASE="$(timed_text_input "Enter GitHub raw compose base" "$GITHUB_RAW_BASE")"; [ -f "$ENV_FILE" ] || msg_error ".env missing: $ENV_FILE"; DOMAIN="$(env_value DOMAIN)"; ADMIN_UI="$(env_value ADMIN_UI)"; ADMIN_UI="${ADMIN_UI:-dockge}"; detail_line "Domain" "$DOMAIN"; detail_line "Selected admin UI" "$ADMIN_UI"; }
-configure_admin_ui(){ case "$ADMIN_UI" in dockge) ADMIN_UI_DISPLAY_NAME="Dockge"; ADMIN_UI_PROJECT="dockge"; ADMIN_UI_SERVICE="dockge"; ADMIN_UI_BOOTSTRAP_PORT="${DOCKGE_BOOTSTRAP_PORT:-5001}"; ADMIN_UI_INTERNAL_PORT="5001"; ADMIN_UI_BOOTSTRAP_SCHEME="http";; dockhand) ADMIN_UI_DISPLAY_NAME="Dockhand"; ADMIN_UI_PROJECT="dockhand"; ADMIN_UI_SERVICE="dockhand"; ADMIN_UI_BOOTSTRAP_PORT="${DOCKHAND_BOOTSTRAP_PORT:-3000}"; ADMIN_UI_INTERNAL_PORT="3000"; ADMIN_UI_BOOTSTRAP_SCHEME="http";; komodo) ADMIN_UI_DISPLAY_NAME="Komodo"; ADMIN_UI_PROJECT="komodo"; ADMIN_UI_SERVICE="komodo-core"; ADMIN_UI_BOOTSTRAP_PORT="${KOMODO_BOOTSTRAP_PORT:-9120}"; ADMIN_UI_INTERNAL_PORT="9120"; ADMIN_UI_BOOTSTRAP_SCHEME="http";; portainer|portainer-ce) ADMIN_UI="portainer"; ADMIN_UI_DISPLAY_NAME="Portainer"; ADMIN_UI_PROJECT="portainer"; ADMIN_UI_SERVICE="portainer"; ADMIN_UI_BOOTSTRAP_PORT="${PORTAINER_BOOTSTRAP_PORT:-9443}"; ADMIN_UI_INTERNAL_PORT="9443"; ADMIN_UI_BOOTSTRAP_SCHEME="https";; *) msg_error "Unsupported ADMIN_UI in .env: $ADMIN_UI";; esac; detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"; }
-preflight_permissions(){ section "PREFLIGHT PERMISSIONS"; [ -d "$DOCKER_DIR" ] || msg_error "Docker dir missing: $DOCKER_DIR"; [ -d "$COMPOSE_DIR" ] || run_cmd "creating compose dir" mkdir -p "$COMPOSE_DIR"; run_cmd "owning compose dir" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$COMPOSE_DIR"; local pdir="${DOCKER_DIR}/appdata/postgres/data" rdir="${DOCKER_DIR}/appdata/redis"; [ -d "$pdir" ] || msg_error "PostgreSQL data dir missing. Run Script 6."; [ -d "$rdir" ] || msg_error "Redis data dir missing. Run Script 6."; local po ro; po="$(stat -c '%u:%g %a' "$pdir" 2>/dev/null || true)"; ro="$(stat -c '%u:%g %a' "$rdir" 2>/dev/null || true)"; detail_line "PostgreSQL data" "$po"; detail_line "Redis data" "$ro"; [[ "$po" == 999:999* ]] || msg_error "PostgreSQL data must be owned 999:999. Re-run fixed Script 6 permissions."; [[ "$ro" == 999:999* ]] || msg_error "Redis data must be owned 999:999. Re-run fixed Script 6 permissions."; msg_ok "PREFLIGHT PERMISSIONS PASSED"; }
-collect_stack_choices(){ section "STACK SELECTION"; echo -e "${YW}Core deployment includes socket-proxy, ${ADMIN_UI_DISPLAY_NAME}, PostgreSQL, Redis, Traefik, Authentik, Temporal, Temporal Guard and Postiz.${CL}"; echo -e "${YW}Required dependencies are auto-selected when Postiz is selected.${CL}"; echo ""; local deploy_core; deploy_core="$(timed_yes_no "Deploy core Crea/Postiz stack?" "y")"; [[ "$deploy_core" =~ ^[Yy]$ ]] || msg_error "Core deployment is required for this project flow."; SELECT_CF_COMPANION="$(timed_yes_no "Deploy Cloudflare Companion DNS automation?" "y")"; SELECT_CF_DDNS="$(timed_yes_no "Deploy optional Cloudflare DDNS updater?" "n")"; SELECT_VSCODE="$(timed_yes_no "Deploy optional VS Code Server?" "n")"; SELECT_FILEBROWSER="$(timed_yes_no "Deploy optional Filebrowser?" "n")"; SELECT_EXTRA_STACKS="$(timed_yes_no "Scan GitHub for additional optional stack YMLs?" "n")"; }
-stack_dir(){ echo "${COMPOSE_DIR}/${STACK_FOLDER[$1]}"; }
-stack_compose(){ echo "$(stack_dir "$1")/compose.yaml"; }
-stack_override(){ echo "$(stack_dir "$1")/bootstrap.override.yaml"; }
-download_file(){ curl -fsSL "$1" -o "$2"; }
-download_stack(){ local s="$1" dir file url; dir="$(stack_dir "$s")"; file="$(stack_compose "$s")"; url="${GITHUB_RAW_BASE}/${STACK_FILE[$s]}"; msg_info "Downloading ${STACK_DESC[$s]:-$s}"; mkdir -p "$dir"; download_file "$url" "$file"; chmod 640 "$file"; chown "${DOCKER_USER}:${DOCKER_USER}" "$file" 2>/dev/null || true; msg_ok "${s} COMPOSE READY"; if [ -n "${STACK_BOOTSTRAP_FILE[$s]:-}" ]; then url="${GITHUB_RAW_BASE}/${STACK_BOOTSTRAP_FILE[$s]}"; download_file "$url" "$(stack_override "$s")"; chmod 640 "$(stack_override "$s")"; chown "${DOCKER_USER}:${DOCKER_USER}" "$(stack_override "$s")" 2>/dev/null || true; msg_ok "${s} BOOTSTRAP OVERRIDE READY"; fi; }
-download_selected_stacks(){ section "DOWNLOAD STACKS"; local stacks=(socket-proxy "$ADMIN_UI" postgres redis traefik authentik temporal postiz-temporal-guard postiz); [[ "$SELECT_CF_DDNS" =~ ^[Yy]$ ]] && stacks+=(cf-ddns); [[ "$SELECT_CF_COMPANION" =~ ^[Yy]$ ]] && stacks+=(cf-companion); [[ "$SELECT_VSCODE" =~ ^[Yy]$ ]] && stacks+=(vscode); [[ "$SELECT_FILEBROWSER" =~ ^[Yy]$ ]] && stacks+=(filebrowser); local s; for s in "${stacks[@]}"; do download_stack "$s"; done; }
-validate_stack(){ local s="$1"; msg_info "Validating $s"; if [ "$s" = "$ADMIN_UI" ]; then run_docker "validating $s" compose --env-file "$ENV_FILE" -p "${STACK_PROJECT[$s]}" -f "$(stack_compose "$s")" -f "$(stack_override "$s")" config -q; else run_docker "validating $s" compose --env-file "$ENV_FILE" -p "${STACK_PROJECT[$s]}" -f "$(stack_compose "$s")" config -q; fi; msg_ok "$s VALID"; }
-validate_selected_stacks(){ section "VALIDATE STACKS"; local stacks=(socket-proxy "$ADMIN_UI" postgres redis traefik authentik temporal postiz-temporal-guard postiz); [[ "$SELECT_CF_DDNS" =~ ^[Yy]$ ]] && stacks+=(cf-ddns); [[ "$SELECT_CF_COMPANION" =~ ^[Yy]$ ]] && stacks+=(cf-companion); [[ "$SELECT_VSCODE" =~ ^[Yy]$ ]] && stacks+=(vscode); [[ "$SELECT_FILEBROWSER" =~ ^[Yy]$ ]] && stacks+=(filebrowser); local s; for s in "${stacks[@]}"; do validate_stack "$s"; done; }
-create_networks(){ section "DOCKER NETWORKS"; docker_cmd network create --driver bridge --subnet 192.168.91.0/24 socket_proxy >/dev/null 2>&1 || true; docker_cmd network create --driver bridge --subnet 192.168.90.0/24 t2_proxy >/dev/null 2>&1 || true; docker_cmd network create --driver bridge database >/dev/null 2>&1 || true; msg_ok "DOCKER NETWORKS READY"; }
-deploy_stack(){ local s="$1"; section "DEPLOY STACK - ${s^^}"; if [ "$s" = "$ADMIN_UI" ]; then run_docker "deploying $s" compose --env-file "$ENV_FILE" -p "${STACK_PROJECT[$s]}" -f "$(stack_compose "$s")" -f "$(stack_override "$s")" up -d; else run_docker "deploying $s" compose --env-file "$ENV_FILE" -p "${STACK_PROJECT[$s]}" -f "$(stack_compose "$s")" up -d; fi; DEPLOYED_STACKS+=("$s"); msg_ok "${s^^} DEPLOYED"; }
-wait_container(){ local name="$1" tries="${2:-60}" i status; msg_info "Waiting for $name"; for i in $(seq 1 "$tries"); do status="$(docker_cmd inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)"; [ "$status" = "running" ] && { msg_ok "$name RUNNING"; return 0; }; sleep 2; done; msg_error "$name did not start"; }
-verify_postgres(){ wait_container postgres 45; docker_cmd exec postgres pg_isready -U postgres -d postgres >/dev/null 2>&1 || msg_error "PostgreSQL pg_isready failed"; if docker_cmd logs postgres --tail=60 2>&1 | grep -qi 'permission denied'; then msg_error "PostgreSQL logs contain permission denied"; fi; msg_ok "POSTGRESQL VERIFIED"; }
-verify_redis(){ wait_container redis 45; docker_cmd exec redis redis-cli -a "$(env_value REDIS_PASSWORD)" ping 2>/dev/null | grep -q PONG || msg_error "Redis ping failed"; docker_cmd exec redis redis-cli -a "$(env_value REDIS_PASSWORD)" BGSAVE >/dev/null 2>&1 || msg_error "Redis BGSAVE failed"; if docker_cmd logs redis --tail=60 2>&1 | grep -qi 'permission denied\|MISCONF'; then msg_error "Redis logs contain persistence/permission errors"; fi; msg_ok "REDIS VERIFIED"; }
-verify_traefik(){ wait_container traefik 45; docker_cmd logs traefik --tail=100 2>&1 | grep -Eiq 'ERR|error|failed|authentik@docker' && msg_error "Traefik logs contain errors" || msg_ok "TRAEFIK VERIFIED"; }
-verify_authentik(){ wait_container authentik-server 90; wait_container authentik-worker 90; if docker_cmd logs authentik-server --tail=120 2>&1 | grep -Eiq 'Permission denied|MISCONF|FATAL|Traceback'; then msg_error "Authentik logs contain startup errors"; fi; msg_ok "AUTHENTIK VERIFIED"; }
-wait_temporal(){ wait_container temporal 90; local i; msg_info "Waiting for Temporal API"; for i in $(seq 1 90); do if docker_cmd run --rm --network database --entrypoint /bin/sh temporalio/admin-tools:latest -lc 'temporal --address temporal:7233 operator namespace list >/dev/null 2>&1 || temporal --address temporal:7233 operator search-attribute list >/dev/null 2>&1' >/dev/null 2>&1; then msg_ok "TEMPORAL API READY"; return 0; fi; sleep 2; done; msg_error "Temporal API did not become ready"; }
-run_postiz_guard(){ section "POSTIZ TEMPORAL GUARD"; run_docker "running Postiz Temporal Guard" compose --env-file "$ENV_FILE" -p postiz-temporal-guard -f "$(stack_compose postiz-temporal-guard)" up --force-recreate --abort-on-container-exit --exit-code-from postiz-temporal-guard; verify_temporal_guard; }
-verify_temporal_guard(){ msg_info "Verifying Temporal search attributes"; local out; out="$(docker_cmd run --rm --network database --entrypoint /bin/sh temporalio/admin-tools:latest -lc 'temporal --address temporal:7233 operator search-attribute list' 2>/dev/null || true)"; if printf '%s' "$out" | grep -qE 'Custom(Text|String)Field[[:space:]]+Text'; then echo "$out"; msg_error "Temporal Text attributes still present after guard"; fi; msg_ok "TEMPORAL SEARCH ATTRIBUTES CLEAN"; }
-verify_postiz(){ section "POSTIZ VERIFICATION"; wait_container postiz 90; local i ports code; msg_info "Waiting for Postiz backend :3000"; for i in $(seq 1 90); do ports="$(docker_cmd exec postiz sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i ':0BB8' || true" 2>/dev/null || true)"; [ -n "$ports" ] && { msg_ok "POSTIZ BACKEND :3000 LISTENING"; break; }; sleep 2; done; [ -n "${ports:-}" ] || msg_error "Postiz backend :3000 is not listening"; code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "https://postiz.${DOMAIN}/api/user/self" || true)"; [ "$code" = "502" ] && msg_error "Postiz API returned 502"; case "$code" in 200|301|302|307|308|401|403) msg_ok "POSTIZ API RESPONDED HTTP $code";; *) msg_warn "Postiz API returned HTTP ${code:-none}; check manually";; esac; }
-scan_github_optional(){
-    section "GITHUB OPTIONAL STACK SCAN"
-    [[ "$SELECT_EXTRA_STACKS" =~ ^[Yy]$ ]] || { msg_skip "EXTRA GITHUB STACK SCAN SKIPPED"; return 0; }
+PORTAINER_BOOTSTRAP_PORT="${PORTAINER_BOOTSTRAP_PORT:-9443}"
+DOCKGE_BOOTSTRAP_PORT="${DOCKGE_BOOTSTRAP_PORT:-5001}"
+KOMODO_BOOTSTRAP_PORT="${KOMODO_BOOTSTRAP_PORT:-9120}"
+DOCKHAND_BOOTSTRAP_PORT="${DOCKHAND_BOOTSTRAP_PORT:-3000}"
+ADMIN_UI_BOOTSTRAP_BIND="${ADMIN_UI_BOOTSTRAP_BIND:-0.0.0.0}"
+ADMIN_UI_BOOTSTRAP_PORT=""
+ADMIN_UI_INTERNAL_PORT=""
+ADMIN_UI_BOOTSTRAP_SCHEME="http"
+ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME=""
+ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE=""
+ADMIN_UI_BOOTSTRAP_ACCESS_IP=""
+ADMIN_UI_BOOTSTRAP_ACCESS_URL=""
 
-    local tmp list_file path base stack_name answer
-    tmp="$(mktemp)"; list_file="$(mktemp)"; TEMP_FILES+=("$tmp" "$list_file")
+ADMIN_UI="${ADMIN_UI:-portainer}"
+ADMIN_UI_DISPLAY_NAME="Portainer"
+ADMIN_UI_SERVICE_NAME="portainer"
+ADMIN_UI_COMPOSE_FILE=""
+ADMIN_UI_PROJECT_NAME="portainer"
+ADMIN_UI_HOST=""
+ADMIN_UI_URL=""
+ADMIN_UI_DEPLOYED="no"
+ADMIN_UI_VALIDATED="no"
 
-    if ! curl -fsSL "$GITHUB_API_TREE_URL" -o "$tmp"; then
-        msg_warn "GitHub API scan failed; continuing with known stacks only"
+DOMAIN_VALUE=""
+DOCKER_SECRETS_DIR=""
+CF_API_TOKEN_FILE=""
+TRAEFIK_STATIC_CONFIG_FILE=""
+TRAEFIK_DYNAMIC_CONFIG_FILE=""
+TRAEFIK_ACME_STORAGE=""
+
+SYSCTL_REDIS_OK="no"
+TRAEFIK_PLACEHOLDERS_OK="no"
+TRAEFIK_DNS_DELAY_OK="no"
+TRAEFIK_ENCODED_CHARS_OK="no"
+TRAEFIK_AUTHENTIK_REFERENCES_OK="no"
+AUTHENTIK_FOLDERS_OK="no"
+CF_COMPANION_SECRET_OK="skipped"
+FILEBROWSER_FOLDERS_OK="skipped"
+SUDO_CMD=""
+DOCKER_NEEDS_SUDO="no"
+TEMP_FILES=()
+
+NETWORKS_CREATED="no"
+NETWORKS_VERIFIED="no"
+SOCKET_PROXY_STACK_DOWNLOADED="no"
+PORTAINER_STACK_DOWNLOADED="no"
+PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED="no"
+DOCKGE_STACK_DOWNLOADED="no"
+DOCKGE_BOOTSTRAP_OVERRIDE_DOWNLOADED="no"
+KOMODO_STACK_DOWNLOADED="no"
+KOMODO_BOOTSTRAP_OVERRIDE_DOWNLOADED="no"
+DOCKHAND_STACK_DOWNLOADED="no"
+DOCKHAND_BOOTSTRAP_OVERRIDE_DOWNLOADED="no"
+SOCKET_PROXY_DEPLOYED="no"
+PORTAINER_DEPLOYED="no"
+ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="no"
+ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="no"
+UFW_BOOTSTRAP_PORT_OPENED="no"
+
+# =========================================================
+#  OUTPUT / LOGGING FUNCTIONS
+# =========================================================
+
+# --- 3. HEADER FUNCTION ---
+# Displays the Docker Bootstrap banner.
+function header_info() {
+echo -e "${BL}
+██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗     ██████╗  ██████╗  ██████╗ ████████╗███████╗████████╗██████╗  █████╗ ██████╗ 
+██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗    ██╔══██╗██╔═══██╗██╔═══██╗╚══██╔══╝██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔══██╗
+██║  ██║██║   ██║██║     █████╔╝ █████╗  ██████╔╝    ██████╔╝██║   ██║██║   ██║   ██║   ███████╗   ██║   ██████╔╝███████║██████╔╝
+██║  ██║██║   ██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗    ██╔══██╗██║   ██║██║   ██║   ██║   ╚════██║   ██║   ██╔══██╗██╔══██║██╔═══╝ 
+██████╔╝╚██████╔╝╚██████╗██║  ██╗███████╗██║  ██║    ██████╔╝╚██████╔╝╚██████╔╝   ██║   ███████║   ██║   ██║  ██║██║  ██║██║     
+╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝    ╚═════╝  ╚═════╝  ╚═════╝    ╚═╝   ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     
+${CL}"
+}
+
+# --- 4. MESSAGE HELPER FUNCTIONS ---
+# Provides consistent display -> apply -> success output style.
+function msg_info() { echo -ne " ${HOLD} ${YW}$1...${CL}"; }
+function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
+function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
+function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
+
+# --- 5. SECTION HEADER HELPER ---
+# Keeps terminal output clean and grouped by stage.
+function section() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${BL}$1${CL}"
+    echo -e "${BORDER}"
+}
+
+# --- 6. FLASHING SUCCESS SECTION HEADER HELPER ---
+# Uses the same section layout as source-of-truth scripts, but renders final success heading in bold flashing green.
+function section_flash_success() {
+    echo ""
+    echo -e "${BORDER}"
+    echo -e "${GN}${CLF}$1${CL}"
+    echo -e "${BORDER}"
+}
+
+# --- 7. DETAIL LINE HELPER ---
+# Prints clean script 1-style detail lines for summaries and audit output.
+function detail_line() {
+    local label="$1"
+    local value="$2"
+    echo -e " ${BL}━━━━━▶${CL} ${label}: ${GN}${value}${CL}"
+}
+
+# --- 8. TTY PRINT HELPER ---
+# Prints directly to terminal even when functions return values through stdout.
+function tty_print() {
+    if [ -w /dev/tty ]; then
+        echo -ne "$*" > /dev/tty
+    else
+        echo -ne "$*" >&2
+    fi
+}
+
+# --- 9. TTY PRINTLN HELPER ---
+# Prints directly to terminal with newline.
+function tty_println() {
+    if [ -w /dev/tty ]; then
+        echo -e "$*" > /dev/tty
+    else
+        echo -e "$*" >&2
+    fi
+}
+
+# --- 10. INPUT BUFFER FLUSH HELPER ---
+# Clears only a small bounded amount of already-buffered terminal input.
+# Important: never reads from stdin because streamed scripts use stdin for the script body.
+function flush_input_buffer() {
+    local junk=""
+    local i=""
+
+    if [ ! -r /dev/tty ]; then
         return 0
     fi
 
-    python3 - "$tmp" > "$list_file" <<'PYSCAN'
-import json,sys,os,re
-known=set('00-socket-proxy-compose.yml 01-[1]-dockge-compose.yml 01-[1]-dockge-bootstrap-override.yml 01-[2]-dockhand-compose.yml 01-[2]-dockhand-bootstrap-override.yml 01-[3]-komodo-compose.yml 01-[3]-komodo-bootstrap-override.yml 01-[4]-portainer-compose.yml 01-[4]-portainer-bootstrap-override.yml 02-postgres-compose.yml 03-redis-compose.yml 04-traefik-compose.yml 05-authentik-compose.yml 06-temporal-compose.yml 07-postiz-temporal-guard-compose.yml 08-postiz-compose.yml 09-cf-ddns-compose.yml 10-cf-companion-compose.yml 11-vscode-compose.yml 12-filebrowser-compose.yml'.split())
-data=json.load(open(sys.argv[1]))
-for x in data.get('tree',[]):
-    p=x.get('path','')
-    b=os.path.basename(p)
-    if p.startswith('docker/') and b.endswith(('.yml','.yaml')) and b not in known:
-        print(p)
-PYSCAN
+    for i in {1..20}; do
+        if ! IFS= read -rsn1 -t 0.02 junk < /dev/tty; then
+            break
+        fi
+    done
 
-    if [ ! -s "$list_file" ]; then
-        msg_ok "NO ADDITIONAL OPTIONAL STACKS FOUND"
+    return 0
+}
+
+# =========================================================
+#  CLEANUP / ERROR HANDLING
+# =========================================================
+
+# --- 11. CLEANUP FUNCTION ---
+# Removes temporary files and copies runtime log to /var/log when running non-root.
+function cleanup() {
+    local exit_code="$?"
+    local file=""
+
+    if [ -n "${SUDO_CMD:-}" ] && [ -n "${RUNTIME_LOG_FILE:-}" ] && [ -s "$RUNTIME_LOG_FILE" ]; then
+        "$SUDO_CMD" cp "$RUNTIME_LOG_FILE" "$LOG_FILE" 2>/dev/null || true
+        "$SUDO_CMD" chmod 0644 "$LOG_FILE" 2>/dev/null || true
+    fi
+
+    for file in "${TEMP_FILES[@]:-}"; do
+        [ -n "$file" ] && [ -f "$file" ] && rm -f "$file" 2>/dev/null || true
+    done
+
+    exit "$exit_code"
+}
+
+# --- 12. ERROR TRAP HELPER ---
+# Shows the failing line number and points to the log file.
+function on_error() {
+    local line_no="$1"
+    echo -e "${RD}ERROR:${CL} Script failed at line ${line_no}. Check ${LOG_FILE}"
+}
+
+# --- 13. COMMAND RUNNER ---
+# Runs privileged commands quietly, but shows real stderr if they fail.
+function run_cmd() {
+    local description="$1"
+    shift
+
+    local err_file=""
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    if [ -n "$SUDO_CMD" ]; then
+        if ! "$SUDO_CMD" "$@" > /dev/null 2> "$err_file"; then
+            echo ""
+            echo -e "${RD}Command failed during:${CL} ${description}"
+            echo -e "${YW}Command:${CL} sudo $*"
+            echo ""
+            echo -e "${RD}Real error:${CL}"
+            cat "$err_file"
+            rm -f "$err_file"
+            exit 1
+        fi
+    else
+        if ! "$@" > /dev/null 2> "$err_file"; then
+            echo ""
+            echo -e "${RD}Command failed during:${CL} ${description}"
+            echo -e "${YW}Command:${CL} $*"
+            echo ""
+            echo -e "${RD}Real error:${CL}"
+            cat "$err_file"
+            rm -f "$err_file"
+            exit 1
+        fi
+    fi
+
+    rm -f "$err_file"
+}
+
+# --- 14. ROOT PATH EXISTS HELPER ---
+# Checks whether a root-owned path exists.
+function root_path_exists() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -e "$path"
+    else
+        test -e "$path"
+    fi
+}
+
+# =========================================================
+#  PROMPT FUNCTIONS
+# =========================================================
+
+# --- 15. YES/NO LABEL HELPER ---
+# Converts Y/N answers to readable yes/no output.
+function yes_no_label() {
+    local value="$1"
+
+    if [[ "$value" =~ ^[Yy]$ ]]; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
+# --- 16. BLOCKING YES/NO HELPER ---
+# SPACE pauses countdown and waits for Y/N/ENTER.
+function tty_read_yes_no_blocking() {
+    local prompt="$1"
+    local default="$2"
+    local default_label="Y/n"
+    local key=""
+
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
+    fi
+
+    flush_input_buffer
+
+    while true; do
+        tty_print "${BFR}${YW}${prompt} (${default_label}): ${CL}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -rsn1 key < /dev/tty || true
+        else
+            IFS= read -rsn1 key || true
+        fi
+
+        if [[ -z "$key" ]]; then
+            tty_print "${BFR}"
+            echo "$default"
+            flush_input_buffer
+            return 0
+        elif [[ "$key" =~ ^[YyNn]$ ]]; then
+            tty_print "${BFR}"
+            echo "$key"
+            flush_input_buffer
+            return 0
+        fi
+    done
+}
+
+# --- 17. TIMED YES/NO PROMPT HELPER ---
+# Uses wall-clock countdown. SPACE pauses, timeout accepts default, final answer stays visible.
+function timed_yes_no() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+    local key=""
+    local default_label="Y/n"
+    local final_label=""
+    local deadline=""
+    local now=""
+    local remaining=""
+
+    if [[ "$default" =~ ^[Nn]$ ]]; then
+        default_label="y/N"
+    fi
+
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} (${default_label}) [${remaining}s]${CL} "
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(tty_read_yes_no_blocking "$prompt" "$default")"
+                    break
+                elif [[ "$key" =~ ^[YyNn]$ ]]; then
+                    answer="$key"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                fi
+            fi
+        fi
+    done
+
+    [ -z "$answer" ] && answer="$default"
+    final_label="$(yes_no_label "$answer")"
+
+    tty_print "${BFR}"
+    tty_println "${CM} ${GN}${prompt} ${final_label}${CL}"
+    flush_input_buffer
+
+    echo "$answer"
+}
+
+# --- 18. EDITABLE INPUT LOOP HELPER ---
+# Shared editable input system for text prompts.
+function editable_input_loop() {
+    local prompt="$1"
+    local default="$2"
+    local initial_value="${3:-}"
+    local answer="$initial_value"
+    local key=""
+
+    flush_input_buffer
+
+    while true; do
+        tty_print "${BFR}${YW}${prompt} [default: ${default}]: ${CL}${answer}"
+
+        if [ -r /dev/tty ]; then
+            IFS= read -rsn1 key < /dev/tty || true
+        else
+            IFS= read -rsn1 key || true
+        fi
+
+        case "$key" in
+            "")
+                [ -z "$answer" ] && answer="$default"
+                tty_print "${BFR}"
+                echo "$answer"
+                flush_input_buffer
+                return 0
+                ;;
+            $'\177'|$'\b')
+                answer="${answer%?}"
+                ;;
+            *)
+                answer+="$key"
+                ;;
+        esac
+    done
+}
+
+# --- 19. TIMED TEXT INPUT HELPER ---
+# Shows wall-clock countdown. SPACE pauses with empty editable buffer.
+function timed_text_input() {
+    local prompt="$1"
+    local default="$2"
+    local answer=""
+
+    # Text/path/name inputs are deliberately NOT timed.
+    # This prevents accepting defaults while the user is away and gives time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
+    [ -z "$answer" ] && answer="$default"
+
+    tty_print "${BFR}"
+    tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
+    echo "$answer"
+}
+
+
+# =========================================================
+#  VALIDATION HELPERS
+# =========================================================
+
+# --- 20. USERNAME VALIDATION HELPER ---
+# Validates Linux username format.
+function validate_linux_username() {
+    local username="$1"
+
+    if [[ "$username" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
         return 0
     fi
 
-    echo -e "${YW}Additional GitHub stack files found. Only select standalone optional services.${CL}"
-    echo -e "${YW}Do not select unknown files that duplicate PostgreSQL, Redis, Traefik, Authentik, Temporal, or Postiz.${CL}"
+    return 1
+}
+
+# --- 21. URL VALIDATION HELPER ---
+# Validates HTTP(S) URLs used for GitHub raw downloads.
+function validate_url() {
+    local url="$1"
+
+    if [[ "$url" =~ ^https?://[^[:space:]]+$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 22. DEPENDENCY VALIDATION ---
+# Validates base commands before system changes.
+function validate_dependencies() {
+    local required_commands=(
+        awk
+        cat
+        chmod
+        cp
+        curl
+        date
+        docker
+        grep
+        head
+        hostname
+        id
+        ip
+        mkdir
+        mktemp
+        rm
+        sed
+        tee
+        tput
+        xargs
+    )
+
+    local cmd=""
+
+    for cmd in "${required_commands[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || msg_error "Required command not found: ${cmd}"
+    done
+
+    if [ -n "$SUDO_CMD" ]; then
+        command -v sudo >/dev/null 2>&1 || msg_error "sudo is required when not running as root."
+    fi
+
+    if ! docker compose version >/dev/null 2>&1 && ! { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker compose version >/dev/null 2>&1; }; then
+        msg_error "Docker Compose plugin not available. Run script 5 first."
+    fi
+}
+
+# =========================================================
+#  INITIALIZATION
+# =========================================================
+
+# --- 23. ROOT / SUDO DETECTION ---
+# Uses sudo when not root.
+function detect_root_or_sudo() {
+    if [ "$EUID" -eq 0 ]; then
+        SUDO_CMD=""
+    else
+        SUDO_CMD="sudo"
+    fi
+}
+
+# --- 24. SUDO VALIDATION ---
+# Validates sudo once near the start. Supports passwordless sudo from earlier scripts.
+function validate_sudo_access() {
+    if [ -n "$SUDO_CMD" ]; then
+        msg_info "Validating sudo access"
+
+        if "$SUDO_CMD" -n true >/dev/null 2>&1; then
+            msg_ok "PASSWORDLESS SUDO CONFIRMED"
+            return 0
+        fi
+
+        if "$SUDO_CMD" -v; then
+            msg_ok "SUDO ACCESS CONFIRMED"
+            return 0
+        fi
+
+        msg_error "Sudo authentication failed. Script cancelled."
+    fi
+}
+
+# --- 25. LOGGING INITIALIZATION ---
+# Avoids piping interactive prompts through sudo tee. Runtime log is copied to /var/log during cleanup.
+function init_logging() {
+    if [ -n "$SUDO_CMD" ]; then
+        RUNTIME_LOG_FILE="$(mktemp /tmp/docker-bootstrap-setup-log.XXXXXX)"
+        TEMP_FILES+=("$RUNTIME_LOG_FILE")
+        exec > >(tee -a "$RUNTIME_LOG_FILE") 2>&1
+    else
+        RUNTIME_LOG_FILE="$LOG_FILE"
+        exec > >(tee -a "$LOG_FILE") 2>&1
+    fi
+}
+
+# --- 26. SCRIPT INITIALIZATION ---
+# Detects sudo, validates access, starts logging, installs traps, shows banner and validates dependencies.
+function init_script() {
+    detect_root_or_sudo
+    validate_sudo_access
+    init_logging
+
+    trap 'on_error "$LINENO"' ERR
+    trap cleanup EXIT
+
+    clear
+    header_info
+
+    validate_dependencies
+}
+
+# --- 27. DOCKER ACCESS DETECTION ---
+# Prefers normal docker group access, falls back to sudo docker if needed.
+function detect_docker_access() {
+    section "DOCKER ACCESS CHECK"
+
+    msg_info "Checking Docker access"
+
+    if docker ps >/dev/null 2>&1; then
+        DOCKER_NEEDS_SUDO="no"
+        msg_ok "DOCKER ACCESS CONFIRMED"
+        detail_line "Docker mode" "current user"
+        return 0
+    fi
+
+    if [ -n "$SUDO_CMD" ] && "$SUDO_CMD" docker ps >/dev/null 2>&1; then
+        DOCKER_NEEDS_SUDO="yes"
+        msg_ok "DOCKER ACCESS CONFIRMED WITH SUDO"
+        detail_line "Docker mode" "sudo fallback"
+        msg_warn "Current shell cannot use Docker without sudo. Reboot/logout may still be needed after script 5."
+        return 0
+    fi
+
+    msg_error "Docker daemon is not reachable. Run script 5 first and reboot/log back in."
+}
+
+# =========================================================
+#  DOCKER WRAPPERS
+# =========================================================
+
+# --- 28. DOCKER COMMAND WRAPPER ---
+# Runs docker through current user or sudo fallback depending on detected access.
+function docker_cmd() {
+    if [ "$DOCKER_NEEDS_SUDO" == "yes" ]; then
+        "$SUDO_CMD" docker "$@"
+    else
+        docker "$@"
+    fi
+}
+
+# --- 29. DOCKER COMMAND RUNNER ---
+# Runs docker commands quietly, with real stderr on failure.
+function run_docker_cmd() {
+    local description="$1"
+    shift
+
+    local err_file=""
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    if ! docker_cmd "$@" > /dev/null 2> "$err_file"; then
+        echo ""
+        echo -e "${RD}Docker command failed during:${CL} ${description}"
+        echo -e "${YW}Command:${CL} docker $*"
+        echo ""
+        echo -e "${RD}Real error:${CL}"
+        cat "$err_file"
+        rm -f "$err_file"
+        exit 1
+    fi
+
+    rm -f "$err_file"
+}
+
+
+# --- 29A. ENV VALUE HELPER ---
+# Reads a variable from the generated .env without printing secret values.
+function env_value() {
+    local key="$1"
+
+    awk -F= -v k="$key" '
+        $1 == k {
+            val=$0
+            sub("^[^=]*=", "", val)
+            gsub(/^"|"$/, "", val)
+            print val
+            exit
+        }
+    ' "$ENV_FILE" 2>/dev/null || true
+}
+
+# --- 29B. FILE WRITABILITY HELPER ---
+# Verifies that the selected Docker user can create and remove a test file in a folder.
+function verify_user_writable_dir() {
+    local path="$1"
+    local test_file="${path}/.bootstrap-write-test-$$"
+
+    [ -d "$path" ] || return 1
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" -u "$DOCKER_USER" sh -c "touch '$test_file' && rm -f '$test_file'" >/dev/null 2>&1
+    else
+        su -s /bin/sh "$DOCKER_USER" -c "touch '$test_file' && rm -f '$test_file'" >/dev/null 2>&1
+    fi
+}
+
+# --- 29C. COMPOSE FILE VALIDATION HELPER ---
+# Validates an optional compose file only if it exists.
+function validate_optional_compose_file() {
+    local project="$1"
+    local file="$2"
+
+    if [ ! -f "$file" ]; then
+        return 2
+    fi
+
+    run_docker_cmd "validating ${file}" compose --env-file "$ENV_FILE" -p "$project" -f "$file" config -q
+}
+
+# =========================================================
+#  INPUT / PRECHECKS
+# =========================================================
+
+# --- 30. PREVIOUS MARKER CHECK ---
+# Warns if Docker Bootstrap was already completed before.
+function check_previous_marker() {
+    local continue_yn=""
+
+    if root_path_exists "$COMPLETED_MARKER"; then
+        section "PREVIOUS DOCKER BOOTSTRAP MARKER DETECTED"
+
+        echo -e "${YW}A previous Docker Bootstrap marker exists:${CL} ${GN}${COMPLETED_MARKER}${CL}"
+        echo ""
+        if [ -n "$SUDO_CMD" ]; then
+            "$SUDO_CMD" cat "$COMPLETED_MARKER" 2>/dev/null || true
+        else
+            cat "$COMPLETED_MARKER" 2>/dev/null || true
+        fi
+        echo ""
+
+        continue_yn="$(timed_yes_no "Continue anyway?" "n")"
+
+        if [[ "$continue_yn" =~ ^[Nn] ]]; then
+            exit 0
+        fi
+    fi
+
+    return 0
+}
+
+# --- 31. START CONFIRMATION ---
+# Starts Docker network and Admin UI bootstrap after showing a clear description.
+function start_confirmation() {
+    local start_yn=""
+
+    section "START"
+
+    echo -e "${YW}This script creates shared Docker networks, validates Script 6 output, downloads bootstrap compose files, and deploys socket-proxy plus the selected admin UI.${CL}"
+    echo -e "${YW}Selected admin UI is read from ${ENV_FILE}: Dockge, Portainer CE, Komodo, or Dockhand.${CL}"
     echo ""
 
-    while IFS= read -r path; do
-        [ -z "$path" ] && continue
-        base="${path##*/}"
-        answer="$(timed_yes_no "Download/deploy optional stack ${base}?" "n")"
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
-            stack_name="${base%.yml}"; stack_name="${stack_name%.yaml}"; stack_name="$(printf '%s' "$stack_name" | sed -E 's/^[0-9]+-//; s/-compose$//; s/[^A-Za-z0-9_.-]+/-/g')"
-            EXTRA_STACK_PATHS+=("${path#docker/}")
-            EXTRA_STACK_NAMES+=("$stack_name")
-            msg_ok "OPTIONAL STACK SELECTED: $stack_name"
+    start_yn="$(timed_yes_no "Start Docker Bootstrap Setup?" "y")"
+
+    if [[ "$start_yn" =~ ^[Nn] ]]; then
+        exit 0
+    fi
+
+    return 0
+}
+
+# --- 32. BOOTSTRAP SETTINGS COLLECTION ---
+# Lets user confirm Docker user/path/source while defaulting to the established project layout.
+function collect_bootstrap_settings() {
+    section "BOOTSTRAP SETTINGS"
+
+    while true; do
+        DOCKER_USER="$(timed_text_input "Enter Docker Linux user" "$DOCKER_USER")"
+
+        if validate_linux_username "$DOCKER_USER"; then
+            break
         fi
-    done < "$list_file"
+
+        msg_warn "Invalid username. Use lowercase Linux username format, for example: orik"
+    done
+
+    if ! id "$DOCKER_USER" >/dev/null 2>&1; then
+        msg_error "Linux user ${DOCKER_USER} does not exist. Run script 4 first or create the user."
+    fi
+
+    DOCKER_DIR="$(timed_text_input "Enter Docker directory" "$DOCKER_DIR")"
+    COMPOSE_DIR="$(timed_text_input "Enter Docker compose directory" "$COMPOSE_DIR")"
+    ENV_FILE="$(timed_text_input "Enter Docker .env path" "$ENV_FILE")"
+    GITHUB_RAW_BASE="$(timed_text_input "Enter GitHub raw compose base" "$GITHUB_RAW_BASE")"
+
+    if ! validate_url "$GITHUB_RAW_BASE"; then
+        msg_error "GitHub raw base is not a valid HTTP/HTTPS URL."
+    fi
+
+    if [ -z "$SOCKET_PROXY_STACK_URL_OVERRIDE" ]; then
+        SOCKET_PROXY_STACK_URL="${GITHUB_RAW_BASE}/${SOCKET_PROXY_STACK_FILE}"
+    fi
+
+    if [ -z "$PORTAINER_STACK_URL_OVERRIDE" ]; then
+        PORTAINER_STACK_URL="${GITHUB_RAW_BASE}/${PORTAINER_STACK_FILE}"
+    fi
+
+    if [ -z "$PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        PORTAINER_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+
+    if [ -z "$DOCKGE_STACK_URL_OVERRIDE" ]; then
+        DOCKGE_STACK_URL="${GITHUB_RAW_BASE}/${DOCKGE_STACK_FILE}"
+    fi
+
+    if [ -z "$DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        DOCKGE_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+
+    if [ -z "$KOMODO_STACK_URL_OVERRIDE" ]; then
+        KOMODO_STACK_URL="${GITHUB_RAW_BASE}/${KOMODO_STACK_FILE}"
+    fi
+
+    if [ -z "$KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        KOMODO_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+
+    if [ -z "$DOCKHAND_STACK_URL_OVERRIDE" ]; then
+        DOCKHAND_STACK_URL="${GITHUB_RAW_BASE}/${DOCKHAND_STACK_FILE}"
+    fi
+
+    if [ -z "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE" ]; then
+        DOCKHAND_BOOTSTRAP_OVERRIDE_URL="${GITHUB_RAW_BASE}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+    fi
+
+    detail_line "Docker user" "$DOCKER_USER"
+    detail_line "Docker dir" "$DOCKER_DIR"
+    detail_line "Compose dir" "$COMPOSE_DIR"
+    detail_line "Env file" "$ENV_FILE"
+    detail_line "GitHub raw base" "$GITHUB_RAW_BASE"
 }
 
-download_extra_stacks(){
-    [ "${#EXTRA_STACK_PATHS[@]}" -gt 0 ] || return 0
-    section "DOWNLOAD EXTRA STACKS"
-    local idx rel name dir file url
-    for idx in "${!EXTRA_STACK_PATHS[@]}"; do
-        rel="${EXTRA_STACK_PATHS[$idx]}"; name="${EXTRA_STACK_NAMES[$idx]}"; dir="${COMPOSE_DIR}/${name}"; file="${dir}/compose.yaml"; url="${GITHUB_RAW_BASE}/${rel}"
-        msg_info "Downloading optional stack ${name}"
-        mkdir -p "$dir"
-        download_file "$url" "$file"
-        chmod 640 "$file"; chown "${DOCKER_USER}:${DOCKER_USER}" "$file" 2>/dev/null || true
-        msg_ok "OPTIONAL STACK READY: ${name}"
-    done
+# --- 33. PATH PRECHECKS ---
+# Validates Docker ENV output and compose directory before network/deploy work.
+function validate_project_paths() {
+    section "PROJECT PATH CHECK"
+
+    msg_info "Validating Docker project paths"
+
+    if ! root_path_exists "$DOCKER_DIR"; then
+        msg_error "Docker directory not found: ${DOCKER_DIR}. Run script 6 first."
+    fi
+
+    if ! root_path_exists "$ENV_FILE"; then
+        msg_error "Docker .env file not found: ${ENV_FILE}. Run script 6 first."
+    fi
+
+    run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
+    run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$COMPOSE_DIR"
+
+    DOMAIN_VALUE="$(env_value DOMAIN)"
+    DOCKER_SECRETS_DIR="$(env_value DOCKER_SECRETS_DIR)"
+    CF_API_TOKEN_FILE="$(env_value CF_API_TOKEN_FILE)"
+    ADMIN_UI="$(env_value ADMIN_UI)"
+    ADMIN_UI="${ADMIN_UI:-portainer}"
+
+    TRAEFIK_STATIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/traefik.yml"
+    TRAEFIK_DYNAMIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/dynamic-config.yml"
+    TRAEFIK_ACME_STORAGE="${DOCKER_DIR}/appdata/traefik/acme/acme.json"
+
+    msg_ok "PROJECT PATHS READY"
+
+    detail_line "Docker dir" "$DOCKER_DIR"
+    detail_line "Compose dir" "$COMPOSE_DIR"
+    detail_line ".env" "$ENV_FILE"
+    detail_line "Domain" "${DOMAIN_VALUE:-missing}"
+    detail_line "Selected admin UI" "$ADMIN_UI"
 }
 
-validate_extra_stacks(){
-    [ "${#EXTRA_STACK_PATHS[@]}" -gt 0 ] || return 0
-    section "VALIDATE EXTRA STACKS"
-    local idx name file
-    for idx in "${!EXTRA_STACK_NAMES[@]}"; do
-        name="${EXTRA_STACK_NAMES[$idx]}"; file="${COMPOSE_DIR}/${name}/compose.yaml"
-        msg_info "Validating optional stack ${name}"
-        run_docker "validating optional stack ${name}" compose --env-file "$ENV_FILE" -p "$name" -f "$file" config -q
-        msg_ok "OPTIONAL STACK VALID: ${name}"
-    done
+
+# =========================================================
+#  SCRIPT 6 OUTPUT VALIDATION
+# =========================================================
+
+# --- 33A. REDIS HOST TUNING VERIFICATION ---
+# Confirms Script 5 applied the Redis-recommended overcommit setting before Redis deployment.
+function verify_redis_host_tuning() {
+    section "REDIS HOST TUNING"
+
+    local value=""
+    value="$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo "")"
+
+    if [ "$value" == "1" ]; then
+        SYSCTL_REDIS_OK="yes"
+        msg_ok "VM.OVERCOMMIT_MEMORY IS 1"
+    else
+        msg_error "vm.overcommit_memory is ${value:-unknown}. Run fixed Script 5 before deploying Redis."
+    fi
+
+    if [ -f /etc/sysctl.d/99-redis-overcommit.conf ] || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" test -f /etc/sysctl.d/99-redis-overcommit.conf 2>/dev/null; }; then
+        msg_ok "REDIS SYSCTL PERSISTENCE FILE FOUND"
+    else
+        msg_warn "Redis sysctl persistence file not found. Runtime value is correct, but reboot persistence should be fixed."
+    fi
 }
 
-deploy_extra_stacks(){
-    [ "${#EXTRA_STACK_PATHS[@]}" -gt 0 ] || return 0
-    section "DEPLOY EXTRA STACKS"
-    local idx name file
-    for idx in "${!EXTRA_STACK_NAMES[@]}"; do
-        name="${EXTRA_STACK_NAMES[$idx]}"; file="${COMPOSE_DIR}/${name}/compose.yaml"
-        msg_info "Deploying optional stack ${name}"
-        run_docker "deploying optional stack ${name}" compose --env-file "$ENV_FILE" -p "$name" -f "$file" up -d
-        DEPLOYED_STACKS+=("$name")
-        msg_ok "OPTIONAL STACK DEPLOYED: ${name}"
-    done
+# --- 33B. TRAEFIK TEMPLATE RENDER VERIFICATION ---
+# Ensures no unreplaced placeholders remain and final Traefik v3.7 settings exist.
+function verify_traefik_rendered_configs() {
+    section "TRAEFIK TEMPLATE VERIFICATION"
+
+    [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || msg_error "Traefik static config missing: ${TRAEFIK_STATIC_CONFIG_FILE}"
+    [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || msg_error "Traefik dynamic config missing: ${TRAEFIK_DYNAMIC_CONFIG_FILE}"
+    [ -f "$TRAEFIK_ACME_STORAGE" ] || msg_error "Traefik acme.json missing: ${TRAEFIK_ACME_STORAGE}"
+
+    msg_info "Checking for unreplaced template placeholders"
+    if grep -R '{{[^}]*}}' "$TRAEFIK_STATIC_CONFIG_FILE" "$TRAEFIK_DYNAMIC_CONFIG_FILE" >/dev/null 2>&1; then
+        msg_error "Unrendered {{PLACEHOLDER}} values remain in Traefik config. Fix Script 6 render logic/templates."
+    fi
+    TRAEFIK_PLACEHOLDERS_OK="yes"
+    msg_ok "TRAEFIK PLACEHOLDERS FULLY RENDERED"
+
+    msg_info "Checking Traefik v3.7 DNS propagation syntax"
+    if grep -q 'delayBeforeChecks' "$TRAEFIK_STATIC_CONFIG_FILE" && ! grep -q 'delayBeforeCheck:' "$TRAEFIK_STATIC_CONFIG_FILE"; then
+        TRAEFIK_DNS_DELAY_OK="yes"
+        msg_ok "TRAEFIK DNS PROPAGATION SYNTAX IS V3.7 COMPATIBLE"
+    else
+        msg_error "Traefik DNS challenge must use propagation.delayBeforeChecks, not deprecated delayBeforeCheck."
+    fi
+
+    msg_info "Checking Traefik encoded-character options"
+    if grep -q 'encodedCharacters' "$TRAEFIK_STATIC_CONFIG_FILE"; then
+        TRAEFIK_ENCODED_CHARS_OK="yes"
+        msg_ok "TRAEFIK ENCODED-CHARACTER CONFIG FOUND"
+    else
+        msg_error "Traefik encoded-character options missing from static config. Fix Script 6 template."
+    fi
+
+    msg_info "Checking for stale authentik@docker references"
+    if grep -q 'authentik@docker' "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then
+        msg_error "Stale authentik@docker reference found in dynamic config. Use authentik file-provider middleware."
+    fi
+    TRAEFIK_AUTHENTIK_REFERENCES_OK="yes"
+    msg_ok "NO STALE AUTHENTIK@DOCKER REFERENCES"
+
+    msg_info "Checking acme.json permissions"
+    local acme_mode=""
+    acme_mode="$(stat -c '%a' "$TRAEFIK_ACME_STORAGE" 2>/dev/null || true)"
+    if [ "$acme_mode" == "600" ]; then
+        msg_ok "TRAEFIK ACME STORAGE PERMISSIONS ARE 600"
+    else
+        msg_error "Traefik acme.json mode is ${acme_mode:-unknown}; expected 600."
+    fi
 }
-open_bootstrap_firewall(){ command -v ufw >/dev/null 2>&1 || return 0; ufw status 2>/dev/null | grep -qi 'Status: active' || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" ufw status 2>/dev/null | grep -qi 'Status: active'; } || return 0; run_cmd "allowing ${ADMIN_UI_DISPLAY_NAME} bootstrap port" ufw allow "${ADMIN_UI_BOOTSTRAP_PORT}/tcp" comment "temporary ${ADMIN_UI_DISPLAY_NAME} bootstrap" || true; }
-detect_bootstrap_url(){ local ip; ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"; echo "${ADMIN_UI_BOOTSTRAP_SCHEME}://${ip:-127.0.0.1}:${ADMIN_UI_BOOTSTRAP_PORT}"; }
-write_report(){ section "VERIFICATION REPORT"; { echo "Date: $(date)"; echo "Docker dir: $DOCKER_DIR"; echo "Compose dir: $COMPOSE_DIR"; echo "Admin UI: $ADMIN_UI_DISPLAY_NAME"; echo "Deployed stacks: ${DEPLOYED_STACKS[*]}"; echo "Bootstrap URL: $(detect_bootstrap_url)"; docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Networks}}' || true; } | { if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee "$VERIFY_LOG" >/dev/null; else tee "$VERIFY_LOG" >/dev/null; fi; }; msg_ok "REPORT WRITTEN"; }
-summary(){ section "FINISHED"; detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"; detail_line "Temporary bootstrap URL" "$(detect_bootstrap_url)"; detail_line "Postiz" "backend :3000 verified and API non-502"; detail_line "Verify log" "$VERIFY_LOG"; echo -e "${YW}Next: use admin UI for management, then run Script 7 for SSO/bootstrap hardening after browser verification.${CL}"; }
-main(){ init_script; detect_docker_access; load_project_inputs; configure_admin_ui; preflight_permissions; collect_stack_choices; scan_github_optional; create_networks; download_selected_stacks; download_extra_stacks; validate_selected_stacks; validate_extra_stacks; open_bootstrap_firewall; deploy_stack socket-proxy; wait_container socket-proxy 45; deploy_stack "$ADMIN_UI"; wait_container "$ADMIN_UI_SERVICE" 60; deploy_stack postgres; verify_postgres; deploy_stack redis; verify_redis; deploy_stack traefik; verify_traefik; deploy_stack authentik; verify_authentik; deploy_stack temporal; wait_temporal; run_postiz_guard; deploy_stack postiz; verify_postiz; [[ "$SELECT_CF_DDNS" =~ ^[Yy]$ ]] && deploy_stack cf-ddns; [[ "$SELECT_CF_COMPANION" =~ ^[Yy]$ ]] && deploy_stack cf-companion; [[ "$SELECT_VSCODE" =~ ^[Yy]$ ]] && deploy_stack vscode; [[ "$SELECT_FILEBROWSER" =~ ^[Yy]$ ]] && deploy_stack filebrowser; deploy_extra_stacks; write_report; summary; }
+
+# --- 33C. AUTHENTIK FOLDER VERIFICATION ---
+# Confirms host bind mounts exist and are writable by the non-root Authentik container user.
+function verify_authentik_folders() {
+    section "AUTHENTIK FOLDER VERIFICATION"
+
+    local folders=(
+        "${DOCKER_DIR}/appdata/authentik"
+        "${DOCKER_DIR}/appdata/authentik/media"
+        "${DOCKER_DIR}/appdata/authentik/custom-templates"
+        "${DOCKER_DIR}/appdata/authentik/certs"
+    )
+    local folder=""
+
+    for folder in "${folders[@]}"; do
+        msg_info "Checking ${folder}"
+        [ -d "$folder" ] || msg_error "Required Authentik folder missing: ${folder}"
+
+        if [ -n "$SUDO_CMD" ]; then
+            "$SUDO_CMD" -u '#1000' sh -c "touch '${folder}/.ak-write-test-$$' && rm -f '${folder}/.ak-write-test-$$'" >/dev/null 2>&1 || msg_error "Authentik UID 1000 cannot write to ${folder}"
+        else
+            touch "${folder}/.ak-write-test-$$" && rm -f "${folder}/.ak-write-test-$$" || msg_error "Cannot verify Authentik write access to ${folder}"
+        fi
+
+        msg_ok "AUTHENTIK FOLDER READY: ${folder}"
+    done
+
+    AUTHENTIK_FOLDERS_OK="yes"
+}
+
+# --- 33E. ADMIN UI SELECTION VERIFICATION ---
+# Maps .env ADMIN_UI to expected compose template and service.
+function verify_admin_ui_selection() {
+    section "ADMIN UI SELECTION"
+
+    local expected_host=""
+
+    case "$ADMIN_UI" in
+        dockge)
+            ADMIN_UI_PROJECT_NAME="dockge"
+            ADMIN_UI_SERVICE_NAME="dockge"
+            ADMIN_UI_DISPLAY_NAME="Dockge"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${DOCKGE_STACK_FILE}"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+            ADMIN_UI_BOOTSTRAP_PORT="$DOCKGE_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="5001"
+            ADMIN_UI_BOOTSTRAP_SCHEME="http"
+            expected_host="dockge.${DOMAIN_VALUE}"
+            ;;
+        portainer|portainer-ce)
+            ADMIN_UI="portainer"
+            ADMIN_UI_PROJECT_NAME="portainer"
+            ADMIN_UI_SERVICE_NAME="portainer"
+            ADMIN_UI_DISPLAY_NAME="Portainer"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+            ADMIN_UI_BOOTSTRAP_PORT="$PORTAINER_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="9443"
+            ADMIN_UI_BOOTSTRAP_SCHEME="https"
+            expected_host="portainer.${DOMAIN_VALUE}"
+            ;;
+        komodo)
+            ADMIN_UI_PROJECT_NAME="komodo"
+            ADMIN_UI_SERVICE_NAME="komodo-core"
+            ADMIN_UI_DISPLAY_NAME="Komodo"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${KOMODO_STACK_FILE}"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+            ADMIN_UI_BOOTSTRAP_PORT="$KOMODO_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="9120"
+            ADMIN_UI_BOOTSTRAP_SCHEME="http"
+            expected_host="komodo.${DOMAIN_VALUE}"
+            ;;
+        dockhand)
+            ADMIN_UI_PROJECT_NAME="dockhand"
+            ADMIN_UI_SERVICE_NAME="dockhand"
+            ADMIN_UI_DISPLAY_NAME="Dockhand"
+            ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${DOCKHAND_STACK_FILE}"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME"
+            ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}"
+            ADMIN_UI_BOOTSTRAP_PORT="$DOCKHAND_BOOTSTRAP_PORT"
+            ADMIN_UI_INTERNAL_PORT="3000"
+            ADMIN_UI_BOOTSTRAP_SCHEME="http"
+            expected_host="dockhand.${DOMAIN_VALUE}"
+            ;;
+        *)
+            msg_error "Invalid ADMIN_UI value in .env: ${ADMIN_UI}. Expected dockge, portainer, komodo, or dockhand."
+            ;;
+    esac
+
+    [ -z "${ADMIN_UI_HOST:-}" ] && ADMIN_UI_HOST="$expected_host"
+    [ -z "${ADMIN_UI_URL:-}" ] && ADMIN_UI_URL="https://${ADMIN_UI_HOST}"
+
+    msg_ok "ADMIN UI SELECTION VERIFIED"
+    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
+    detail_line "Admin UI host" "$ADMIN_UI_HOST"
+    detail_line "Admin UI URL" "$ADMIN_UI_URL"
+    detail_line "Stack compose" "$ADMIN_UI_COMPOSE_FILE"
+    detail_line "Bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+    detail_line "Temporary bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
+}
+
+# --- 33F. CLOUDFLARE COMPANION SECRET VERIFICATION ---
+# Ensures cf-companion can read Cloudflare token from a local secret file.
+function verify_cf_companion_secret_file() {
+    section "CF-COMPANION SECRET VERIFICATION"
+
+    if [ -z "$CF_API_TOKEN_FILE" ]; then
+        CF_COMPANION_SECRET_OK="missing-env"
+        msg_warn "CF_API_TOKEN_FILE missing from .env"
+        return 0
+    fi
+
+    if [ -s "$CF_API_TOKEN_FILE" ]; then
+        CF_COMPANION_SECRET_OK="yes"
+        msg_ok "CLOUDFLARE TOKEN FILE EXISTS AND IS NON-EMPTY"
+    else
+        CF_COMPANION_SECRET_OK="empty-or-missing"
+        msg_warn "Cloudflare token file is empty or missing: ${CF_API_TOKEN_FILE}"
+    fi
+}
+
+# --- 33G. FILEBROWSER FOLDER VERIFICATION ---
+# Confirms Filebrowser-safe writable folders exist before Filebrowser stack deployment.
+function verify_filebrowser_folders() {
+    section "FILEBROWSER FOLDER VERIFICATION"
+
+    local folders=(
+        "${DOCKER_DIR}/appdata/filebrowser/database"
+        "${DOCKER_DIR}/appdata/filebrowser/config"
+        "${DOCKER_DIR}/shared"
+        "${DOCKER_DIR}/backups"
+        "${DOCKER_DIR}/compose"
+    )
+    local folder=""
+
+    for folder in "${folders[@]}"; do
+        msg_info "Checking ${folder}"
+        [ -d "$folder" ] || msg_error "Required Filebrowser folder missing: ${folder}"
+        verify_user_writable_dir "$folder" || msg_error "Docker user ${DOCKER_USER} cannot write to ${folder}"
+        msg_ok "FILEBROWSER FOLDER WRITABLE: ${folder}"
+    done
+
+    FILEBROWSER_FOLDERS_OK="yes"
+}
+
+# =========================================================
+#  NETWORK BOOTSTRAP
+# =========================================================
+
+# --- 34. NETWORK CREATION ---
+# Creates the shared external networks used by all independent compose stacks.
+function create_shared_networks() {
+    section "DOCKER NETWORKS"
+
+    msg_info "Creating socket_proxy network"
+    docker_cmd network create --driver bridge --subnet "$SOCKET_PROXY_SUBNET_EXPECTED" socket_proxy >/dev/null 2>&1 || true
+    msg_ok "SOCKET_PROXY NETWORK READY"
+
+    msg_info "Creating t2_proxy network"
+    docker_cmd network create --driver bridge --subnet "$T2_PROXY_SUBNET_EXPECTED" t2_proxy >/dev/null 2>&1 || true
+    msg_ok "T2_PROXY NETWORK READY"
+
+    msg_info "Creating database network"
+    docker_cmd network create --driver bridge database >/dev/null 2>&1 || true
+    msg_ok "DATABASE NETWORK READY"
+
+    NETWORKS_CREATED="yes"
+}
+
+# --- 35. NETWORK VERIFICATION ---
+# Verifies network existence and expected subnets before compose deployment.
+function verify_shared_networks() {
+    section "NETWORK VERIFICATION"
+
+    msg_info "Inspecting Docker networks"
+
+    SOCKET_PROXY_SUBNET_ACTUAL="$(docker_cmd network inspect socket_proxy --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
+    T2_PROXY_SUBNET_ACTUAL="$(docker_cmd network inspect t2_proxy --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
+    DATABASE_NETWORK_NAME="$(docker_cmd network inspect database --format '{{.Name}}' 2>/dev/null || true)"
+
+    if [ "$SOCKET_PROXY_SUBNET_ACTUAL" != "$SOCKET_PROXY_SUBNET_EXPECTED" ]; then
+        msg_error "socket_proxy subnet mismatch: expected ${SOCKET_PROXY_SUBNET_EXPECTED}, got ${SOCKET_PROXY_SUBNET_ACTUAL:-missing}"
+    fi
+
+    if [ "$T2_PROXY_SUBNET_ACTUAL" != "$T2_PROXY_SUBNET_EXPECTED" ]; then
+        msg_error "t2_proxy subnet mismatch: expected ${T2_PROXY_SUBNET_EXPECTED}, got ${T2_PROXY_SUBNET_ACTUAL:-missing}"
+    fi
+
+    if [ "$DATABASE_NETWORK_NAME" != "database" ]; then
+        msg_error "database network missing or invalid."
+    fi
+
+    NETWORKS_VERIFIED="yes"
+
+    msg_ok "DOCKER NETWORKS VERIFIED"
+    detail_line "socket_proxy" "$SOCKET_PROXY_SUBNET_ACTUAL"
+    detail_line "t2_proxy" "$T2_PROXY_SUBNET_ACTUAL"
+    detail_line "database" "$DATABASE_NETWORK_NAME"
+}
+
+# =========================================================
+#  COMPOSE DOWNLOAD / DEPLOY
+# =========================================================
+
+# --- 36. COMPOSE FILE DOWNLOAD ---
+# Downloads Socket Proxy stack, selected Admin UI stack and Admin UI bootstrap override from GitHub into docker/compose.
+function download_bootstrap_compose_files() {
+    section "STACK COMPOSE DOWNLOAD"
+
+    msg_info "Downloading Socket Proxy stack compose"
+    curl -fsSL "$SOCKET_PROXY_STACK_URL" -o "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    SOCKET_PROXY_STACK_DOWNLOADED="yes"
+    msg_ok "SOCKET PROXY STACK COMPOSE DOWNLOADED"
+
+    case "$ADMIN_UI" in
+        portainer)
+            msg_info "Downloading Portainer stack compose"
+            curl -fsSL "$PORTAINER_STACK_URL" -o "${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
+            PORTAINER_STACK_DOWNLOADED="yes"
+            msg_ok "PORTAINER STACK COMPOSE DOWNLOADED"
+
+            msg_info "Downloading Admin UI bootstrap override"
+            curl -fsSL "$PORTAINER_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
+            msg_ok "PORTAINER BOOTSTRAP OVERRIDE DOWNLOADED"
+            ;;
+        dockge)
+            msg_info "Downloading Dockge stack compose"
+            curl -fsSL "$DOCKGE_STACK_URL" -o "${COMPOSE_DIR}/${DOCKGE_STACK_FILE}"
+            DOCKGE_STACK_DOWNLOADED="yes"
+            msg_ok "DOCKGE STACK COMPOSE DOWNLOADED"
+
+            msg_info "Downloading Dockge bootstrap override"
+            curl -fsSL "$DOCKGE_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            DOCKGE_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
+            msg_ok "DOCKGE BOOTSTRAP OVERRIDE DOWNLOADED"
+            ;;
+        komodo)
+            msg_info "Downloading Komodo stack compose"
+            curl -fsSL "$KOMODO_STACK_URL" -o "${COMPOSE_DIR}/${KOMODO_STACK_FILE}"
+            KOMODO_STACK_DOWNLOADED="yes"
+            msg_ok "KOMODO STACK COMPOSE DOWNLOADED"
+
+            msg_info "Downloading Komodo bootstrap override"
+            curl -fsSL "$KOMODO_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            KOMODO_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
+            msg_ok "KOMODO BOOTSTRAP OVERRIDE DOWNLOADED"
+            ;;
+        dockhand)
+            msg_info "Downloading Dockhand stack compose"
+            curl -fsSL "$DOCKHAND_STACK_URL" -o "${COMPOSE_DIR}/${DOCKHAND_STACK_FILE}"
+            DOCKHAND_STACK_DOWNLOADED="yes"
+            msg_ok "DOCKHAND STACK COMPOSE DOWNLOADED"
+
+            msg_info "Downloading Dockhand bootstrap override"
+            curl -fsSL "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            DOCKHAND_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
+            msg_ok "DOCKHAND BOOTSTRAP OVERRIDE DOWNLOADED"
+            ;;
+    esac
+
+    ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
+
+    run_cmd "setting Socket Proxy compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    run_cmd "setting Socket Proxy compose file permissions" chmod 640 "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    run_cmd "setting ${ADMIN_UI_DISPLAY_NAME} compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$ADMIN_UI_COMPOSE_FILE" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+    run_cmd "setting ${ADMIN_UI_DISPLAY_NAME} compose permissions" chmod 640 "$ADMIN_UI_COMPOSE_FILE" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+
+    detail_line "Socket Proxy stack" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    detail_line "Admin UI stack" "$ADMIN_UI_COMPOSE_FILE"
+    detail_line "Admin UI bootstrap override" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+}
+# --- 37. PORTAINER BOOTSTRAP OVERRIDE CHECK ---
+# Confirms the downloaded Admin UI bootstrap override exists locally.
+# Script 7 should later redeploy Portainer without this override to close the bootstrap port.
+function verify_admin_ui_bootstrap_override_file() {
+    section "ADMIN UI BOOTSTRAP OVERRIDE"
+
+    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} bootstrap override"
+
+    if [ ! -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" ]; then
+        msg_error "${ADMIN_UI_DISPLAY_NAME} bootstrap override was not downloaded: ${ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE}"
+    fi
+
+    ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
+    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP OVERRIDE READY"
+    detail_line "Override file" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+    detail_line "Bootstrap port" "${ADMIN_UI_BOOTSTRAP_PORT}->${ADMIN_UI_INTERNAL_PORT}"
+}
+
+
+# --- 38. COMPOSE CONFIG VALIDATION ---
+# Validates Socket Proxy stack, selected Admin UI stack and Admin UI bootstrap override before deployment.
+function validate_bootstrap_compose_files() {
+    section "STACK COMPOSE VALIDATION"
+
+    msg_info "Validating Socket Proxy stack compose"
+    run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}" config -q
+    msg_ok "SOCKET PROXY STACK COMPOSE VALID"
+
+    msg_info "Validating ${ADMIN_UI_DISPLAY_NAME} stack compose with bootstrap override"
+    export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
+    run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" config -q
+    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} STACK COMPOSE VALID"
+
+    ADMIN_UI_VALIDATED="yes"
+}
+# --- 39. SOCKET-PROXY DEPLOYMENT ---
+# Deploys the Socket Proxy stack using Docker Compose.
+function deploy_socket_proxy() {
+    section "DEPLOY STACK - SOCKET PROXY"
+
+    msg_info "Deploying socket-proxy"
+    run_docker_cmd "deploying socket-proxy" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}" up -d
+    SOCKET_PROXY_DEPLOYED="yes"
+    msg_ok "SOCKET-PROXY DEPLOYED"
+}
+
+# --- 40. PORTAINER DEPLOYMENT ---
+# Deploys the selected Admin UI stack with its temporary bootstrap override.
+function deploy_admin_ui() {
+    section "DEPLOY STACK - ${ADMIN_UI_DISPLAY_NAME}"
+
+    export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
+    msg_info "Deploying ${ADMIN_UI_DISPLAY_NAME} with bootstrap port"
+    run_docker_cmd "deploying ${ADMIN_UI_DISPLAY_NAME}" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" up -d
+    ADMIN_UI_DEPLOYED="yes"
+
+    if [ "$ADMIN_UI" == "portainer" ]; then
+        PORTAINER_DEPLOYED="yes"
+    fi
+
+    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} DEPLOYED"
+}
+
+# --- 41. UFW BOOTSTRAP PORT HELPER ---
+# Opens temporary Admin UI bootstrap port if UFW is active.
+function configure_bootstrap_firewall() {
+    section "BOOTSTRAP FIREWALL"
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        msg_skip "UFW NOT FOUND; BOOTSTRAP PORT RULE SKIPPED"
+        UFW_BOOTSTRAP_PORT_OPENED="not-found"
+        return 0
+    fi
+
+    if ! ufw status 2>/dev/null | grep -qi "Status: active" && ! { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" ufw status 2>/dev/null | grep -qi "Status: active"; }; then
+        msg_skip "UFW NOT ACTIVE; BOOTSTRAP PORT RULE SKIPPED"
+        UFW_BOOTSTRAP_PORT_OPENED="not-active"
+        return 0
+    fi
+
+    msg_info "Allowing temporary ${ADMIN_UI_DISPLAY_NAME} bootstrap port ${ADMIN_UI_BOOTSTRAP_PORT}/tcp"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" ufw allow "${ADMIN_UI_BOOTSTRAP_PORT}/tcp" comment "temporary ${ADMIN_UI_DISPLAY_NAME} bootstrap" >/dev/null 2>&1 || true
+    else
+        ufw allow "${ADMIN_UI_BOOTSTRAP_PORT}/tcp" comment "temporary ${ADMIN_UI_DISPLAY_NAME} bootstrap" >/dev/null 2>&1 || true
+    fi
+
+    UFW_BOOTSTRAP_PORT_OPENED="yes"
+    msg_ok "TEMPORARY ${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP PORT ALLOWED"
+}
+
+# =========================================================
+#  VERIFICATION / SUMMARY
+# =========================================================
+
+# --- 42. ACCESS IP DETECTION ---
+# Detects a likely LAN IPv4 for the Admin UI bootstrap URL.
+function detect_admin_ui_access_ip() {
+    local detected_ip=""
+
+    detected_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+
+    if [ -z "$detected_ip" ]; then
+        detected_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    fi
+
+    ADMIN_UI_BOOTSTRAP_ACCESS_IP="${detected_ip:-127.0.0.1}"
+    ADMIN_UI_BOOTSTRAP_ACCESS_URL="${ADMIN_UI_BOOTSTRAP_SCHEME}://${ADMIN_UI_BOOTSTRAP_ACCESS_IP}:${ADMIN_UI_BOOTSTRAP_PORT}"
+    PORTAINER_ACCESS_URL="$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
+}
+
+function detect_portainer_access_ip() {
+    detect_admin_ui_access_ip
+}
+
+# --- 43. CONTAINER VERIFICATION ---
+# Verifies the bootstrap containers are running and visible.
+function verify_bootstrap_containers() {
+    section "BOOTSTRAP VERIFICATION"
+
+    msg_info "Checking Socket Proxy container"
+    if docker_cmd ps --format '{{.Names}}' | grep -qx 'socket-proxy'; then
+        msg_ok "SOCKET PROXY RUNNING"
+    else
+        msg_error "socket-proxy container is not running."
+    fi
+
+    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} container"
+    if docker_cmd ps --format '{{.Names}}' | grep -qx "$ADMIN_UI_SERVICE_NAME"; then
+        msg_ok "${ADMIN_UI_DISPLAY_NAME^^} RUNNING"
+    else
+        msg_error "${ADMIN_UI_SERVICE_NAME} container is not running."
+    fi
+
+    detect_admin_ui_access_ip
+
+    msg_info "Checking ${ADMIN_UI_DISPLAY_NAME} bootstrap port"
+    if docker_cmd port "$ADMIN_UI_SERVICE_NAME" "${ADMIN_UI_INTERNAL_PORT}/tcp" 2>/dev/null | grep -q ":${ADMIN_UI_BOOTSTRAP_PORT}$"; then
+        ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="yes"
+        ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="yes"
+        msg_ok "${ADMIN_UI_DISPLAY_NAME^^} BOOTSTRAP PORT EXPOSED"
+    else
+        ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="not-confirmed"
+        ADMIN_UI_BOOTSTRAP_PORT_EXPOSED="not-confirmed"
+        msg_warn "${ADMIN_UI_DISPLAY_NAME} is running, but bootstrap port ${ADMIN_UI_BOOTSTRAP_PORT} was not confirmed"
+    fi
+
+    detail_line "Temporary access" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
+    detail_line "Domain access after Traefik/AuthentiK" "$ADMIN_UI_URL"
+    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
+}
+# --- 44. VERIFICATION REPORT ---
+# Writes a small Docker bootstrap verification report to /var/log.
+function create_verification_report() {
+    section "VERIFICATION REPORT"
+
+    msg_info "Writing Docker bootstrap verification report"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" bash -c "cat > '$VERIFY_LOG'" <<VERIFY_LOG_EOF
+--- DOCKER BOOTSTRAP SETUP VERIFICATION REPORT ---
+Date: $(date)
+Docker user: $DOCKER_USER
+Docker dir: $DOCKER_DIR
+Compose dir: $COMPOSE_DIR
+Env file: $ENV_FILE
+GitHub raw base: $GITHUB_RAW_BASE
+
+Results:
+VERIFY_LOG_EOF
+    else
+        cat > "$VERIFY_LOG" <<VERIFY_LOG_EOF
+--- DOCKER BOOTSTRAP SETUP VERIFICATION REPORT ---
+Date: $(date)
+Docker user: $DOCKER_USER
+Docker dir: $DOCKER_DIR
+Compose dir: $COMPOSE_DIR
+Env file: $ENV_FILE
+GitHub raw base: $GITHUB_RAW_BASE
+
+Results:
+VERIFY_LOG_EOF
+    fi
+
+    {
+        echo "Networks:"
+        echo "socket_proxy=${SOCKET_PROXY_SUBNET_ACTUAL}"
+        echo "t2_proxy=${T2_PROXY_SUBNET_ACTUAL}"
+        echo "database=${DATABASE_NETWORK_NAME}"
+        echo ""
+        echo "Compose files:"
+        echo "Socket Proxy stack compose downloaded: ${SOCKET_PROXY_STACK_DOWNLOADED}"
+        echo "Portainer stack compose downloaded: ${PORTAINER_STACK_DOWNLOADED}"
+        echo "Portainer bootstrap override downloaded: ${PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED}"
+        echo "Dockge stack compose downloaded: ${DOCKGE_STACK_DOWNLOADED}"
+        echo "Komodo stack compose downloaded: ${KOMODO_STACK_DOWNLOADED}"
+        echo "Dockhand stack compose downloaded: ${DOCKHAND_STACK_DOWNLOADED}"
+        echo "Admin UI bootstrap override: ${ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN}"
+        echo ""
+        echo "Deployments:"
+        echo "socket-proxy deployed: ${SOCKET_PROXY_DEPLOYED}"
+        echo "admin UI: ${ADMIN_UI}"
+        echo "admin UI validated: ${ADMIN_UI_VALIDATED}"
+        echo "admin UI deployed: ${ADMIN_UI_DEPLOYED}"
+        echo "portainer deployed: ${PORTAINER_DEPLOYED}"
+        echo "Admin UI bootstrap port exposed: ${ADMIN_UI_BOOTSTRAP_PORT_EXPOSED}"
+        echo "UFW bootstrap port opened: ${UFW_BOOTSTRAP_PORT_OPENED}"
+        echo "Admin UI temporary URL: ${PORTAINER_ACCESS_URL}"
+        echo "Admin UI host: ${ADMIN_UI_HOST}"
+        echo ""
+        echo "Preflight checks:"
+        echo "vm.overcommit_memory=1: ${SYSCTL_REDIS_OK}"
+        echo "Traefik placeholders rendered: ${TRAEFIK_PLACEHOLDERS_OK}"
+        echo "Traefik DNS v3.7 syntax: ${TRAEFIK_DNS_DELAY_OK}"
+        echo "Traefik encoded characters: ${TRAEFIK_ENCODED_CHARS_OK}"
+        echo "Traefik authentik references: ${TRAEFIK_AUTHENTIK_REFERENCES_OK}"
+        echo "Authentik folders: ${AUTHENTIK_FOLDERS_OK}"
+        echo "CF companion secret: ${CF_COMPANION_SECRET_OK}"
+        echo "Filebrowser folders: ${FILEBROWSER_FOLDERS_OK}"
+                echo ""
+        echo "Docker containers:"
+        docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+    } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
+
+    msg_ok "DOCKER BOOTSTRAP VERIFICATION REPORT WRITTEN"
+}
+
+# --- 45. COMPLETION MARKER ---
+# Stores successful bootstrap information.
+function write_completion_marker() {
+    section "COMPLETION MARKER"
+
+    msg_info "Writing completion marker"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" bash -c "cat > '$COMPLETED_MARKER'" <<MARKER_EOF
+Docker Bootstrap Setup completed on: $(date)
+Docker user: $DOCKER_USER
+Docker dir: $DOCKER_DIR
+Compose dir: $COMPOSE_DIR
+Env file: $ENV_FILE
+GitHub raw base: $GITHUB_RAW_BASE
+Networks created: $NETWORKS_CREATED
+Networks verified: $NETWORKS_VERIFIED
+socket_proxy subnet: $SOCKET_PROXY_SUBNET_ACTUAL
+t2_proxy subnet: $T2_PROXY_SUBNET_ACTUAL
+database network: $DATABASE_NETWORK_NAME
+Socket Proxy stack downloaded: $SOCKET_PROXY_STACK_DOWNLOADED
+Portainer stack downloaded: $PORTAINER_STACK_DOWNLOADED
+Portainer bootstrap override downloaded: $PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED
+Dockge stack compose downloaded: $DOCKGE_STACK_DOWNLOADED
+Komodo stack compose downloaded: $KOMODO_STACK_DOWNLOADED
+Dockhand stack compose downloaded: $DOCKHAND_STACK_DOWNLOADED
+Socket proxy deployed: $SOCKET_PROXY_DEPLOYED
+Admin UI: $ADMIN_UI
+Admin UI validated: $ADMIN_UI_VALIDATED
+Admin UI deployed: $ADMIN_UI_DEPLOYED
+Portainer deployed: $PORTAINER_DEPLOYED
+Admin UI bootstrap override: $ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN
+Admin UI bootstrap port: $ADMIN_UI_BOOTSTRAP_PORT
+Admin UI bootstrap port exposed: $ADMIN_UI_BOOTSTRAP_PORT_EXPOSED
+UFW bootstrap port opened: $UFW_BOOTSTRAP_PORT_OPENED
+Admin UI temporary URL: $ADMIN_UI_BOOTSTRAP_ACCESS_URL
+vm.overcommit_memory OK: $SYSCTL_REDIS_OK
+Traefik placeholders OK: $TRAEFIK_PLACEHOLDERS_OK
+Traefik DNS v3.7 OK: $TRAEFIK_DNS_DELAY_OK
+Traefik encoded characters OK: $TRAEFIK_ENCODED_CHARS_OK
+Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
+Authentik folders OK: $AUTHENTIK_FOLDERS_OK
+CF companion secret OK: $CF_COMPANION_SECRET_OK
+Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
+Verify log: $VERIFY_LOG
+MARKER_EOF
+    else
+        cat > "$COMPLETED_MARKER" <<MARKER_EOF
+Docker Bootstrap Setup completed on: $(date)
+Docker user: $DOCKER_USER
+Docker dir: $DOCKER_DIR
+Compose dir: $COMPOSE_DIR
+Env file: $ENV_FILE
+GitHub raw base: $GITHUB_RAW_BASE
+Networks created: $NETWORKS_CREATED
+Networks verified: $NETWORKS_VERIFIED
+socket_proxy subnet: $SOCKET_PROXY_SUBNET_ACTUAL
+t2_proxy subnet: $T2_PROXY_SUBNET_ACTUAL
+database network: $DATABASE_NETWORK_NAME
+Socket Proxy stack downloaded: $SOCKET_PROXY_STACK_DOWNLOADED
+Portainer stack downloaded: $PORTAINER_STACK_DOWNLOADED
+Portainer bootstrap override downloaded: $PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED
+Dockge stack compose downloaded: $DOCKGE_STACK_DOWNLOADED
+Komodo stack compose downloaded: $KOMODO_STACK_DOWNLOADED
+Dockhand stack compose downloaded: $DOCKHAND_STACK_DOWNLOADED
+Socket proxy deployed: $SOCKET_PROXY_DEPLOYED
+Admin UI: $ADMIN_UI
+Admin UI validated: $ADMIN_UI_VALIDATED
+Admin UI deployed: $ADMIN_UI_DEPLOYED
+Portainer deployed: $PORTAINER_DEPLOYED
+Admin UI bootstrap override: $ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN
+Admin UI bootstrap port: $ADMIN_UI_BOOTSTRAP_PORT
+Admin UI bootstrap port exposed: $ADMIN_UI_BOOTSTRAP_PORT_EXPOSED
+UFW bootstrap port opened: $UFW_BOOTSTRAP_PORT_OPENED
+Admin UI temporary URL: $ADMIN_UI_BOOTSTRAP_ACCESS_URL
+vm.overcommit_memory OK: $SYSCTL_REDIS_OK
+Traefik placeholders OK: $TRAEFIK_PLACEHOLDERS_OK
+Traefik DNS v3.7 OK: $TRAEFIK_DNS_DELAY_OK
+Traefik encoded characters OK: $TRAEFIK_ENCODED_CHARS_OK
+Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
+Authentik folders OK: $AUTHENTIK_FOLDERS_OK
+CF companion secret OK: $CF_COMPANION_SECRET_OK
+Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
+Verify log: $VERIFY_LOG
+MARKER_EOF
+    fi
+
+    msg_ok "COMPLETION MARKER WRITTEN"
+}
+
+# --- 46. FINAL SUMMARY ---
+# Displays clean final setup summary and next step.
+function show_final_summary() {
+    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+
+    detail_line "socket_proxy" "$SOCKET_PROXY_SUBNET_ACTUAL"
+    detail_line "t2_proxy" "$T2_PROXY_SUBNET_ACTUAL"
+    detail_line "database" "$DATABASE_NETWORK_NAME"
+    detail_line "SOCKET PROXY STACK" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    detail_line "ADMIN UI" "$ADMIN_UI_DISPLAY_NAME"
+    detail_line "ADMIN UI COMPOSE" "$ADMIN_UI_COMPOSE_FILE"
+    detail_line "ADMIN UI HOST" "$ADMIN_UI_HOST"
+    detail_line "REDIS SYSCTL" "$SYSCTL_REDIS_OK"
+    detail_line "TRAEFIK PLACEHOLDERS" "$TRAEFIK_PLACEHOLDERS_OK"
+    detail_line "TRAEFIK DNS V3.7" "$TRAEFIK_DNS_DELAY_OK"
+    detail_line "TRAEFIK ENCODED CHARS" "$TRAEFIK_ENCODED_CHARS_OK"
+    detail_line "AUTHENTIK FOLDERS" "$AUTHENTIK_FOLDERS_OK"
+    detail_line "FILEBROWSER FOLDERS" "$FILEBROWSER_FOLDERS_OK"
+    detail_line "Admin UI temporary URL" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
+    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
+    detail_line "Verify log" "$VERIFY_LOG"
+
+    echo ""
+    echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} is temporarily available by direct IP for bootstrap:${CL}"
+    echo -e "${GN}${ADMIN_UI_BOOTSTRAP_ACCESS_URL}${CL}"
+    echo -e "${YW}Script 7 will close this direct bootstrap port and leave access through Traefik/AuthentiK.${CL}"
+    echo ""
+    echo -e "${BL}NEXT STEP:${CL}"
+    echo -e "${YW}Deploy the remaining application stacks in the documented order.${CL}"
+    echo -e "${YW}After all stacks are stable, run Script 7 for SSO and bootstrap-port hardening.${CL}"
+    echo ""
+}
+
+
+# --- 22A. READY TO APPLY SUMMARY ---
+# Shows the collected bootstrap/deploy plan before networks, compose files, firewall rules or containers are changed.
+function show_ready_summary_and_confirm() {
+    local apply_yn=""
+
+    section "READY TO APPLY"
+
+    echo -e "${YW}All questions have been collected and preflight checks are complete.${CL}"
+    echo -e "${YW}No Docker networks, compose files, firewall rules or containers have been changed yet in this apply phase.${CL}"
+    echo ""
+    detail_line "Docker user" "$DOCKER_USER"
+    detail_line "Docker directory" "$DOCKER_DIR"
+    detail_line "Compose directory" "$COMPOSE_DIR"
+    detail_line "Env file" "$ENV_FILE"
+    detail_line "GitHub raw base" "$GITHUB_RAW_BASE"
+    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
+    detail_line "Admin UI project" "$ADMIN_UI_PROJECT"
+    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
+    detail_line "Bootstrap URL" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script will create networks, download compose files and deploy containers.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply this Docker bootstrap/deploy plan now?" "y")"
+    [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+}
+
+# =========================================================
+#  MAIN ORCHESTRATION
+# =========================================================
+
+# --- 47. MAIN FUNCTION ---
+# Runs Docker network + socket-proxy + Admin UI bootstrap in safe order.
+function main() {
+    init_script
+
+    detect_docker_access
+    check_previous_marker
+    start_confirmation
+    collect_bootstrap_settings
+    validate_project_paths
+    verify_admin_ui_selection
+
+    verify_redis_host_tuning
+    verify_traefik_rendered_configs
+    verify_authentik_folders
+    verify_cf_companion_secret_file
+    verify_filebrowser_folders
+    show_ready_summary_and_confirm
+    create_shared_networks
+    verify_shared_networks
+
+    download_bootstrap_compose_files
+    verify_admin_ui_bootstrap_override_file
+    validate_bootstrap_compose_files
+
+    configure_bootstrap_firewall
+    deploy_socket_proxy
+    deploy_admin_ui
+    verify_bootstrap_containers
+    create_verification_report
+    write_completion_marker
+    show_final_summary
+
+    exit 0
+}
+
 main "$@"

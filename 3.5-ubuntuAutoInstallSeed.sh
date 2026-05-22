@@ -453,60 +453,18 @@ timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # This prevents the script from accepting defaults while the user is away
+    # and gives enough time to type or paste values safely.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-
     echo "$answer"
 }
+
 
 # --- 16. TIMED NUMERIC INPUT HELPER ---
 timed_number_input() {
@@ -515,67 +473,12 @@ timed_number_input() {
     local min_value="${3:-1}"
     local max_value="${4:-}"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
+    # Numeric inputs are deliberately NOT timed.
+    # Countdown prompts are only used for simple Y/n decisions.
     while true; do
-        deadline=$(( $(date +%s) + T ))
-
-        while true; do
-            now=$(date +%s)
-            remaining=$(( deadline - now ))
-
-            if [ "$remaining" -le 0 ]; then
-                answer="$default"
-                break
-            fi
-
-            tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-            if [ -r /dev/tty ]; then
-                if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                    if [[ "$key" == " " ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-                        break
-                    elif [[ -z "$key" ]]; then
-                        answer="$default"
-                        break
-                    elif [[ "$key" =~ ^[0-9]$ ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
-                        break
-                    else
-                        tty_print "${BFR}"
-                        print_number_error "$min_value" "$max_value"
-                        answer="INVALID"
-                        break
-                    fi
-                fi
-            else
-                if IFS= read -rsn1 -t 1 key; then
-                    if [[ "$key" == " " ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-                        break
-                    elif [[ -z "$key" ]]; then
-                        answer="$default"
-                        break
-                    elif [[ "$key" =~ ^[0-9]$ ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
-                        break
-                    else
-                        tty_print "${BFR}"
-                        print_number_error "$min_value" "$max_value"
-                        answer="INVALID"
-                        break
-                    fi
-                fi
-            fi
-        done
-
-        if [ "$answer" == "INVALID" ]; then
-            continue
-        fi
+        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+        [ -z "$answer" ] && answer="$default"
 
         if validate_number "$answer" "$min_value" "$max_value"; then
             tty_print "${BFR}"
@@ -588,6 +491,7 @@ timed_number_input() {
         print_number_error "$min_value" "$max_value"
     done
 }
+
 
 # --- 17. MENU SELECTION HELPER ---
 timed_menu_select() {
@@ -722,51 +626,6 @@ safe_hostname() {
 get_vm_status() {
     local vmid="$1"
     qm status "$vmid" 2>/dev/null | awk '{print $2}'
-}
-
-# --- 24A. STRICT VM STOP DETECTION HELPER ---
-# Waits until Proxmox reports the selected VM as fully stopped.
-# This is used before installer media is attached and before a newly installed VM is started again.
-# It avoids racing against a still-running installer or a VM that is shutting down asynchronously.
-wait_for_vm_stopped_strict() {
-    local vmid="$1"
-    local timeout_seconds="${2:-120}"
-    local reason="${3:-VM stop confirmation}"
-    local start_time=""
-    local now_time=""
-    local elapsed=""
-    local status=""
-    local stable_count="0"
-
-    start_time="$(date +%s)"
-
-    while true; do
-        status="$(get_vm_status "$vmid")"
-
-        # Require two consecutive stopped reads so a transient qm status result cannot race the next action.
-        if [ "$status" == "stopped" ]; then
-            stable_count=$((stable_count + 1))
-
-            if [ "$stable_count" -ge 2 ]; then
-                tty_print "${BFR}"
-                return 0
-            fi
-        else
-            stable_count="0"
-        fi
-
-        now_time="$(date +%s)"
-        elapsed=$(( now_time - start_time ))
-
-        if [ "$elapsed" -ge "$timeout_seconds" ]; then
-            tty_print "${BFR}"
-            msg_warn "${reason} timed out. VM ${vmid} status is ${status:-unknown}."
-            return 1
-        fi
-
-        tty_print "${BFR}${YW}${reason}: waiting for VM ${vmid} to stop... ${elapsed}s / ${timeout_seconds}s, status=${status:-unknown}${CL}"
-        sleep 2
-    done
 }
 
 # --- 25. WAIT FOR VM POWEROFF HELPER ---
@@ -984,33 +843,21 @@ if [ -f "\$VERIFY_MARKER" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
-# Script 1-style colour helpers for the one-time login verification report.
-YW="\$(printf '\\033[33m')"
-BL="\$(printf '\\033[36m')"
-RD="\$(printf '\\033[01;31m')"
-GN="\$(printf '\\033[1;92m')"
-DGN="\$(printf '\\033[32m')"
-CL="\$(printf '\\033[m')"
-CM="\${GN}✓\${CL}"
-WARN_ICON="\${YW}!\${CL}"
-CROSS="\${RD}✗\${CL}"
-BORDER="\${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\${CL}"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo " UBUNTU AUTOINSTALL VERIFICATION REPORT"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Date: \$(date)"
+echo "Host: \$(hostname)"
+echo "User: ${TARGET_USERNAME}"
+echo "Expected VM MAC: ${TARGET_VM_MAC}"
+echo "Keyboard Layout: ${TARGET_KEYBOARD_LAYOUT}"
+echo "Locale: ${TARGET_LOCALE}"
+echo ""
 
-printf '\n'
-echo -e "\${BORDER}"
-echo -e "\${BL} UBUNTU AUTOINSTALL VERIFICATION REPORT\${CL}"
-echo -e "\${BORDER}"
-echo -e "\${DGN}Date:\${CL} \$(date)"
-echo -e "\${DGN}Host:\${CL} \$(hostname)"
-echo -e "\${DGN}User:\${CL} ${TARGET_USERNAME}"
-echo -e "\${DGN}Expected VM MAC:\${CL} ${TARGET_VM_MAC}"
-echo -e "\${DGN}Keyboard Layout:\${CL} ${TARGET_KEYBOARD_LAYOUT}"
-echo -e "\${DGN}Locale:\${CL} ${TARGET_LOCALE}"
-printf '\n'
-
-PASS() { echo -e "\${CM} \${GN}PASS - \$1\${CL}"; }
-WARN() { echo -e "\${WARN_ICON} \${YW}WARN - \$1\${CL}"; }
-FAIL() { echo -e "\${CROSS} \${RD}FAIL - \$1\${CL}"; }
+PASS() { echo "✓ PASS - \$1"; }
+WARN() { echo "! WARN - \$1"; }
+FAIL() { echo "✗ FAIL - \$1"; }
 
 if [ -s "/home/${TARGET_USERNAME}/.ssh/authorized_keys" ]; then PASS "SSH authorized_keys present"; else FAIL "SSH authorized_keys missing"; fi
 if sshd -T 2>/dev/null | grep -q "^passwordauthentication no"; then PASS "SSH password authentication disabled"; else FAIL "SSH password authentication not disabled"; fi
@@ -1023,15 +870,15 @@ if findmnt / >/dev/null 2>&1; then PASS "Root filesystem mounted"; else FAIL "Ro
 if command -v ip >/dev/null 2>&1 && ip -4 addr show | grep -q "inet "; then PASS "IPv4 address detected"; else WARN "IPv4 address not detected"; fi
 if apt-get check >/dev/null 2>&1; then PASS "APT database healthy"; else WARN "APT database check failed"; fi
 
-printf '\n'
-echo -e "\${BL}Network:\${CL}"
+echo ""
+echo "Network:"
 ip -br addr 2>/dev/null || true
-printf '\n'
-echo -e "\${BL}Disk:\${CL}"
+echo ""
+echo "Disk:"
 df -h / 2>/dev/null || true
-printf '\n'
-echo -e "\${BORDER}"
-printf '\n'
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
 
 touch "\$VERIFY_MARKER" 2>/dev/null || true
 rm -f /etc/profile.d/ubuntu-autoinstall-verify-display.sh 2>/dev/null || true
@@ -1399,28 +1246,24 @@ select_vm() {
 
     qm config "$TARGET_VMID" >/dev/null 2>&1 || msg_error "Selected VM ${TARGET_VMID} does not exist."
 
-    detail_line "Selected VM" "${TARGET_VMID} / ${TARGET_VM_NAME} / ${TARGET_VM_STATUS}"
+    if [ "$TARGET_VM_STATUS" == "running" ]; then
+        msg_warn "VM ${TARGET_VMID} is running; it will not be stopped until final apply."
+    fi
 
-    ensure_vm_stopped_after_selection
+    detail_line "Selected VM" "${TARGET_VMID} / ${TARGET_VM_NAME} / ${TARGET_VM_STATUS}"
 }
 
-# --- 39A. EARLY VM SHUTDOWN AFTER SELECTION ---
-# Stops a running VM immediately after VM selection, before ISO creation, package work, and final apply.
-# This prevents Script 3.5 from shutting the VM down at the last second and racing the autoinstall boot.
-ensure_vm_stopped_after_selection() {
+# --- 39A. VM STOP SAFETY BEFORE APPLY ---
+# Stops the selected VM only after all prechecks, ISO decisions and final confirmation are complete.
+ensure_vm_stopped_before_apply() {
     local shutdown_yn=""
     local current_status=""
 
     current_status="$(get_vm_status "$TARGET_VMID")"
     TARGET_VM_STATUS="${current_status:-unknown}"
 
-    if [ "$TARGET_VM_STATUS" == "stopped" ]; then
-        detail_line "VM shutdown state" "already stopped"
-        return 0
-    fi
-
     if [ "$TARGET_VM_STATUS" != "running" ]; then
-        msg_error "VM ${TARGET_VMID} must be stopped before autoinstall. Current status: ${TARGET_VM_STATUS}"
+        return 0
     fi
 
     section "VM SHUTDOWN BEFORE APPLY"
@@ -1431,50 +1274,19 @@ ensure_vm_stopped_after_selection() {
 
     shutdown_yn="$(timed_yes_no "Shutdown VM now?" "y")"
 
-    if [[ "$shutdown_yn" =~ ^[Nn] ]]; then
+    if [[ "$shutdown_yn" =~ ^[Yy] ]]; then
+        msg_info "Shutting down VM ${TARGET_VMID}"
+        if qm shutdown "$TARGET_VMID" --timeout 60 >/dev/null 2>&1; then
+            msg_ok "VM SHUTDOWN COMPLETE"
+        else
+            msg_warn "Graceful shutdown failed or timed out; forcing stop"
+            run_cmd "stopping VM ${TARGET_VMID}" qm stop "$TARGET_VMID"
+            msg_ok "VM STOPPED"
+        fi
+        TARGET_VM_STATUS="stopped"
+    else
         msg_error "VM must be stopped before attaching install media safely."
     fi
-
-    msg_info "Shutting down VM ${TARGET_VMID}"
-
-    if qm shutdown "$TARGET_VMID" --timeout 90 >/dev/null 2>&1; then
-        if wait_for_vm_stopped_strict "$TARGET_VMID" "30" "Verifying VM shutdown"; then
-            TARGET_VM_STATUS="stopped"
-            msg_ok "VM SHUTDOWN COMPLETE"
-            return 0
-        fi
-    fi
-
-    msg_warn "Graceful shutdown failed or did not reach a stable stopped state; forcing stop"
-    run_cmd "forcing VM ${TARGET_VMID} off" qm stop "$TARGET_VMID"
-
-    if wait_for_vm_stopped_strict "$TARGET_VMID" "30" "Verifying forced VM stop"; then
-        TARGET_VM_STATUS="stopped"
-        msg_ok "VM SHUTDOWN COMPLETE"
-        return 0
-    fi
-
-    msg_error "VM ${TARGET_VMID} did not reach stopped state. Autoinstall cancelled."
-}
-
-# --- 39B. FINAL VM STOP PRECHECK BEFORE INSTALL BOOT ---
-# Performs a final no-prompt stop check immediately before attaching media and starting autoinstall.
-# The expected normal path is already stopped because ensure_vm_stopped_after_selection ran earlier.
-ensure_vm_stopped_before_install_start() {
-    local current_status=""
-
-    current_status="$(get_vm_status "$TARGET_VMID")"
-    TARGET_VM_STATUS="${current_status:-unknown}"
-
-    if [ "$TARGET_VM_STATUS" != "stopped" ]; then
-        msg_error "VM ${TARGET_VMID} is ${TARGET_VM_STATUS}; refusing to attach installer media until it is fully stopped."
-    fi
-
-    if ! wait_for_vm_stopped_strict "$TARGET_VMID" "15" "Final VM stopped precheck"; then
-        msg_error "VM ${TARGET_VMID} did not remain stopped. Autoinstall cancelled."
-    fi
-
-    TARGET_VM_STATUS="stopped"
 }
 
 # --- 40. VM MAC DETECTION ---
@@ -1948,7 +1760,7 @@ show_apply_summary() {
 
 # --- 58. ATTACH AND START INSTALL ---
 attach_iso_and_start_install() {
-    ensure_vm_stopped_before_install_start
+    ensure_vm_stopped_before_apply
 
     section "ATTACH INSTALLER AND START VM"
 
@@ -1967,6 +1779,8 @@ attach_iso_and_start_install() {
 
 # --- 59. POST-INSTALL CLEANUP ---
 post_install_cleanup() {
+    section "POST-INSTALL CLEANUP"
+
     if wait_for_vm_poweroff "$TARGET_VMID" "$INSTALL_WAIT_MINUTES"; then
         INSTALL_POWERED_OFF="yes"
     else
@@ -1985,8 +1799,6 @@ post_install_cleanup() {
         echo ""
         exit 1
     fi
-
-    section "POST-INSTALL CLEANUP"
 
     msg_info "Detaching generated autoinstall ISO from VM"
     run_cmd "detaching installer ISO from VM" qm set "$TARGET_VMID" --delete ide2
@@ -2010,14 +1822,6 @@ start_installed_vm_and_detect_ip() {
     section "START INSTALLED VM"
 
     if [ "$POST_INSTALL_START_VM" == "y" ]; then
-        if ! wait_for_vm_stopped_strict "$TARGET_VMID" "30" "Confirming installed VM is stopped before first boot"; then
-            msg_error "VM ${TARGET_VMID} is not safely stopped before installed-system boot."
-        fi
-
-        msg_info "Waiting 5 seconds before starting installed VM"
-        sleep 5
-        msg_ok "POST-INSTALL STARTUP DELAY COMPLETE"
-
         msg_info "Starting installed Ubuntu VM"
         run_cmd "starting installed Ubuntu VM" qm start "$TARGET_VMID"
         msg_ok "INSTALLED UBUNTU VM STARTED"
@@ -2135,7 +1939,7 @@ show_generated_iso_only_summary() {
 
 # --- 64. FINAL OUTPUT ---
 show_final_output() {
-    section_flash_success "     ━━━━━━━━━━━━━━━━━    FINISHED    ━━━━━━━━━━━━━━━━━"
+    section_flash_success "FINISHED"
 
     echo -e "VM ID: ${GN}${TARGET_VMID}${CL}"
     echo -e "VM NAME: ${GN}${TARGET_VM_NAME}${CL}"
@@ -2183,6 +1987,7 @@ show_final_output() {
 
 main() {
     local start_yn=""
+    local create_iso_yn=""
     local attach_yn=""
 
     init_script
@@ -2195,8 +2000,9 @@ main() {
         exit 0
     fi
 
+    # Phase 1: collect every user answer first. No ISO tools are installed,
+    # no ISO is generated, and no VM media is attached until after the READY TO APPLY confirmation.
     collect_early_cleanup_preferences
-
     select_vm
     detect_vm_mac
     collect_user_locale_inputs
@@ -2205,16 +2011,25 @@ main() {
     collect_post_install_options
     select_ubuntu_iso
     show_ubuntu_pro_note
-
     precheck_generated_iso_reuse
 
-    if [ "$REUSE_EXISTING_AUTOINSTALL_ISO" != "yes" ]; then
-        ensure_tools
+    show_apply_summary
+    echo -e "${YW}All answers have been collected. No system-changing actions have been applied yet.${CL}"
+    create_iso_yn="$(timed_yes_no "Create/reuse generated autoinstall ISO now?" "y")"
+
+    if [[ "$create_iso_yn" =~ ^[Nn] ]]; then
+        show_generated_iso_only_summary
+        exit 0
     fi
 
-    generate_autoinstall_iso
+    # Phase 2: apply after final confirmation.
+    if [ "$REUSE_EXISTING_AUTOINSTALL_ISO" != "yes" ]; then
+        ensure_tools
+        generate_autoinstall_iso
+    else
+        verify_reused_generated_iso
+    fi
 
-    show_apply_summary
     attach_yn="$(timed_yes_no "Attach generated autoinstall ISO and start VM now?" "y")"
 
     if [[ "$attach_yn" =~ ^[Nn] ]]; then
@@ -2222,6 +2037,7 @@ main() {
         exit 0
     fi
 
+    ensure_vm_stopped_before_apply
     attach_iso_and_start_install
     post_install_cleanup
     start_installed_vm_and_detect_ip
@@ -2229,5 +2045,6 @@ main() {
     create_host_verification_report
     show_final_output
 }
+
 
 main "$@"
