@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.3.0"
+SCRIPT_VERSION="v1.3.1"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="authentik-bootstrap-cf-token-first-service-perms-audit-pause"
+SCRIPT_BUILD="authentik-bootstrap-untimed-menu-input-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1477,8 +1477,8 @@ function collect_admin_ui_inputs() {
 # Collects Authentik external URL and bootstrap admin values before .env is written.
 # Bootstrap token is not an Authentik API token. API token input is optional and stored separately.
 function collect_authentik_inputs() {
-    local generate_password_yn=""
-    local generate_token_yn=""
+    local password_choice=""
+    local token_choice=""
     local api_choice=""
     local default_admin_email=""
 
@@ -1503,27 +1503,63 @@ function collect_authentik_inputs() {
         msg_warn "Invalid email format."
     done
 
-    generate_password_yn="$(timed_yes_no "Auto-generate Authentik bootstrap admin password?" "y")"
-    if [[ "$generate_password_yn" =~ ^[Yy] ]]; then
-        AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(generate_secret)"
-        msg_ok "AUTHENTIK BOOTSTRAP PASSWORD WILL BE GENERATED"
-    else
-        AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(sensitive_line_input "Enter Authentik bootstrap admin password")" || AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
-        AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" | tr -d '\r\n')"
-        [ -n "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" ] || msg_error "Authentik bootstrap password cannot be empty."
-        msg_ok "AUTHENTIK BOOTSTRAP PASSWORD CAPTURED"
-    fi
+    echo ""
+    echo -e "${YW}Choose how Script 6 should set the first Authentik bootstrap admin password.${CL}"
+    echo -e "${YW}This is a menu choice, not the password prompt. Type 2 if you want to paste your own password.${CL}"
+    echo -e "${BL}1) Auto-generate password ${GN}(recommended/default)${CL}"
+    echo -e "${BL}2) Enter custom password${CL}"
+    echo ""
 
-    generate_token_yn="$(timed_yes_no "Auto-generate Authentik bootstrap token?" "y")"
-    if [[ "$generate_token_yn" =~ ^[Yy] ]]; then
-        AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(generate_secret)"
-        msg_ok "AUTHENTIK BOOTSTRAP TOKEN WILL BE GENERATED"
-    else
-        AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(sensitive_line_input "Enter Authentik bootstrap token")" || AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
-        AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" | tr -d '\r\n')"
-        [ -n "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" ] || msg_error "Authentik bootstrap token cannot be empty."
-        msg_ok "AUTHENTIK BOOTSTRAP TOKEN CAPTURED"
-    fi
+    while true; do
+        password_choice="$(untimed_menu_input "Select Authentik bootstrap password option [1-2]" "1")"
+        case "$password_choice" in
+            1|auto|Auto|generate|generated)
+                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(generate_secret)"
+                msg_ok "AUTHENTIK BOOTSTRAP PASSWORD WILL BE GENERATED"
+                break
+                ;;
+            2|custom|Custom|manual|Manual)
+                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(sensitive_line_input "Enter Authentik bootstrap admin password")" || AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
+                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" | tr -d '
+')"
+                [ -n "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" ] || msg_error "Authentik bootstrap password cannot be empty."
+                msg_ok "AUTHENTIK BOOTSTRAP PASSWORD CAPTURED"
+                break
+                ;;
+            *)
+                msg_warn "Invalid choice. Type 1 to auto-generate or 2 to enter a custom password. Do not paste the password at this menu prompt."
+                ;;
+        esac
+    done
+
+    echo ""
+    echo -e "${YW}Choose how Script 6 should set the Authentik bootstrap token.${CL}"
+    echo -e "${YW}Reminder: the bootstrap token is not an Authentik API token.${CL}"
+    echo -e "${BL}1) Auto-generate bootstrap token ${GN}(recommended/default)${CL}"
+    echo -e "${BL}2) Enter custom bootstrap token${CL}"
+    echo ""
+
+    while true; do
+        token_choice="$(untimed_menu_input "Select Authentik bootstrap token option [1-2]" "1")"
+        case "$token_choice" in
+            1|auto|Auto|generate|generated)
+                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(generate_secret)"
+                msg_ok "AUTHENTIK BOOTSTRAP TOKEN WILL BE GENERATED"
+                break
+                ;;
+            2|custom|Custom|manual|Manual)
+                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(sensitive_line_input "Enter Authentik bootstrap token")" || AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
+                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" | tr -d '
+')"
+                [ -n "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" ] || msg_error "Authentik bootstrap token cannot be empty."
+                msg_ok "AUTHENTIK BOOTSTRAP TOKEN CAPTURED"
+                break
+                ;;
+            *)
+                msg_warn "Invalid choice. Type 1 to auto-generate or 2 to enter a custom bootstrap token."
+                ;;
+        esac
+    done
 
     echo ""
     echo -e "${YW}Optional: Script 7 can automate Authentik provider/application setup if you later paste a real Authentik API token.${CL}"
@@ -1537,7 +1573,8 @@ function collect_authentik_inputs() {
     case "$api_choice" in
         2)
             AUTHENTIK_API_TOKEN_VALUE="$(sensitive_line_input "Paste existing Authentik API token")" || AUTHENTIK_API_TOKEN_VALUE=""
-            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '\r\n')"
+            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '
+')"
             if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
                 AUTHENTIK_API_TOKEN_MODE="provided"
                 msg_ok "AUTHENTIK API TOKEN CAPTURED"
@@ -2294,11 +2331,6 @@ function show_secrets_once_without_logging() {
     fi
     echo -e "AUTHENTIK_SECRET_KEY=${GN}${AUTHENTIK_SECRET_KEY}${CL}"
     echo -e "AUTHENTIK_POSTGRES_PASSWORD=${GN}${AUTHENTIK_POSTGRES_PASSWORD}${CL}"
-    echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_HOST_VALUE}${CL}"
-    echo -e "AUTHENTIK_HOST_BROWSER=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_EMAIL=${GN}${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${GN}${AUTHENTIK_BOOTSTRAP_PASSWORD}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_TOKEN=${GN}${AUTHENTIK_BOOTSTRAP_TOKEN}${CL}"
     echo -e "${YW}Reminder: AUTHENTIK_BOOTSTRAP_TOKEN is not an Authentik API token.${CL}"
     echo -e "POSTIZ_POSTGRES_PASSWORD=${GN}${POSTIZ_POSTGRES_PASSWORD}${CL}"
     echo -e "POSTIZ_JWT_SECRET=${GN}${POSTIZ_JWT_SECRET}${CL}"
