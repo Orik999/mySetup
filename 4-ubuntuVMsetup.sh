@@ -708,6 +708,8 @@ function start_confirmation() {
 
     start_yn="$(timed_yes_no "Start the Ubuntu VM Setup Script?" "y")"
     [[ "$start_yn" =~ ^[Nn] ]] && exit 0
+
+    return 0
 }
 
 # --- 30. USERNAME INPUT ---
@@ -742,6 +744,8 @@ function collect_username() {
 
     LOCK_USER_PASSWORD="$(timed_yes_no "Lock password for SSH-key-only user?" "y")"
     APPLY_SSH_HARDENING="$(timed_yes_no "Apply SSH key-only hardening after keys are verified?" "y")"
+
+    return 0
 }
 
 # --- 31. UBUNTU PRO INPUTS ---
@@ -785,6 +789,8 @@ function collect_ubuntu_pro_inputs() {
         ENABLE_ESM_INFRA="n"
         ENABLE_LIVEPATCH="n"
     fi
+
+    return 0
 }
 
 # --- 32. SYSTEM ACTION INPUTS ---
@@ -805,6 +811,8 @@ function collect_system_action_inputs() {
 
     RUN_SYSTEM_CLEANUP="$(timed_yes_no "Run package cleanup at the end?" "y")"
     REBOOT_AFTER_FINISH="$(timed_yes_no "Reboot automatically after setup finishes?" "y")"
+
+    return 0
 }
 
 # --- 33. READY SUMMARY ---
@@ -848,6 +856,8 @@ function show_ready_summary_and_confirm() {
 
     apply_yn="$(timed_yes_no "Apply this Ubuntu VM setup plan now?" "y")"
     [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+
+    return 0
 }
 
 # =========================================================
