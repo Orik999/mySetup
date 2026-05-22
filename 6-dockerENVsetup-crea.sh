@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.2.0"
+SCRIPT_VERSION="v1.2.1"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-ready-apply-untimed-inputs-stability"
+SCRIPT_BUILD="dynamic-proxmox-url-route-default-y"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -887,6 +887,88 @@ function download_file() {
     fi
 }
 
+
+# --- 39B.1. PRIMARY IPV4 DETECTION HELPER ---
+# Detects the current machine's primary IPv4 address.
+# This is used only as context for choosing sane network defaults; it is not hardcoded into config blindly.
+function detect_primary_ipv4() {
+    local ip_addr=""
+
+    if command -v ip >/dev/null 2>&1; then
+        ip_addr="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')"
+    fi
+
+    if [ -z "$ip_addr" ] && command -v hostname >/dev/null 2>&1; then
+        ip_addr="$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\\./) {print $i; exit}}')"
+    fi
+
+    printf '%s' "$ip_addr"
+}
+
+# --- 39B.2. DEFAULT GATEWAY DETECTION HELPER ---
+# Detects the system default gateway. On some homelab designs this is the Proxmox bridge/host;
+# on normal bridged LANs it may be the router, so the final value is still editable.
+function detect_default_gateway_ipv4() {
+    local gateway=""
+
+    if command -v ip >/dev/null 2>&1; then
+        gateway="$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')"
+    fi
+
+    printf '%s' "$gateway"
+}
+
+# --- 39B.3. PROXMOX URL DEFAULT DETECTION HELPER ---
+# Builds the Proxmox internal URL default without hardcoding a fake static IP.
+# Priority:
+#   1. PROXMOX_URL_DEFAULT or PROXMOX_URL environment variable, if exported by the user.
+#   2. Existing local .env PROXMOX_URL value on reruns.
+#   3. Local DNS names commonly used for Proxmox hosts: pve2, pve, proxmox.
+#   4. Default gateway as a best-effort fallback.
+# If nothing can be detected, the prompt is left blank so the user must type/paste the correct URL.
+function detect_proxmox_internal_url_default() {
+    local existing_env_url=""
+    local host=""
+    local resolved_ip=""
+    local gateway_ip=""
+
+    if [ -n "${PROXMOX_URL_DEFAULT:-}" ]; then
+        printf '%s' "$PROXMOX_URL_DEFAULT"
+        return 0
+    fi
+
+    if [ -n "${PROXMOX_URL:-}" ]; then
+        printf '%s' "$PROXMOX_URL"
+        return 0
+    fi
+
+    if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
+        existing_env_url="$(grep -E '^PROXMOX_URL=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
+        if [ -n "$existing_env_url" ]; then
+            printf '%s' "$existing_env_url"
+            return 0
+        fi
+    fi
+
+    if command -v getent >/dev/null 2>&1; then
+        for host in pve2 pve proxmox; do
+            resolved_ip="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')"
+            if [[ "$resolved_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                printf 'https://%s:8006' "$resolved_ip"
+                return 0
+            fi
+        done
+    fi
+
+    gateway_ip="$(detect_default_gateway_ipv4)"
+    if [[ "$gateway_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        printf 'https://%s:8006' "$gateway_ip"
+        return 0
+    fi
+
+    printf ''
+}
+
 # --- 39B. TRAEFIK TEMPLATE RENDER HELPER ---
 # Replaces public-safe placeholders in downloaded Traefik templates.
 # Secret values are never embedded into Traefik config files.
@@ -1246,7 +1328,13 @@ function collect_traefik_inputs() {
     local default_traefik_host="traefik.${DOMAIN_VALUE}"
     local proxmox_yn=""
     local default_proxmox_host="proxmox.${DOMAIN_VALUE}"
-    local default_proxmox_url="https://192.168.1.10:8006"
+    local default_proxmox_url=""
+    local detected_primary_ip=""
+    local detected_gateway_ip=""
+
+    detected_primary_ip="$(detect_primary_ipv4)"
+    detected_gateway_ip="$(detect_default_gateway_ipv4)"
+    default_proxmox_url="$(detect_proxmox_internal_url_default)"
 
     section "TRAEFIK CONFIG"
 
@@ -1260,7 +1348,17 @@ function collect_traefik_inputs() {
         msg_warn "Invalid Traefik host. Use a bare hostname such as traefik.${DOMAIN_VALUE}."
     done
 
-    proxmox_yn="$(timed_yes_no "Create optional Proxmox route in Traefik dynamic config?" "n")"
+    echo ""
+    [ -n "$detected_primary_ip" ] && detail_line "Detected current system IPv4" "$detected_primary_ip"
+    [ -n "$detected_gateway_ip" ] && detail_line "Detected default gateway" "$detected_gateway_ip"
+    if [ -n "$default_proxmox_url" ]; then
+        detail_line "Suggested Proxmox URL" "$default_proxmox_url"
+    else
+        msg_warn "No Proxmox URL could be auto-detected. You will need to type it if enabling the route."
+    fi
+    echo ""
+
+    proxmox_yn="$(timed_yes_no "Create optional Proxmox route in Traefik dynamic config?" "y")"
 
     if [[ "$proxmox_yn" =~ ^[Yy] ]]; then
         PROXMOX_ROUTE_ENABLED="y"
