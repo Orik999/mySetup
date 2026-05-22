@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.2.1"
+SCRIPT_VERSION="v1.2.2"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="dynamic-proxmox-url-route-default-y"
+SCRIPT_BUILD="cloudflare-return-dynamic-proxmox-ready-apply-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -622,17 +622,15 @@ function timed_text_input() {
     local answer=""
 
     # Text/path/name inputs are deliberately NOT timed.
-    # Countdown prompts are reserved only for simple Y/n decisions.
-    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
+    # This prevents accepting defaults while the user is away and gives time to type/paste.
     answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer 2>/dev/null || true
-
     echo "$answer"
 }
+
 
 # --- 28. HIDDEN INPUT HELPER ---
 # Reads sensitive input without echoing it to terminal.
@@ -889,8 +887,7 @@ function download_file() {
 
 
 # --- 39B.1. PRIMARY IPV4 DETECTION HELPER ---
-# Detects the current machine's primary IPv4 address.
-# This is used only as context for choosing sane network defaults; it is not hardcoded into config blindly.
+# Detects the current machine's primary IPv4 address for network-context display.
 function detect_primary_ipv4() {
     local ip_addr=""
 
@@ -899,15 +896,14 @@ function detect_primary_ipv4() {
     fi
 
     if [ -z "$ip_addr" ] && command -v hostname >/dev/null 2>&1; then
-        ip_addr="$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\\./) {print $i; exit}}')"
+        ip_addr="$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\./) {print $i; exit}}')"
     fi
 
     printf '%s' "$ip_addr"
 }
 
 # --- 39B.2. DEFAULT GATEWAY DETECTION HELPER ---
-# Detects the system default gateway. On some homelab designs this is the Proxmox bridge/host;
-# on normal bridged LANs it may be the router, so the final value is still editable.
+# Detects the default gateway as a best-effort Proxmox URL hint.
 function detect_default_gateway_ipv4() {
     local gateway=""
 
@@ -920,12 +916,6 @@ function detect_default_gateway_ipv4() {
 
 # --- 39B.3. PROXMOX URL DEFAULT DETECTION HELPER ---
 # Builds the Proxmox internal URL default without hardcoding a fake static IP.
-# Priority:
-#   1. PROXMOX_URL_DEFAULT or PROXMOX_URL environment variable, if exported by the user.
-#   2. Existing local .env PROXMOX_URL value on reruns.
-#   3. Local DNS names commonly used for Proxmox hosts: pve2, pve, proxmox.
-#   4. Default gateway as a best-effort fallback.
-# If nothing can be detected, the prompt is left blank so the user must type/paste the correct URL.
 function detect_proxmox_internal_url_default() {
     local existing_env_url=""
     local host=""
@@ -1126,8 +1116,6 @@ function start_confirmation() {
     fi
 
     return 0
-
-    return 0
 }
 
 # --- 43. DOCKER READINESS CHECK ---
@@ -1319,6 +1307,8 @@ function collect_domain_cloudflare_inputs() {
     else
         msg_ok "CLOUDFLARE API TOKEN CAPTURED"
     fi
+
+    return 0
 }
 
 # --- 46A. TRAEFIK CONFIG INPUTS ---
@@ -1386,6 +1376,8 @@ function collect_traefik_inputs() {
     TRAEFIK_ACME_DIR="${TRAEFIK_DIR}/acme"
     TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_DIR}/traefik.yml"
     TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DIR}/dynamic-config.yml"
+
+    return 0
 }
 
 # --- 47. HTPASSWD OPTIONAL INPUT ---
@@ -1453,6 +1445,46 @@ function collect_htpasswd_inputs() {
 
 # --- 48. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
+
+# --- 55A. READY TO APPLY SUMMARY ---
+# Shows every collected setting before directories, secrets, .env, templates or permissions are written.
+function show_ready_summary_and_confirm() {
+    local apply_yn=""
+
+    section "READY TO APPLY"
+
+    echo -e "${YW}All questions have been collected. No Docker ENV files, secrets or templates have been written yet.${CL}"
+    echo ""
+    detail_line "Docker user" "$DOCKER_USER"
+    detail_line "User directory" "$USERDIR"
+    detail_line "Docker directory" "$DOCKER_DIR"
+    detail_line "Secrets directory" "$DOCKER_SECRETS_DIR"
+    detail_line "PUID / PGID" "${PUID_VALUE} / ${PGID_VALUE}"
+    detail_line "Timezone" "$TZ_VALUE"
+    detail_line "Domain" "$DOMAIN_VALUE"
+    detail_line "Cloudflare email" "$CF_API_EMAIL_VALUE"
+    detail_line "Cloudflare zone ID" "${CF_ZONE_ID_VALUE:-not set}"
+    detail_line "Traefik dashboard host" "$TRAEFIK_DASHBOARD_HOST"
+    detail_line "Proxmox route enabled" "$PROXMOX_ROUTE_ENABLED"
+    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
+        detail_line "Proxmox hostname" "$PROXMOX_HOST"
+        detail_line "Proxmox internal URL" "$PROXMOX_URL"
+    fi
+    detail_line "Regenerate secrets" "$(yes_no_label "$REGENERATE_SECRETS")"
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script will create/update folders, .env, secrets and templates.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply this Docker ENV setup plan now?" "y")"
+
+    if [[ "$apply_yn" =~ ^[Nn] ]]; then
+        echo -e "${YW}Docker ENV setup cancelled. No Docker ENV/system-changing actions were applied.${CL}"
+        exit 0
+    fi
+
+    return 0
+}
+
 function create_docker_directories() {
     section "DOCKER FOLDER STRUCTURE"
 
@@ -1647,6 +1679,9 @@ DOMAIN="${DOMAIN_VALUE}"
 CF_API_EMAIL="${CF_API_EMAIL_VALUE}"
 CF_ZONE_ID="${CF_ZONE_ID_VALUE}"
 CF_API_TOKEN_FILE="${CF_API_TOKEN_FILE}"
+PROXMOX_ROUTE_ENABLED="${PROXMOX_ROUTE_ENABLED}"
+PROXMOX_HOST="${PROXMOX_HOST}"
+PROXMOX_URL="${PROXMOX_URL}"
 
 # --- PostgreSQL root/admin password ---
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
@@ -1972,38 +2007,6 @@ function show_clean_final_summary() {
 
 # --- 58. MAIN FUNCTION ---
 # Runs full setup in validation -> input -> file creation -> verify -> one-time secret display order.
-# --- READY TO APPLY SUMMARY ---
-# Confirms all collected Docker ENV answers before writing folders, .env, secrets or templates.
-function show_ready_to_apply() {
-    local apply_yn=""
-
-    section "READY TO APPLY"
-
-    echo -e "${YW}All questions have been collected. No Docker ENV files, secrets or templates have been written yet.${CL}"
-    echo ""
-    detail_line "Docker user" "$DOCKER_USER"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line "Secrets directory" "$DOCKER_SECRETS_DIR"
-    detail_line "Domain" "$DOMAIN_VALUE"
-    detail_line "Timezone" "$TZ_VALUE"
-    detail_line "Cloudflare email" "$CF_API_EMAIL_VALUE"
-    detail_line "Cloudflare zone ID" "$CF_ZONE_ID_VALUE"
-    detail_line "Traefik dashboard host" "$TRAEFIK_DASHBOARD_HOST"
-    detail_line "Proxmox route enabled" "$PROXMOX_ROUTE_ENABLED"
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will create folders, write .env/secrets/templates and apply permissions.${CL}"
-    echo ""
-
-    apply_yn="$(timed_yes_no "Apply this Docker ENV setup plan now?" "y")"
-
-    if [[ "$apply_yn" =~ ^[Nn] ]]; then
-        echo -e "${YW}Docker ENV Setup cancelled. No Docker ENV/system-changing actions were applied.${CL}"
-        exit 0
-    fi
-
-    return 0
-}
-
 function main() {
     init_script
 
@@ -2015,7 +2018,7 @@ function main() {
     collect_domain_cloudflare_inputs
     collect_traefik_inputs
     collect_htpasswd_inputs
-    show_ready_to_apply
+    show_ready_summary_and_confirm
 
     create_docker_directories
     generate_or_reuse_secrets
