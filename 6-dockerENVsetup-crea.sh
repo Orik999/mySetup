@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.2.3"
+SCRIPT_VERSION="v1.2.4"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="cloudflare-token-no-logging-redirect-fix"
+SCRIPT_BUILD="network-detection-sete-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -892,14 +892,15 @@ function detect_primary_ipv4() {
     local ip_addr=""
 
     if command -v ip >/dev/null 2>&1; then
-        ip_addr="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')"
+        ip_addr="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}' || true)"
     fi
 
     if [ -z "$ip_addr" ] && command -v hostname >/dev/null 2>&1; then
-        ip_addr="$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\./) {print $i; exit}}')"
+        ip_addr="$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\./) {print $i; exit}}' || true)"
     fi
 
     printf '%s' "$ip_addr"
+    return 0
 }
 
 # --- 39B.2. DEFAULT GATEWAY DETECTION HELPER ---
@@ -908,10 +909,11 @@ function detect_default_gateway_ipv4() {
     local gateway=""
 
     if command -v ip >/dev/null 2>&1; then
-        gateway="$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')"
+        gateway="$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}' || true)"
     fi
 
     printf '%s' "$gateway"
+    return 0
 }
 
 # --- 39B.3. PROXMOX URL DEFAULT DETECTION HELPER ---
@@ -942,7 +944,7 @@ function detect_proxmox_internal_url_default() {
 
     if command -v getent >/dev/null 2>&1; then
         for host in pve2 pve proxmox; do
-            resolved_ip="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')"
+            resolved_ip="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}' || true)"
             if [[ "$resolved_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                 printf 'https://%s:8006' "$resolved_ip"
                 return 0
@@ -957,6 +959,7 @@ function detect_proxmox_internal_url_default() {
     fi
 
     printf ''
+    return 0
 }
 
 # --- 39B. TRAEFIK TEMPLATE RENDER HELPER ---
