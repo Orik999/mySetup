@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.2.5"
+SCRIPT_VERSION="v1.2.6"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="proxmox-https8006-discovery-no-gateway-assumption"
+SCRIPT_BUILD="proxmox-discovery-progress-output"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -942,6 +942,7 @@ function probe_proxmox_ip() {
 # --- 39B.2B. LOCAL SUBNET PROXMOX DISCOVERY HELPER ---
 # Attempts to find Proxmox from inside the Ubuntu VM without assuming the default gateway is Proxmox.
 # It checks DNS/neighbour candidates first, then scans the local /24 for a host serving Proxmox on 8006.
+# As soon as a verified Proxmox host is found, this function returns immediately and skips remaining scans.
 function discover_proxmox_url_from_lan() {
     local primary_ip=""
     local prefix=""
@@ -1411,7 +1412,14 @@ function collect_traefik_inputs() {
 
     detected_primary_ip="$(detect_primary_ipv4)"
     detected_gateway_ip="$(detect_default_gateway_ipv4)"
+
+    tty_println " ${BL}━━━━━▶${CL} ${YW}Discovering Proxmox host on local network...${CL}"
     default_proxmox_url="$(detect_proxmox_internal_url_default)"
+    if [ -n "$default_proxmox_url" ]; then
+        tty_println " ${CM} ${GN}PROXMOX HOST DISCOVERED:${CL} ${default_proxmox_url}"
+    else
+        tty_println " ${WARN} ${YW}PROXMOX HOST AUTO-DISCOVERY DID NOT FIND A VERIFIED HOST${CL}"
+    fi
 
     section "TRAEFIK CONFIG"
 
