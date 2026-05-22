@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.2.0"
+SCRIPT_VERSION="v1.3.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-ready-apply-untimed-inputs-stability"
+SCRIPT_BUILD="authentik-env-permission-preflight-ready-apply"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -112,6 +112,14 @@ TRAEFIK_STATIC_CONFIG_FILE=""
 TRAEFIK_DYNAMIC_CONFIG_FILE=""
 TRAEFIK_ACME_STORAGE=""
 
+AUTHENTIK_HOST_VALUE=""
+AUTHENTIK_HOST_BROWSER_VALUE=""
+AUTHENTIK_BOOTSTRAP_EMAIL_VALUE=""
+AUTHENTIK_BOOTSTRAP_PASSWORD_PRESENT="no"
+AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT="no"
+AUTHENTIK_ENV_OK="no"
+POSTGRES_REDIS_PERMISSIONS_OK="no"
+
 SYSCTL_REDIS_OK="no"
 TRAEFIK_PLACEHOLDERS_OK="no"
 TRAEFIK_DNS_DELAY_OK="no"
@@ -172,6 +180,7 @@ function show_script_version() {
     echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
     echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
 }
+
 
 # --- 5. SECTION HEADER HELPER ---
 # Keeps terminal output clean and grouped by stage.
@@ -484,16 +493,59 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Text/path/name inputs are deliberately NOT timed.
-    # Countdown prompts are reserved only for simple Y/n decisions.
-    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
-    answer="$(editable_input_loop "$prompt" "$default" "")"
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer 2>/dev/null || true
+    flush_input_buffer
 
     echo "$answer"
 }
@@ -787,8 +839,6 @@ function start_confirmation() {
     fi
 
     return 0
-
-    return 0
 }
 
 # --- 32. BOOTSTRAP SETTINGS COLLECTION ---
@@ -877,14 +927,19 @@ function validate_project_paths() {
         msg_error "Docker .env file not found: ${ENV_FILE}. Run script 6 first."
     fi
 
-    run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
-    run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$COMPOSE_DIR"
-
     DOMAIN_VALUE="$(env_value DOMAIN)"
     DOCKER_SECRETS_DIR="$(env_value DOCKER_SECRETS_DIR)"
     CF_API_TOKEN_FILE="$(env_value CF_API_TOKEN_FILE)"
     ADMIN_UI="$(env_value ADMIN_UI)"
-    ADMIN_UI="${ADMIN_UI:-portainer}"
+    ADMIN_UI="${ADMIN_UI:-dockge}"
+    ADMIN_UI_HOST="$(env_value ADMIN_UI_HOST)"
+    ADMIN_UI_URL="$(env_value ADMIN_UI_URL)"
+
+    AUTHENTIK_HOST_VALUE="$(env_value AUTHENTIK_HOST)"
+    AUTHENTIK_HOST_BROWSER_VALUE="$(env_value AUTHENTIK_HOST_BROWSER)"
+    AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(env_value AUTHENTIK_BOOTSTRAP_EMAIL)"
+    [ -n "$(env_value AUTHENTIK_BOOTSTRAP_PASSWORD)" ] && AUTHENTIK_BOOTSTRAP_PASSWORD_PRESENT="yes" || AUTHENTIK_BOOTSTRAP_PASSWORD_PRESENT="no"
+    [ -n "$(env_value AUTHENTIK_BOOTSTRAP_TOKEN)" ] && AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT="yes" || AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT="no"
 
     TRAEFIK_STATIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/traefik.yml"
     TRAEFIK_DYNAMIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/dynamic-config.yml"
@@ -899,6 +954,18 @@ function validate_project_paths() {
     detail_line "Selected admin UI" "$ADMIN_UI"
 }
 
+
+# --- 33A. COMPOSE DIRECTORY PREPARE ---
+# Creates and permissions compose directory only after READY TO APPLY.
+function prepare_compose_directory() {
+    section "COMPOSE DIRECTORY PREPARE"
+
+    run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
+    run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$COMPOSE_DIR"
+    run_cmd "setting compose directory permissions" chmod 750 "$COMPOSE_DIR"
+
+    msg_ok "COMPOSE DIRECTORY READY"
+}
 
 # =========================================================
 #  SCRIPT 6 OUTPUT VALIDATION
@@ -1004,6 +1071,59 @@ function verify_authentik_folders() {
     AUTHENTIK_FOLDERS_OK="yes"
 }
 
+
+# --- 33D. AUTHENTIK ENV VALUE VERIFICATION ---
+# Confirms Script 6 wrote all Authentik bootstrap/domain values needed for first login and Script 7.
+function verify_authentik_env_values() {
+    section "AUTHENTIK ENV VERIFICATION"
+
+    [ -n "$AUTHENTIK_HOST_VALUE" ] || msg_error "AUTHENTIK_HOST missing from .env. Re-run fixed Script 6."
+    [ -n "$AUTHENTIK_HOST_BROWSER_VALUE" ] || msg_error "AUTHENTIK_HOST_BROWSER missing from .env. Re-run fixed Script 6."
+    [ -n "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE" ] || msg_error "AUTHENTIK_BOOTSTRAP_EMAIL missing from .env. Re-run fixed Script 6."
+    [ "$AUTHENTIK_BOOTSTRAP_PASSWORD_PRESENT" == "yes" ] || msg_error "AUTHENTIK_BOOTSTRAP_PASSWORD missing from .env. Re-run fixed Script 6."
+    [ "$AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT" == "yes" ] || msg_error "AUTHENTIK_BOOTSTRAP_TOKEN missing from .env. Re-run fixed Script 6."
+
+    AUTHENTIK_ENV_OK="yes"
+    msg_ok "AUTHENTIK ENV VALUES PRESENT"
+    detail_line "Authentik host" "$AUTHENTIK_HOST_VALUE"
+    detail_line "Authentik browser host" "$AUTHENTIK_HOST_BROWSER_VALUE"
+    detail_line "Bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
+}
+
+# --- 33H. POSTGRES / REDIS PERMISSION VERIFICATION ---
+# Confirms Script 6 prepared service-specific appdata ownership before stack deployment.
+function verify_postgres_redis_permissions() {
+    section "POSTGRES / REDIS PERMISSIONS"
+
+    local postgres_owner=""
+    local postgres_mode=""
+    local redis_owner=""
+    local redis_mode=""
+
+    [ -d "${DOCKER_DIR}/appdata/postgres/data" ] || msg_error "PostgreSQL data directory missing."
+    [ -d "${DOCKER_DIR}/appdata/redis" ] || msg_error "Redis data directory missing."
+
+    postgres_owner="$(stat -c '%u:%g' "${DOCKER_DIR}/appdata/postgres/data" 2>/dev/null || true)"
+    postgres_mode="$(stat -c '%a' "${DOCKER_DIR}/appdata/postgres/data" 2>/dev/null || true)"
+    redis_owner="$(stat -c '%u:%g' "${DOCKER_DIR}/appdata/redis" 2>/dev/null || true)"
+    redis_mode="$(stat -c '%a' "${DOCKER_DIR}/appdata/redis" 2>/dev/null || true)"
+
+    [ "$postgres_owner" == "999:999" ] || msg_error "PostgreSQL data owner is ${postgres_owner:-unknown}; expected 999:999."
+    [ "$postgres_mode" == "700" ] || msg_error "PostgreSQL data mode is ${postgres_mode:-unknown}; expected 700."
+    [ "$redis_owner" == "999:999" ] || msg_error "Redis data owner is ${redis_owner:-unknown}; expected 999:999."
+
+    case "$redis_mode" in
+        770|775|777)
+            ;;
+        *)
+            msg_error "Redis data mode is ${redis_mode:-unknown}; expected writable directory such as 770."
+            ;;
+    esac
+
+    POSTGRES_REDIS_PERMISSIONS_OK="yes"
+    msg_ok "POSTGRES / REDIS PERMISSIONS VERIFIED"
+}
+
 # --- 33E. ADMIN UI SELECTION VERIFICATION ---
 # Maps .env ADMIN_UI to expected compose template and service.
 function verify_admin_ui_selection() {
@@ -1092,6 +1212,9 @@ function verify_cf_companion_secret_file() {
     if [ -s "$CF_API_TOKEN_FILE" ]; then
         CF_COMPANION_SECRET_OK="yes"
         msg_ok "CLOUDFLARE TOKEN FILE EXISTS AND IS NON-EMPTY"
+        if [ -n "$(env_value CF_API_EMAIL)" ] && [ "$(env_value CF_AUTH_MODE)" = "api_token" ]; then
+            msg_warn "CF_API_EMAIL is set even though token auth is selected. Fixed Script 6 should leave this empty for cf-companion token auth."
+        fi
     else
         CF_COMPANION_SECRET_OK="empty-or-missing"
         msg_warn "Cloudflare token file is empty or missing: ${CF_API_TOKEN_FILE}"
@@ -1468,7 +1591,9 @@ VERIFY_LOG_EOF
         echo "Traefik authentik references: ${TRAEFIK_AUTHENTIK_REFERENCES_OK}"
         echo "Authentik folders: ${AUTHENTIK_FOLDERS_OK}"
         echo "CF companion secret: ${CF_COMPANION_SECRET_OK}"
-        echo "Filebrowser folders: ${FILEBROWSER_FOLDERS_OK}"
+        echo "Filebrowser folders: ${FILEBROWSER_FOLDERS_OK}
+Authentik env: ${AUTHENTIK_ENV_OK}
+Postgres/Redis permissions: ${POSTGRES_REDIS_PERMISSIONS_OK}"
                 echo ""
         echo "Docker containers:"
         docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
@@ -1585,6 +1710,8 @@ function show_final_summary() {
     detail_line "TRAEFIK ENCODED CHARS" "$TRAEFIK_ENCODED_CHARS_OK"
     detail_line "AUTHENTIK FOLDERS" "$AUTHENTIK_FOLDERS_OK"
     detail_line "FILEBROWSER FOLDERS" "$FILEBROWSER_FOLDERS_OK"
+    detail_line "AUTHENTIK ENV" "$AUTHENTIK_ENV_OK"
+    detail_line "POSTGRES/REDIS PERMS" "$POSTGRES_REDIS_PERMISSIONS_OK"
     detail_line "Admin UI temporary URL" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
     detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
     detail_line "Verify log" "$VERIFY_LOG"
@@ -1600,43 +1727,43 @@ function show_final_summary() {
     echo ""
 }
 
-# =========================================================
-#  MAIN ORCHESTRATION
-# =========================================================
 
-# --- 47. MAIN FUNCTION ---
-# Runs Docker network + socket-proxy + Admin UI bootstrap in safe order.
-# --- READY TO APPLY SUMMARY ---
-# Confirms all collected bootstrap answers before networks, compose downloads, firewall changes or containers are changed.
+# --- 46A. READY TO APPLY SUMMARY ---
+# Confirms all collected/preflight data before networks, compose downloads, firewall rules or containers are changed.
 function show_ready_to_apply() {
     local apply_yn=""
 
     section "READY TO APPLY"
 
-    echo -e "${YW}All questions have been collected. No Docker networks, compose files, firewall rules or containers have been changed yet.${CL}"
+    echo -e "${YW}All questions and preflight checks are complete. No Docker networks, compose downloads, firewall rules or containers have been changed yet.${CL}"
     echo ""
     detail_line "Docker user" "$DOCKER_USER"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line "Compose directory" "$COMPOSE_DIR"
-    detail_line ".env file" "$ENV_FILE"
+    detail_line "Docker dir" "$DOCKER_DIR"
+    detail_line "Compose dir" "$COMPOSE_DIR"
+    detail_line "Env file" "$ENV_FILE"
+    detail_line "Domain" "$DOMAIN_VALUE"
     detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
     detail_line "Admin UI host" "$ADMIN_UI_HOST"
-    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
-    detail_line "GitHub raw base" "$GITHUB_RAW_BASE"
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will create networks, download compose files, open bootstrap access and deploy containers.${CL}"
+    detail_line "Authentik env OK" "$AUTHENTIK_ENV_OK"
+    detail_line "Postgres/Redis permissions OK" "$POSTGRES_REDIS_PERMISSIONS_OK"
     echo ""
 
-    apply_yn="$(timed_yes_no "Apply this Docker Bootstrap setup plan now?" "y")"
+    apply_yn="$(timed_yes_no "Apply this Docker bootstrap plan now?" "y")"
 
     if [[ "$apply_yn" =~ ^[Nn] ]]; then
-        echo -e "${YW}Docker Bootstrap Setup cancelled. No Docker/bootstrap-changing actions were applied.${CL}"
+        echo -e "${YW}Docker bootstrap cancelled. No Docker bootstrap changes were applied.${CL}"
         exit 0
     fi
 
     return 0
 }
 
+# =========================================================
+#  MAIN ORCHESTRATION
+# =========================================================
+
+# --- 47. MAIN FUNCTION ---
+# Runs Docker network + socket-proxy + Admin UI bootstrap in safe order.
 function main() {
     init_script
 
@@ -1646,13 +1773,16 @@ function main() {
     collect_bootstrap_settings
     validate_project_paths
     verify_admin_ui_selection
-    show_ready_to_apply
 
     verify_redis_host_tuning
     verify_traefik_rendered_configs
+    verify_authentik_env_values
     verify_authentik_folders
     verify_cf_companion_secret_file
     verify_filebrowser_folders
+    verify_postgres_redis_permissions
+    show_ready_to_apply
+    prepare_compose_directory
     create_shared_networks
     verify_shared_networks
 

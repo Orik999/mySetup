@@ -23,9 +23,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="7-hardeningSSO.sh"
-SCRIPT_VERSION="v1.2.0"
+SCRIPT_VERSION="v1.3.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="audit-ready-apply-untimed-inputs-stability"
+SCRIPT_BUILD="authentik-api-token-separation-ready-apply-admin-ui-safe"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -67,6 +67,9 @@ PORTAINER_OIDC_STATUS="not-applicable"
 KOMODO_OIDC_STATUS="not-applicable"
 PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
 UFW_PORTAINER_RULE_REMOVED="not-applicable"
+ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
+UFW_ADMIN_UI_RULE_REMOVED="not-applicable"
+AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT="unknown"
 NOPASSWD_HARDENED="no"
 DOCKER_USER_RULES_REVIEWED="no"
 POSTIZ_HEALTH_OK="no"
@@ -105,6 +108,7 @@ function show_script_version() {
     echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
     echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
 }
+
 
 function section() {
     echo ""
@@ -417,16 +421,59 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Text/path/name inputs are deliberately NOT timed.
-    # Countdown prompts are reserved only for simple Y/n decisions.
-    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
-    answer="$(editable_input_loop "$prompt" "$default" "")"
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer 2>/dev/null || true
+    flush_input_buffer
 
     echo "$answer"
 }
@@ -590,7 +637,7 @@ function load_env_file() {
     set +a
 
     DOMAIN="${DOMAIN:-}"
-    AUTHENTIK_HOST="${AUTHENTIK_HOST:-https://auth.${DOMAIN}}"
+    AUTHENTIK_HOST="${AUTHENTIK_HOST_BROWSER:-${AUTHENTIK_HOST:-https://auth.${DOMAIN}}}"
     AUTHENTIK_API_BASE="${AUTHENTIK_HOST%/}/api/v3"
 
     [ -n "$DOMAIN" ] || msg_error "DOMAIN is missing from ${ENV_FILE}"
@@ -613,6 +660,8 @@ function detect_admin_ui() {
     elif docker_cmd ps -a --format '{{.Names}}' | grep -qx 'komodo-core'; then
         ADMIN_UI="komodo"
         KOMODO_SELECTED="yes"
+    elif docker_cmd ps -a --format '{{.Names}}' | grep -qx 'dockhand'; then
+        ADMIN_UI="dockhand"
     elif docker_cmd ps -a --format '{{.Names}}' | grep -qx 'portainer'; then
         ADMIN_UI="portainer"
         PORTAINER_SELECTED="yes"
@@ -624,7 +673,7 @@ function detect_admin_ui() {
     detail_line "Selected admin UI" "$ADMIN_UI"
 
     if [ "$ADMIN_UI" == "unknown" ]; then
-        msg_warn "No Dockge, Komodo, or Portainer container detected. Admin UI-specific hardening will be skipped."
+        msg_warn "No Dockge, Komodo, Dockhand, or Portainer container detected. Admin UI-specific hardening will be skipped."
     fi
 }
 
@@ -679,11 +728,6 @@ function start_confirmation() {
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
-
-
-    return 0
-
-    return 0
 }
 
 # =========================================================
@@ -741,27 +785,28 @@ function verify_traefik_dynamic_config() {
 function collect_authentik_api_token() {
     section "AUTHENTIK API TOKEN"
 
-    if [ -n "${AUTHENTIK_API_TOKEN:-}" ]; then
-        AUTHENTIK_TOKEN_SOURCE="environment"
-        msg_ok "AUTHENTIK API TOKEN FOUND IN ENVIRONMENT"
-        return 0
-    fi
-
     if [ -n "${AUTHENTIK_BOOTSTRAP_TOKEN:-}" ]; then
-        AUTHENTIK_API_TOKEN="$AUTHENTIK_BOOTSTRAP_TOKEN"
-        AUTHENTIK_TOKEN_SOURCE="AUTHENTIK_BOOTSTRAP_TOKEN"
+        AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT="yes"
         msg_ok "AUTHENTIK BOOTSTRAP TOKEN FOUND IN .ENV"
+        echo -e "${YW}Note: AUTHENTIK_BOOTSTRAP_TOKEN is not an Authentik API token and will not be used for API automation.${CL}"
+    else
+        AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT="no"
+    fi
+
+    if [ -n "${AUTHENTIK_API_TOKEN:-}" ]; then
+        AUTHENTIK_TOKEN_SOURCE="environment-or-env-file"
+        msg_ok "AUTHENTIK API TOKEN FOUND"
         return 0
     fi
 
-    echo -e "${YW}To automate Authentik app/provider/outpost setup, create or provide an Authentik API token with admin permission.${CL}"
+    echo -e "${YW}Script 7 can automate Authentik app/provider/outpost setup only with a real Authentik API token.${CL}"
     echo -e "${YW}Leave blank to skip API automation and keep verification/manual guidance only.${CL}"
     echo ""
+    echo -e "${BL}Manual token path:${CL}"
+    echo -e "${YW}Authentik Admin → Directory/System → Tokens/App passwords → Create token for an admin user.${CL}"
+    echo ""
 
-    disable_logging
     AUTHENTIK_API_TOKEN="$(sensitive_line_input "Paste Authentik API token, or leave blank")"
-    enable_logging
-
     AUTHENTIK_API_TOKEN="$(printf '%s' "$AUTHENTIK_API_TOKEN" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
     if [ -z "$AUTHENTIK_API_TOKEN" ]; then
@@ -771,6 +816,8 @@ function collect_authentik_api_token() {
         AUTHENTIK_TOKEN_SOURCE="prompt"
         msg_ok "AUTHENTIK API TOKEN CAPTURED WITHOUT LOGGING"
     fi
+
+    return 0
 }
 
 function ak_api() {
@@ -1102,84 +1149,115 @@ function configure_admin_ui_sso() {
 
 # --- 17. PORTAINER BOOTSTRAP PORT CLOSURE ---
 function close_portainer_bootstrap_exposure() {
-    section "PORTAINER BOOTSTRAP CLOSURE"
+    section "ADMIN UI BOOTSTRAP CLOSURE"
 
-    if [ "$PORTAINER_SELECTED" != "yes" ]; then
-        PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
-        msg_skip "PORTAINER NOT SELECTED; BOOTSTRAP CLOSURE SKIPPED"
-        return 0
-    fi
-
-    local yml_01="${COMPOSE_DIR}/01-portainer-compose.yml"
-    local yml_override="${COMPOSE_DIR}/01-portainer-bootstrap-override.yml"
+    local project=""
+    local service=""
+    local compose_file=""
+    local override_file=""
+    local internal_port=""
+    local bootstrap_port=""
     local close_yn=""
 
-    if [ ! -f "$yml_01" ]; then
-        PORTAINER_BOOTSTRAP_CLOSED="missing-compose"
-        msg_warn "Portainer compose file not found: ${yml_01}"
+    case "$ADMIN_UI" in
+        portainer)
+            project="portainer"; service="portainer"; compose_file="${COMPOSE_DIR}/01-portainer-compose.yml"; override_file="${COMPOSE_DIR}/01-portainer-bootstrap-override.yml"; internal_port="9443"; bootstrap_port="9443";;
+        dockge)
+            project="dockge"; service="dockge"; compose_file="${COMPOSE_DIR}/13-dockge-compose.yml"; override_file="${COMPOSE_DIR}/13-dockge-bootstrap-override.yml"; internal_port="5001"; bootstrap_port="5001";;
+        komodo)
+            project="komodo"; service="komodo-core"; compose_file="${COMPOSE_DIR}/14-komodo-compose.yml"; override_file="${COMPOSE_DIR}/14-komodo-bootstrap-override.yml"; internal_port="9120"; bootstrap_port="9120";;
+        dockhand)
+            project="dockhand"; service="dockhand"; compose_file="${COMPOSE_DIR}/15-dockhand-compose.yml"; override_file="${COMPOSE_DIR}/15-dockhand-bootstrap-override.yml"; internal_port="3000"; bootstrap_port="3000";;
+        *)
+            ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
+            PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
+            msg_skip "NO SUPPORTED ADMIN UI DETECTED; BOOTSTRAP CLOSURE SKIPPED"
+            return 0
+            ;;
+    esac
+
+    if [ ! -f "$compose_file" ]; then
+        ADMIN_UI_BOOTSTRAP_CLOSED="missing-compose"
+        PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
+        msg_warn "Admin UI compose file not found: ${compose_file}"
         return 0
     fi
 
-    if [ ! -f "$yml_override" ]; then
-        PORTAINER_BOOTSTRAP_CLOSED="already-no-override"
-        msg_ok "NO PORTAINER BOOTSTRAP OVERRIDE FILE FOUND"
+    if [ ! -f "$override_file" ]; then
+        ADMIN_UI_BOOTSTRAP_CLOSED="already-no-override"
+        PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
+        msg_ok "NO ADMIN UI BOOTSTRAP OVERRIDE FILE FOUND"
         return 0
     fi
 
-    echo -e "${YW}This redeploys Portainer without the bootstrap override so direct 9443 exposure closes.${CL}"
-    echo -e "${YW}Traefik/AuthentiK domain access remains available.${CL}"
+    echo -e "${YW}This redeploys ${ADMIN_UI} without its bootstrap override so direct bootstrap port exposure closes.${CL}"
+    echo -e "${YW}Traefik/AuthentiK domain access should remain available.${CL}"
     echo ""
 
-    close_yn="$(timed_yes_no "Close temporary Portainer bootstrap port now?" "y")"
+    close_yn="$(timed_yes_no "Close temporary ${ADMIN_UI} bootstrap port now?" "y")"
 
     if [[ "$close_yn" =~ ^[Nn] ]]; then
-        PORTAINER_BOOTSTRAP_CLOSED="user-skipped"
-        msg_skip "PORTAINER BOOTSTRAP PORT CLOSURE SKIPPED"
+        ADMIN_UI_BOOTSTRAP_CLOSED="user-skipped"
+        PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
+        msg_skip "ADMIN UI BOOTSTRAP PORT CLOSURE SKIPPED"
         return 0
     fi
 
-    msg_info "Redeploying Portainer without bootstrap override"
-    docker_cmd compose --env-file "$ENV_FILE" -p portainer -f "$yml_01" up -d >/dev/null
-    msg_ok "PORTAINER REDEPLOYED WITHOUT BOOTSTRAP OVERRIDE"
+    msg_info "Redeploying ${ADMIN_UI} without bootstrap override"
+    docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "$compose_file" up -d >/dev/null
+    msg_ok "${ADMIN_UI} REDEPLOYED WITHOUT BOOTSTRAP OVERRIDE"
 
-    msg_info "Checking direct Portainer 9443 mapping"
-    if docker_cmd port portainer 9443/tcp >/dev/null 2>&1; then
-        PORTAINER_BOOTSTRAP_CLOSED="not-confirmed"
-        msg_warn "Portainer still appears to have direct 9443 mapping. Check compose labels/ports."
+    msg_info "Checking direct ${ADMIN_UI} bootstrap mapping"
+    if docker_cmd port "$service" "${internal_port}/tcp" 2>/dev/null | grep -q ":${bootstrap_port}$"; then
+        ADMIN_UI_BOOTSTRAP_CLOSED="not-confirmed"
+        msg_warn "${ADMIN_UI} still appears to have direct bootstrap mapping. Check compose labels/ports."
     else
-        PORTAINER_BOOTSTRAP_CLOSED="yes"
-        msg_ok "PORTAINER DIRECT BOOTSTRAP PORT CLOSED"
+        ADMIN_UI_BOOTSTRAP_CLOSED="yes"
+        msg_ok "ADMIN UI DIRECT BOOTSTRAP PORT CLOSED"
     fi
+
+    PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
 }
 
 # --- 18. UFW CLEANUP ---
 function remove_portainer_ufw_rule() {
     section "UFW BOOTSTRAP RULE CLEANUP"
 
-    if [ "$PORTAINER_SELECTED" != "yes" ]; then
-        UFW_PORTAINER_RULE_REMOVED="not-applicable"
-        msg_skip "PORTAINER NOT SELECTED; UFW CLEANUP SKIPPED"
-        return 0
-    fi
+    local bootstrap_port=""
+
+    case "$ADMIN_UI" in
+        portainer) bootstrap_port="9443" ;;
+        dockge) bootstrap_port="5001" ;;
+        komodo) bootstrap_port="9120" ;;
+        dockhand) bootstrap_port="3000" ;;
+        *)
+            UFW_ADMIN_UI_RULE_REMOVED="not-applicable"
+            UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
+            msg_skip "NO SUPPORTED ADMIN UI DETECTED; UFW CLEANUP SKIPPED"
+            return 0
+            ;;
+    esac
 
     if ! command -v ufw >/dev/null 2>&1; then
-        UFW_PORTAINER_RULE_REMOVED="ufw-not-found"
+        UFW_ADMIN_UI_RULE_REMOVED="ufw-not-found"
+        UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
         msg_skip "UFW NOT FOUND; RULE CLEANUP SKIPPED"
         return 0
     fi
 
     if ! ufw status 2>/dev/null | grep -qi "Status: active" && ! { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" ufw status 2>/dev/null | grep -qi "Status: active"; }; then
-        UFW_PORTAINER_RULE_REMOVED="ufw-not-active"
+        UFW_ADMIN_UI_RULE_REMOVED="ufw-not-active"
+        UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
         msg_skip "UFW NOT ACTIVE; RULE CLEANUP SKIPPED"
         return 0
     fi
 
-    msg_info "Removing temporary Portainer 9443 UFW rule"
-    run_optional ufw delete allow 9443/tcp
-    UFW_PORTAINER_RULE_REMOVED="attempted"
-    msg_ok "TEMPORARY PORTAINER UFW RULE REMOVAL ATTEMPTED"
+    msg_info "Removing temporary ${ADMIN_UI} ${bootstrap_port}/tcp UFW rule"
+    run_optional ufw delete allow "${bootstrap_port}/tcp"
+    UFW_ADMIN_UI_RULE_REMOVED="attempted"
+    UFW_PORTAINER_RULE_REMOVED="$UFW_ADMIN_UI_RULE_REMOVED"
+    msg_ok "TEMPORARY ADMIN UI UFW RULE REMOVAL ATTEMPTED"
 }
-
 
 # =========================================================
 #  POSTIZ / TEMPORAL GUARD CLEANUP
@@ -1433,7 +1511,9 @@ Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
+Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
 Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
+UFW admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
 Postiz health OK: $POSTIZ_HEALTH_OK
@@ -1560,7 +1640,9 @@ function show_final_summary() {
     detail_line "AUTHENTIK OUTPOST 302" "$AUTHENTIK_OUTPOST_302_OK"
     detail_line "PORTAINER OIDC" "$PORTAINER_OIDC_STATUS"
     detail_line "KOMODO OIDC" "$KOMODO_OIDC_STATUS"
+    detail_line "ADMIN UI BOOTSTRAP CLOSED" "$ADMIN_UI_BOOTSTRAP_CLOSED"
     detail_line "PORTAINER BOOTSTRAP CLOSED" "$PORTAINER_BOOTSTRAP_CLOSED"
+    detail_line "UFW ADMIN UI RULE REMOVED" "$UFW_ADMIN_UI_RULE_REMOVED"
     detail_line "UFW PORTAINER RULE REMOVED" "$UFW_PORTAINER_RULE_REMOVED"
     detail_line "NOPASSWD HARDENED" "$NOPASSWD_HARDENED"
     detail_line "POSTIZ HEALTH" "$POSTIZ_HEALTH_OK"
@@ -1590,19 +1672,15 @@ function show_final_summary() {
     echo ""
 }
 
-# =========================================================
-#  MAIN
-# =========================================================
 
-# --- 26. MAIN ORCHESTRATION ---
-# --- READY TO APPLY SUMMARY ---
+# --- 25A. READY TO APPLY SUMMARY ---
 # Confirms final hardening actions before Authentik, admin UI, firewall or cleanup changes are applied.
 function show_ready_to_apply() {
     local apply_yn=""
 
     section "READY TO APPLY"
 
-    echo -e "${YW}Preflight checks and token collection are complete. No final hardening changes have been applied yet.${CL}"
+    echo -e "${YW}Preflight checks and token collection are complete. No Authentik/provider/admin UI/firewall cleanup changes have been applied yet.${CL}"
     echo ""
     detail_line "Docker user" "$DOCKER_USER"
     detail_line "Docker directory" "$DOCKER_DIR"
@@ -1610,21 +1688,25 @@ function show_ready_to_apply() {
     detail_line "Domain" "$DOMAIN"
     detail_line "Authentik API" "$AUTHENTIK_API_BASE"
     detail_line "Authentik token source" "$AUTHENTIK_TOKEN_SOURCE"
-    detail_line "Selected admin UI" "$ADMIN_UI"
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script may create/update Authentik app/provider/outpost settings, close bootstrap exposure and apply final hardening.${CL}"
+    detail_line "Authentik bootstrap token present" "$AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT"
+    detail_line "Admin UI" "$ADMIN_UI"
     echo ""
 
     apply_yn="$(timed_yes_no "Apply final hardening and SSO plan now?" "y")"
 
     if [[ "$apply_yn" =~ ^[Nn] ]]; then
-        echo -e "${YW}Final Hardening + SSO Integration cancelled. No final changes were applied.${CL}"
+        echo -e "${YW}Final hardening cancelled. No final hardening changes were applied.${CL}"
         exit 0
     fi
 
     return 0
 }
 
+# =========================================================
+#  MAIN
+# =========================================================
+
+# --- 26. MAIN ORCHESTRATION ---
 function main() {
     init_script
 
