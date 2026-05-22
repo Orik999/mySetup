@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.2.4"
+SCRIPT_VERSION="v1.2.5"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="network-detection-sete-fix"
+SCRIPT_BUILD="proxmox-https8006-discovery-no-gateway-assumption"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -916,13 +916,105 @@ function detect_default_gateway_ipv4() {
     return 0
 }
 
-# --- 39B.3. PROXMOX URL DEFAULT DETECTION HELPER ---
-# Builds the Proxmox internal URL default without hardcoding a fake static IP.
-function detect_proxmox_internal_url_default() {
-    local existing_env_url=""
+# --- 39B.2A. PROXMOX HTTPS PROBE HELPER ---
+# Checks whether a candidate IP appears to be a Proxmox VE web UI on port 8006.
+# This is a read-only, fast-timeout probe. It does not change the system.
+function probe_proxmox_ip() {
+    local candidate_ip="$1"
+    local probe_output=""
+
+    [[ "$candidate_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+
+    if command -v curl >/dev/null 2>&1; then
+        probe_output="$(curl -kfsS --connect-timeout 0.35 --max-time 1.2 "https://${candidate_ip}:8006/" 2>/dev/null | head -c 4096 || true)"
+    elif command -v wget >/dev/null 2>&1; then
+        probe_output="$(timeout 2 wget --no-check-certificate -qO- "https://${candidate_ip}:8006/" 2>/dev/null | head -c 4096 || true)"
+    fi
+
+    if grep -Eiq 'proxmox|pve|Proxmox Virtual Environment' <<< "$probe_output"; then
+        printf 'https://%s:8006' "$candidate_ip"
+        return 0
+    fi
+
+    return 1
+}
+
+# --- 39B.2B. LOCAL SUBNET PROXMOX DISCOVERY HELPER ---
+# Attempts to find Proxmox from inside the Ubuntu VM without assuming the default gateway is Proxmox.
+# It checks DNS/neighbour candidates first, then scans the local /24 for a host serving Proxmox on 8006.
+function discover_proxmox_url_from_lan() {
+    local primary_ip=""
+    local prefix=""
+    local candidate=""
+    local found_url=""
     local host=""
     local resolved_ip=""
-    local gateway_ip=""
+    local octet=""
+
+    if command -v getent >/dev/null 2>&1; then
+        for host in pve2 pve proxmox proxmox.local pve2.local pve.local; do
+            resolved_ip="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}' || true)"
+            if [[ "$resolved_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                if found_url="$(probe_proxmox_ip "$resolved_ip")"; then
+                    printf '%s' "$found_url"
+                    return 0
+                fi
+            fi
+        done
+    fi
+
+    if command -v ip >/dev/null 2>&1; then
+        while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                if found_url="$(probe_proxmox_ip "$candidate")"; then
+                    printf '%s' "$found_url"
+                    return 0
+                fi
+            fi
+        done < <(ip -4 neigh show 2>/dev/null | awk '{print $1}' | sort -u || true)
+    fi
+
+    primary_ip="$(detect_primary_ipv4)"
+    if [[ "$primary_ip" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+        prefix="${BASH_REMATCH[1]}"
+
+        # Fast common candidates first. Keep .1 only as a probed candidate, never as an assumed default.
+        for octet in 10 2 3 5 20 50 100 101 102 156 200 1; do
+            candidate="${prefix}.${octet}"
+            [ "$candidate" = "$primary_ip" ] && continue
+            if found_url="$(probe_proxmox_ip "$candidate")"; then
+                printf '%s' "$found_url"
+                return 0
+            fi
+        done
+
+        # Bounded local /24 scan. This avoids accepting the router/default gateway unless it actually serves Proxmox.
+        for octet in $(seq 2 254); do
+            candidate="${prefix}.${octet}"
+            [ "$candidate" = "$primary_ip" ] && continue
+            if found_url="$(probe_proxmox_ip "$candidate")"; then
+                printf '%s' "$found_url"
+                return 0
+            fi
+        done
+    fi
+
+    printf ''
+    return 0
+}
+
+
+# --- 39B.3. PROXMOX URL DEFAULT DETECTION HELPER ---
+# Builds the Proxmox internal URL default without hardcoding a fake static IP.
+# Priority:
+#   1. PROXMOX_URL_DEFAULT or PROXMOX_URL environment variable, if exported by the user.
+#   2. Existing local .env PROXMOX_URL value on reruns.
+#   3. Verified Proxmox web UI discovery on port 8006 from DNS/neighbours/local subnet.
+#   4. Blank prompt if nothing is detectable.
+# Important: the default gateway is shown as network context only; it is not assumed to be Proxmox.
+function detect_proxmox_internal_url_default() {
+    local existing_env_url=""
+    local discovered_url=""
 
     if [ -n "${PROXMOX_URL_DEFAULT:-}" ]; then
         printf '%s' "$PROXMOX_URL_DEFAULT"
@@ -942,19 +1034,9 @@ function detect_proxmox_internal_url_default() {
         fi
     fi
 
-    if command -v getent >/dev/null 2>&1; then
-        for host in pve2 pve proxmox; do
-            resolved_ip="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}' || true)"
-            if [[ "$resolved_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                printf 'https://%s:8006' "$resolved_ip"
-                return 0
-            fi
-        done
-    fi
-
-    gateway_ip="$(detect_default_gateway_ipv4)"
-    if [[ "$gateway_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        printf 'https://%s:8006' "$gateway_ip"
+    discovered_url="$(discover_proxmox_url_from_lan || true)"
+    if [ -n "$discovered_url" ]; then
+        printf '%s' "$discovered_url"
         return 0
     fi
 
@@ -1345,7 +1427,7 @@ function collect_traefik_inputs() {
 
     echo ""
     [ -n "$detected_primary_ip" ] && detail_line "Detected current system IPv4" "$detected_primary_ip"
-    [ -n "$detected_gateway_ip" ] && detail_line "Detected default gateway" "$detected_gateway_ip"
+    [ -n "$detected_gateway_ip" ] && detail_line "Detected default gateway (not assumed Proxmox)" "$detected_gateway_ip"
     if [ -n "$default_proxmox_url" ]; then
         detail_line "Suggested Proxmox URL" "$default_proxmox_url"
     else
