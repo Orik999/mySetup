@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.2.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="versioned-ready-apply-stability"
+SCRIPT_BUILD="audit-ready-apply-untimed-inputs-stability"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -484,59 +484,16 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    flush_input_buffer
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # Countdown prompts are reserved only for simple Y/n decisions.
+    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer
+    flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
 }
@@ -828,6 +785,8 @@ function start_confirmation() {
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
+
+    return 0
 
     return 0
 }
@@ -1647,6 +1606,37 @@ function show_final_summary() {
 
 # --- 47. MAIN FUNCTION ---
 # Runs Docker network + socket-proxy + Admin UI bootstrap in safe order.
+# --- READY TO APPLY SUMMARY ---
+# Confirms all collected bootstrap answers before networks, compose downloads, firewall changes or containers are changed.
+function show_ready_to_apply() {
+    local apply_yn=""
+
+    section "READY TO APPLY"
+
+    echo -e "${YW}All questions have been collected. No Docker networks, compose files, firewall rules or containers have been changed yet.${CL}"
+    echo ""
+    detail_line "Docker user" "$DOCKER_USER"
+    detail_line "Docker directory" "$DOCKER_DIR"
+    detail_line "Compose directory" "$COMPOSE_DIR"
+    detail_line ".env file" "$ENV_FILE"
+    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
+    detail_line "Admin UI host" "$ADMIN_UI_HOST"
+    detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
+    detail_line "GitHub raw base" "$GITHUB_RAW_BASE"
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script will create networks, download compose files, open bootstrap access and deploy containers.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply this Docker Bootstrap setup plan now?" "y")"
+
+    if [[ "$apply_yn" =~ ^[Nn] ]]; then
+        echo -e "${YW}Docker Bootstrap Setup cancelled. No Docker/bootstrap-changing actions were applied.${CL}"
+        exit 0
+    fi
+
+    return 0
+}
+
 function main() {
     init_script
 
@@ -1656,6 +1646,7 @@ function main() {
     collect_bootstrap_settings
     validate_project_paths
     verify_admin_ui_selection
+    show_ready_to_apply
 
     verify_redis_host_tuning
     verify_traefik_rendered_configs

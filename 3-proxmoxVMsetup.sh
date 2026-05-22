@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3-proxmoxVMsetup.sh"
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.2.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="versioned-stability-checks"
+SCRIPT_BUILD="audit-untimed-inputs-snapshot-aware-storage"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer, log file, defaults, detected hardware and user choices.
@@ -478,53 +478,11 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # Countdown prompts are reserved only for simple Y/n decisions.
+    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
@@ -546,67 +504,12 @@ function timed_number_input() {
     local min_value="${3:-1}"
     local max_value="${4:-}"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
+    # Numeric inputs are deliberately NOT timed.
+    # Countdown prompts are reserved only for simple Y/n decisions.
     while true; do
-        deadline=$(( $(date +%s) + T ))
-
-        while true; do
-            now=$(date +%s)
-            remaining=$(( deadline - now ))
-
-            if [ "$remaining" -le 0 ]; then
-                answer="$default"
-                break
-            fi
-
-            tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-            if [ -r /dev/tty ]; then
-                if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                    if [[ "$key" == " " ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-                        break
-                    elif [[ -z "$key" ]]; then
-                        answer="$default"
-                        break
-                    elif [[ "$key" =~ ^[0-9]$ ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
-                        break
-                    else
-                        tty_print "${BFR}"
-                        print_number_error "$min_value" "$max_value"
-                        answer="INVALID"
-                        break
-                    fi
-                fi
-            else
-                if IFS= read -rsn1 -t 1 key; then
-                    if [[ "$key" == " " ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-                        break
-                    elif [[ -z "$key" ]]; then
-                        answer="$default"
-                        break
-                    elif [[ "$key" =~ ^[0-9]$ ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
-                        break
-                    else
-                        tty_print "${BFR}"
-                        print_number_error "$min_value" "$max_value"
-                        answer="INVALID"
-                        break
-                    fi
-                fi
-            fi
-        done
-
-        if [ "$answer" == "INVALID" ]; then
-            continue
-        fi
+        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+        [ -z "$answer" ] && answer="$default"
 
         if validate_number "$answer" "$min_value" "$max_value"; then
             tty_print "${BFR}"
@@ -1189,6 +1092,8 @@ function start_confirmation() {
     fi
 
     return 0
+
+    return 0
 }
 
 # --- 46. USER VM CONFIGURATION INPUTS ---
@@ -1248,9 +1153,51 @@ function select_iso_image() {
 # --- 48. STORAGE SELECTION ---
 # Lists Proxmox storage that supports VM images and lets the user choose where to place VM disks.
 # Still input-only; no VM changes are made here.
+
+# --- SNAPSHOT-CAPABLE STORAGE HELPER ---
+# Returns yes for storage types that support VM snapshots in Proxmox.
+function storage_supports_snapshots() {
+    local type="$1"
+
+    case "$type" in
+        lvmthin|zfspool|btrfs|rbd)
+            echo "yes"
+            ;;
+        *)
+            echo "no"
+            ;;
+    esac
+}
+
+# --- STORAGE ROLE LABEL HELPER ---
+# Provides a clear user-facing role for storage choices.
+function storage_role_label() {
+    local type="$1"
+
+    case "$type" in
+        lvmthin|zfspool|btrfs|rbd)
+            echo "VM disks/snapshots recommended"
+            ;;
+        dir|nfs|cifs|glusterfs)
+            echo "ISO/backups/file storage; VM snapshots may not work"
+            ;;
+        lvm)
+            echo "block storage; snapshots not recommended"
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
 function select_vm_storage() {
     local storage_name=""
     local storage_type=""
+    local snapshot_support=""
+    local role=""
+    local default_index="1"
+    local selected_snapshot_support=""
+    local continue_yn=""
 
     section "STORAGE SELECTION"
 
@@ -1262,6 +1209,16 @@ function select_vm_storage() {
         msg_error "No active Proxmox storage found for VM images."
     fi
 
+    # Prefer snapshot-capable VM storage by default.
+    for i in "${!STORAGE_LIST[@]}"; do
+        storage_name="${STORAGE_LIST[$i]}"
+        storage_type="$(get_storage_type "$storage_name")"
+        if [ "$(storage_supports_snapshots "$storage_type")" == "yes" ]; then
+            default_index="$((i+1))"
+            break
+        fi
+    done
+
     msg_ok "STORAGE FOUND"
     echo ""
     echo -e "${BL}SELECT VM STORAGE:${CL}"
@@ -1269,13 +1226,43 @@ function select_vm_storage() {
     for i in "${!STORAGE_LIST[@]}"; do
         storage_name="${STORAGE_LIST[$i]}"
         storage_type="$(get_storage_type "$storage_name")"
-        echo "$((i+1))) ${storage_name} (${storage_type:-unknown})"
+        snapshot_support="$(storage_supports_snapshots "$storage_type")"
+        role="$(storage_role_label "$storage_type")"
+        echo "$((i+1))) ${storage_name} (${storage_type:-unknown}) | snapshots: ${snapshot_support} | ${role}"
     done
 
-    STORAGE_IDX="$(timed_number_input "Select storage number" "1" "1" "${#STORAGE_LIST[@]}")"
+    if [ "$default_index" == "1" ]; then
+        storage_type="$(get_storage_type "${STORAGE_LIST[0]}")"
+        if [ "$(storage_supports_snapshots "$storage_type")" != "yes" ]; then
+            echo ""
+            echo -e "${YW}No snapshot-capable VM storage was found.${CL}"
+            echo -e "${YW}Recommended fix: run Script 2 to create LVM-thin VM storage, or preserve local-lvm in Script 1.${CL}"
+            continue_yn="$(timed_yes_no "Continue using non-snapshot storage anyway?" "n")"
+            if [[ "$continue_yn" =~ ^[Nn] ]]; then
+                exit 0
+            fi
+        fi
+    fi
+
+    STORAGE_IDX="$(timed_number_input "Select storage number" "$default_index" "1" "${#STORAGE_LIST[@]}")"
     STORAGE_ID="${STORAGE_LIST[$((STORAGE_IDX-1))]}"
     STORAGE_TYPE="$(get_storage_type "$STORAGE_ID")"
+    selected_snapshot_support="$(storage_supports_snapshots "$STORAGE_TYPE")"
+
+    if [ "$selected_snapshot_support" != "yes" ]; then
+        echo ""
+        echo -e "${RD}${CLF}WARNING:${CL} Selected storage '${STORAGE_ID}' is type '${STORAGE_TYPE}'. VM snapshots may not be available.${CL}"
+        echo -e "${YW}Recommended storage types for VM snapshots: lvmthin, zfspool, btrfs, rbd.${CL}"
+        continue_yn="$(timed_yes_no "Continue with non-snapshot storage?" "n")"
+        if [[ "$continue_yn" =~ ^[Nn] ]]; then
+            exit 0
+        fi
+    fi
+
     EFI_FORMAT="$(get_efi_format_for_storage_type "$STORAGE_TYPE")"
+    detail_line "Selected storage" "${STORAGE_ID} (${STORAGE_TYPE})"
+    detail_line "Snapshot capable" "$selected_snapshot_support"
+    return 0
 }
 
 # --- 49. GPU PASSTHROUGH OPTION ---
@@ -1449,6 +1436,8 @@ function final_apply_confirmation() {
     if [[ "$apply_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
+
+    return 0
 
     return 0
 }

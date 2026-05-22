@@ -27,9 +27,9 @@ FLASH_OFF=$'\033[25m'
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="1-proxmoxSetupCrea.sh"
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.2.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="versioned-finished-summary-stability"
+SCRIPT_BUILD="audit-untimed-inputs-snapshot-storage"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timer values, logs, detected hardware state, user-selected options, and install results.
@@ -83,6 +83,10 @@ SSH_EFFECTIVE_KBD_AUTH=""
 PVE_FIREWALL_APPLIED="no"
 CROWDSEC_BOUNCER_PACKAGE="none"
 NUMLOCK_CONFIGURED="no"
+
+STORAGE_LAYOUT_MODE="merge_all"
+ROOT_DISK_SIZE_GB="0"
+LOCAL_LVM_EXISTS="no"
 
 TEMP_FILES=()
 
@@ -950,6 +954,81 @@ function show_storage_detection() {
 
 # --- 35. USER OPTION COLLECTION ---
 # Collects optional choices using timed prompts.
+
+# --- STORAGE LAYOUT DETECTION HELPER ---
+# Detects whether the default local-lvm exists and estimates the root disk size.
+# This lets the script keep snapshot-capable local-lvm on larger installs instead of blindly merging it.
+function detect_storage_layout_options() {
+    local root_source=""
+    local root_real=""
+    local parent_disk=""
+    local root_size_bytes="0"
+
+    LOCAL_LVM_EXISTS="no"
+    ROOT_DISK_SIZE_GB="0"
+
+    if grep -q "^lvmthin: local-lvm" /etc/pve/storage.cfg 2>/dev/null || lvdisplay /dev/pve/data >/dev/null 2>&1; then
+        LOCAL_LVM_EXISTS="yes"
+    fi
+
+    root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    root_real="$(readlink -f "$root_source" 2>/dev/null || echo "$root_source")"
+
+    parent_disk="$(lsblk -no PKNAME "$root_real" 2>/dev/null | head -n1 | xargs || true)"
+
+    if [ -z "$parent_disk" ] && command -v pvs >/dev/null 2>&1; then
+        parent_disk="$(pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk '$2=="pve"{print $1; exit}' | xargs -r lsblk -no PKNAME 2>/dev/null | head -n1 | xargs || true)"
+    fi
+
+    if [ -n "$parent_disk" ] && [ -b "/dev/${parent_disk}" ]; then
+        root_size_bytes="$(lsblk -b -dn -o SIZE "/dev/${parent_disk}" 2>/dev/null | head -n1 | xargs || echo 0)"
+        if [[ "$root_size_bytes" =~ ^[0-9]+$ ]] && [ "$root_size_bytes" -gt 0 ]; then
+            ROOT_DISK_SIZE_GB="$(( (root_size_bytes + 1073741823) / 1073741824 ))"
+        fi
+    fi
+
+    [ -z "$ROOT_DISK_SIZE_GB" ] && ROOT_DISK_SIZE_GB="0"
+}
+
+# --- STORAGE LAYOUT OPTION COLLECTOR ---
+# Collects the local-lvm/snapshot decision before system-changing actions begin.
+function collect_storage_layout_option() {
+    local keep_lvm_yn=""
+
+    section "STORAGE LAYOUT OPTION"
+
+    detect_storage_layout_options
+
+    detail_line "Root disk size" "${ROOT_DISK_SIZE_GB}GB"
+    detail_line "local-lvm detected" "$LOCAL_LVM_EXISTS"
+
+    if [ "$LOCAL_LVM_EXISTS" != "yes" ]; then
+        STORAGE_LAYOUT_MODE="merge_all"
+        msg_ok "NO LOCAL-LVM SNAPSHOT STORAGE DETECTED"
+        return 0
+    fi
+
+    if [[ "$ROOT_DISK_SIZE_GB" =~ ^[0-9]+$ ]] && [ "$ROOT_DISK_SIZE_GB" -gt 0 ] && [ "$ROOT_DISK_SIZE_GB" -le 128 ]; then
+        STORAGE_LAYOUT_MODE="merge_all"
+        echo -e "${YW}Root disk is 128GB or smaller. Keeping the simple layout and merging local-lvm into local is recommended.${CL}"
+        msg_ok "SMALL ROOT DISK MODE SELECTED"
+        return 0
+    fi
+
+    echo -e "${YW}A larger root disk with local-lvm was detected.${CL}"
+    echo -e "${YW}Keeping local-lvm preserves Proxmox VM snapshots. Merging it gives more local/root space but removes snapshot-capable VM storage.${CL}"
+    keep_lvm_yn="$(timed_yes_no "Keep local-lvm for VM snapshots instead of merging it into local?" "y")"
+
+    if [[ "$keep_lvm_yn" =~ ^[Yy] ]]; then
+        STORAGE_LAYOUT_MODE="keep_local_lvm"
+    else
+        STORAGE_LAYOUT_MODE="merge_all"
+    fi
+
+    detail_line "Storage layout mode" "$STORAGE_LAYOUT_MODE"
+    return 0
+}
+
 function collect_user_options() {
     local cpu_yn=""
     local crowdsec_yn=""
@@ -995,6 +1074,7 @@ function final_start_prompt() {
     echo -e "SYSTEM TYPE: ${GN}${SYSTEM_TYPE}${CL}"
     echo -e "ROOT FS: ${GN}${ROOT_FS_TYPE:-unknown}${CL}"
     echo -e "STORAGE: ${GN}${STORAGE_SUMMARY:-unknown}${CL}"
+    echo -e "STORAGE LAYOUT: ${GN}${STORAGE_LAYOUT_MODE:-merge_all}${CL}"
     echo -e "DEFAULT IFACE: ${GN}${DEFAULT_IFACE:-unknown}${CL}"
     echo -e "LAN CIDR ALLOWED FOR SSH/WEBUI: ${GN}${LAN_CIDR:-not-detected}${CL}"
     echo -e "GPU PASSTHROUGH: ${GN}${ENABLE_PASSTHROUGH}${CL}"
@@ -1011,6 +1091,9 @@ function final_start_prompt() {
 
     clear
     header_info
+    show_script_version
+
+    return 0
 }
 
 # =========================================================
@@ -1024,6 +1107,12 @@ function apply_storage_merge() {
     local pve_free_extents=""
 
     section "STORAGE MERGE"
+
+    if [ "${STORAGE_LAYOUT_MODE:-merge_all}" == "keep_local_lvm" ]; then
+        msg_ok "STORAGE LAYOUT MODE: KEEP LOCAL-LVM FOR VM SNAPSHOTS"
+        echo -e "${YW}local-lvm was preserved as snapshot-capable VM storage. Root/local merge skipped by user choice.${CL}"
+        return 0
+    fi
 
     msg_info "Checking Proxmox local-lvm storage configuration"
     if grep -q "^lvmthin: local-lvm" /etc/pve/storage.cfg 2>/dev/null; then

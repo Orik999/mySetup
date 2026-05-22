@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.2.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="versioned-ready-apply-stability"
+SCRIPT_BUILD="audit-ready-apply-untimed-inputs-stability"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -620,61 +620,16 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    flush_input_buffer
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    flush_input_buffer
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    flush_input_buffer
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # Countdown prompts are reserved only for simple Y/n decisions.
+    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer
+    flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
 }
@@ -1087,6 +1042,8 @@ function start_confirmation() {
     if [[ "$start_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
+
+    return 0
 
     return 0
 }
@@ -1917,6 +1874,38 @@ function show_clean_final_summary() {
 
 # --- 58. MAIN FUNCTION ---
 # Runs full setup in validation -> input -> file creation -> verify -> one-time secret display order.
+# --- READY TO APPLY SUMMARY ---
+# Confirms all collected Docker ENV answers before writing folders, .env, secrets or templates.
+function show_ready_to_apply() {
+    local apply_yn=""
+
+    section "READY TO APPLY"
+
+    echo -e "${YW}All questions have been collected. No Docker ENV files, secrets or templates have been written yet.${CL}"
+    echo ""
+    detail_line "Docker user" "$DOCKER_USER"
+    detail_line "Docker directory" "$DOCKER_DIR"
+    detail_line "Secrets directory" "$DOCKER_SECRETS_DIR"
+    detail_line "Domain" "$DOMAIN_VALUE"
+    detail_line "Timezone" "$TZ_VALUE"
+    detail_line "Cloudflare email" "$CF_API_EMAIL_VALUE"
+    detail_line "Cloudflare zone ID" "$CF_ZONE_ID_VALUE"
+    detail_line "Traefik dashboard host" "$TRAEFIK_DASHBOARD_HOST"
+    detail_line "Proxmox route enabled" "$PROXMOX_ROUTE_ENABLED"
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script will create folders, write .env/secrets/templates and apply permissions.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply this Docker ENV setup plan now?" "y")"
+
+    if [[ "$apply_yn" =~ ^[Nn] ]]; then
+        echo -e "${YW}Docker ENV Setup cancelled. No Docker ENV/system-changing actions were applied.${CL}"
+        exit 0
+    fi
+
+    return 0
+}
+
 function main() {
     init_script
 
@@ -1928,6 +1917,7 @@ function main() {
     collect_domain_cloudflare_inputs
     collect_traefik_inputs
     collect_htpasswd_inputs
+    show_ready_to_apply
 
     create_docker_directories
     generate_or_reuse_secrets

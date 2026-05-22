@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="3.5-ubuntuAutoInstallSeed.sh"
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.2.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="versioned-finished-header-stability"
+SCRIPT_BUILD="audit-untimed-inputs-stability"
 
 # --- 2. GLOBAL DEFAULTS ---
 # Stores defaults, paths, timeout values and runtime state.
@@ -461,57 +461,15 @@ editable_input_loop() {
 }
 
 # --- 15. TIMED TEXT INPUT HELPER ---
-timed_text_input() {
+function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # Countdown prompts are reserved only for simple Y/n decisions.
+    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "no" "1" "" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
@@ -521,73 +479,18 @@ timed_text_input() {
 }
 
 # --- 16. TIMED NUMERIC INPUT HELPER ---
-timed_number_input() {
+function timed_number_input() {
     local prompt="$1"
     local default="$2"
     local min_value="${3:-1}"
     local max_value="${4:-}"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
+    # Numeric inputs are deliberately NOT timed.
+    # Countdown prompts are reserved only for simple Y/n decisions.
     while true; do
-        deadline=$(( $(date +%s) + T ))
-
-        while true; do
-            now=$(date +%s)
-            remaining=$(( deadline - now ))
-
-            if [ "$remaining" -le 0 ]; then
-                answer="$default"
-                break
-            fi
-
-            tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-            if [ -r /dev/tty ]; then
-                if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                    if [[ "$key" == " " ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-                        break
-                    elif [[ -z "$key" ]]; then
-                        answer="$default"
-                        break
-                    elif [[ "$key" =~ ^[0-9]$ ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
-                        break
-                    else
-                        tty_print "${BFR}"
-                        print_number_error "$min_value" "$max_value"
-                        answer="INVALID"
-                        break
-                    fi
-                fi
-            else
-                if IFS= read -rsn1 -t 1 key; then
-                    if [[ "$key" == " " ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
-                        break
-                    elif [[ -z "$key" ]]; then
-                        answer="$default"
-                        break
-                    elif [[ "$key" =~ ^[0-9]$ ]]; then
-                        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "$key")"
-                        break
-                    else
-                        tty_print "${BFR}"
-                        print_number_error "$min_value" "$max_value"
-                        answer="INVALID"
-                        break
-                    fi
-                fi
-            fi
-        done
-
-        if [ "$answer" == "INVALID" ]; then
-            continue
-        fi
+        answer="$(editable_input_loop "$prompt" "$default" "yes" "$min_value" "$max_value" "")"
+        [ -z "$answer" ] && answer="$default"
 
         if validate_number "$answer" "$min_value" "$max_value"; then
             tty_print "${BFR}"

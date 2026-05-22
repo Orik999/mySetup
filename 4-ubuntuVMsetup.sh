@@ -36,9 +36,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="4-ubuntuVMsetup.sh"
-SCRIPT_VERSION="v2.0.3"
+SCRIPT_VERSION="v2.1.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="pro-first-collected-inputs-versioned"
+SCRIPT_BUILD="audit-pro-first-untimed-inputs-stability"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -459,11 +459,15 @@ function timed_text_input() {
     local default="$2"
     local answer=""
 
+    # Text/path/name inputs are deliberately NOT timed.
+    # Countdown prompts are reserved only for simple Y/n decisions.
+    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
     answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
+    tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer
+    flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
 }
@@ -723,6 +727,8 @@ function start_confirmation() {
     [[ "$start_yn" =~ ^[Nn] ]] && exit 0
 
     return 0
+
+    return 0
 }
 
 # --- 30. USERNAME INPUT ---
@@ -869,6 +875,8 @@ function show_ready_summary_and_confirm() {
 
     apply_yn="$(timed_yes_no "Apply this Ubuntu VM setup plan now?" "y")"
     [[ "$apply_yn" =~ ^[Nn] ]] && exit 0
+
+    return 0
 
     return 0
 }

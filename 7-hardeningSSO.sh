@@ -23,9 +23,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="7-hardeningSSO.sh"
-SCRIPT_VERSION="v1.1.1"
+SCRIPT_VERSION="v1.2.0"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="versioned-start-return-stability"
+SCRIPT_BUILD="audit-ready-apply-untimed-inputs-stability"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -417,59 +417,16 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    flush_input_buffer
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name inputs are deliberately NOT timed.
+    # Countdown prompts are reserved only for simple Y/n decisions.
+    # This prevents defaults being accepted while the user is away and gives enough time to type/paste.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer
+    flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
 }
@@ -723,6 +680,8 @@ function start_confirmation() {
         exit 0
     fi
 
+
+    return 0
 
     return 0
 }
@@ -1636,6 +1595,36 @@ function show_final_summary() {
 # =========================================================
 
 # --- 26. MAIN ORCHESTRATION ---
+# --- READY TO APPLY SUMMARY ---
+# Confirms final hardening actions before Authentik, admin UI, firewall or cleanup changes are applied.
+function show_ready_to_apply() {
+    local apply_yn=""
+
+    section "READY TO APPLY"
+
+    echo -e "${YW}Preflight checks and token collection are complete. No final hardening changes have been applied yet.${CL}"
+    echo ""
+    detail_line "Docker user" "$DOCKER_USER"
+    detail_line "Docker directory" "$DOCKER_DIR"
+    detail_line "Compose directory" "$COMPOSE_DIR"
+    detail_line "Domain" "$DOMAIN"
+    detail_line "Authentik API" "$AUTHENTIK_API_BASE"
+    detail_line "Authentik token source" "$AUTHENTIK_TOKEN_SOURCE"
+    detail_line "Selected admin UI" "$ADMIN_UI"
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script may create/update Authentik app/provider/outpost settings, close bootstrap exposure and apply final hardening.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Apply final hardening and SSO plan now?" "y")"
+
+    if [[ "$apply_yn" =~ ^[Nn] ]]; then
+        echo -e "${YW}Final Hardening + SSO Integration cancelled. No final changes were applied.${CL}"
+        exit 0
+    fi
+
+    return 0
+}
+
 function main() {
     init_script
 
@@ -1648,6 +1637,7 @@ function main() {
     verify_traefik_dynamic_config
     collect_authentik_api_token
     verify_authentik_api
+    show_ready_to_apply
     create_or_update_authentik_forward_auth
     verify_authentik_outpost_302
 
