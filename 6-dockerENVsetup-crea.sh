@@ -26,8 +26,8 @@ BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━�
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
 SCRIPT_VERSION="v1.3.2"
-SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="authentik-api-token-defaults-nounset-fix"
+SCRIPT_UPDATED="2026-05-23"
+SCRIPT_BUILD="traefik-config-post-render-verification"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -78,10 +78,6 @@ AUTHENTIK_HOST_BROWSER_VALUE=""
 AUTHENTIK_BOOTSTRAP_EMAIL_VALUE=""
 AUTHENTIK_BOOTSTRAP_PASSWORD=""
 AUTHENTIK_BOOTSTRAP_TOKEN=""
-AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
-AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
-AUTHENTIK_API_TOKEN_MODE="skip"
-AUTHENTIK_API_TOKEN_VALUE=""
 POSTIZ_POSTGRES_PASSWORD=""
 POSTIZ_JWT_SECRET=""
 TEMPORAL_POSTGRES_PASSWORD=""
@@ -1933,6 +1929,23 @@ function create_traefik_config_files() {
     msg_ok "TRAEFIK ACME STORAGE READY"
 }
 
+
+# --- 50B. TRAEFIK CONFIG POST-RENDER VERIFICATION ---
+# Verifies Traefik files immediately after rendering so Script 6 fails here, not later in Script 6.5.
+function verify_traefik_config_files_created() {
+    section "TRAEFIK CONFIG VERIFICATION"
+
+    [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || msg_error "Traefik static config was not created: ${TRAEFIK_STATIC_CONFIG_FILE}"
+    [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || msg_error "Traefik dynamic config was not created: ${TRAEFIK_DYNAMIC_CONFIG_FILE}"
+    [ -f "${TRAEFIK_ACME_DIR}/acme.json" ] || msg_error "Traefik ACME storage was not created: ${TRAEFIK_ACME_DIR}/acme.json"
+
+    if grep -R '{{[^}]*}}' "$TRAEFIK_STATIC_CONFIG_FILE" "$TRAEFIK_DYNAMIC_CONFIG_FILE" >/dev/null 2>&1; then
+        msg_error "Unrendered {{PLACEHOLDER}} values remain in Traefik config files."
+    fi
+
+    msg_ok "TRAEFIK CONFIG FILES VERIFIED"
+}
+
 # --- 51. SECRET FILE CREATION ---
 # Writes generated/reused secrets to individual secret files.
 function write_secret_files() {
@@ -2004,6 +2017,10 @@ CF_TOKEN_SECRET_NAME="cf_token"
 PROXMOX_ROUTE_ENABLED="${PROXMOX_ROUTE_ENABLED}"
 PROXMOX_HOST="${PROXMOX_HOST}"
 PROXMOX_URL="${PROXMOX_URL}"
+TRAEFIK_DASHBOARD_HOST="${TRAEFIK_DASHBOARD_HOST}"
+TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_STATIC_CONFIG_FILE}"
+TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DYNAMIC_CONFIG_FILE}"
+TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
 
 # --- Admin UI selection ---
 ADMIN_UI="${ADMIN_UI_VALUE}"
@@ -2422,6 +2439,7 @@ function main() {
     generate_or_reuse_secrets
     create_postgres_init_script
     create_traefik_config_files
+    verify_traefik_config_files_created
     write_secret_files
     write_env_file
     apply_permissions
