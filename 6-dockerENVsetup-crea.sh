@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.3.1"
+SCRIPT_VERSION="v1.3.2"
 SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="authentik-bootstrap-untimed-menu-input-fix"
+SCRIPT_BUILD="authentik-api-token-defaults-nounset-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -78,6 +78,10 @@ AUTHENTIK_HOST_BROWSER_VALUE=""
 AUTHENTIK_BOOTSTRAP_EMAIL_VALUE=""
 AUTHENTIK_BOOTSTRAP_PASSWORD=""
 AUTHENTIK_BOOTSTRAP_TOKEN=""
+AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
+AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
+AUTHENTIK_API_TOKEN_MODE="skip"
+AUTHENTIK_API_TOKEN_VALUE=""
 POSTIZ_POSTGRES_PASSWORD=""
 POSTIZ_JWT_SECRET=""
 TEMPORAL_POSTGRES_PASSWORD=""
