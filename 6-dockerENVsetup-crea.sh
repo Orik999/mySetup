@@ -24,11 +24,6 @@ WARN="${YW}!${CL}"
 CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
-SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.3.2"
-SCRIPT_UPDATED="2026-05-23"
-SCRIPT_BUILD="traefik-config-post-render-verification"
-
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
 T=15
@@ -44,7 +39,6 @@ DEFAULT_DOMAIN="${DEFAULT_DOMAIN:-example.com}"
 DEFAULT_CF_API_EMAIL="${DEFAULT_CF_API_EMAIL:-}"
 DEFAULT_CF_ZONE_ID=""
 DEFAULT_HTPASSWD_USER="admin"
-DEFAULT_ADMIN_UI="dockge"
 
 SUDO_CMD=""
 LOGGING_ENABLED="no"
@@ -78,6 +72,10 @@ AUTHENTIK_HOST_BROWSER_VALUE=""
 AUTHENTIK_BOOTSTRAP_EMAIL_VALUE=""
 AUTHENTIK_BOOTSTRAP_PASSWORD=""
 AUTHENTIK_BOOTSTRAP_TOKEN=""
+AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
+AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
+AUTHENTIK_API_TOKEN_MODE="skip"
+AUTHENTIK_API_TOKEN_VALUE=""
 POSTIZ_POSTGRES_PASSWORD=""
 POSTIZ_JWT_SECRET=""
 TEMPORAL_POSTGRES_PASSWORD=""
@@ -134,14 +132,6 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
-
-# --- SCRIPT VERSION DISPLAY ---
-# Prints the currently running script version immediately under the ASCII banner.
-function show_script_version() {
-    echo -e "${GN}SCRIPT VERSION: ${SCRIPT_VERSION} | UPDATED: ${SCRIPT_UPDATED} | BUILD: ${SCRIPT_BUILD}${CL}"
-    echo -e "${BL}SOURCE: ${SCRIPT_SOURCE}${CL}"
-}
-
 
 # --- 5. SECTION HEADER HELPER ---
 # Keeps terminal output clean and grouped by stage.
@@ -627,38 +617,64 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
+    local key=""
+    local deadline=""
+    local now=""
+    local remaining=""
 
-    # Text/path/name/domain/number/token-style prompts are deliberately NOT timed.
-    # Countdown prompts are reserved only for simple Y/n decisions.
-    answer="$(editable_input_loop "$prompt" "$default" "")"
+    flush_input_buffer
+    deadline=$(( $(date +%s) + T ))
+
+    while true; do
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+
+        if [ "$remaining" -le 0 ]; then
+            answer="$default"
+            break
+        fi
+
+        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
+
+        if [ -r /dev/tty ]; then
+            if IFS= read -rsn1 -t 1 key < /dev/tty; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    flush_input_buffer
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        else
+            if IFS= read -rsn1 -t 1 key; then
+                if [[ "$key" == " " ]]; then
+                    answer="$(editable_input_loop "$prompt" "$default" "")"
+                    break
+                elif [[ -z "$key" ]]; then
+                    answer="$default"
+                    flush_input_buffer
+                    break
+                else
+                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
+                    break
+                fi
+            fi
+        fi
+    done
+
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer 2>/dev/null || true
+    flush_input_buffer
 
     echo "$answer"
 }
-
-# --- 27A. UNTIMED MENU INPUT HELPER ---
-# Reads a small menu choice without a countdown.
-# Countdown prompts are reserved only for Y/n decisions.
-function untimed_menu_input() {
-    local prompt="$1"
-    local default="$2"
-    local answer=""
-
-    while true; do
-        answer="$(timed_text_input "$prompt" "$default")"
-        answer="$(printf '%s' "$answer" | tr -d '\r\n' | xargs || true)"
-
-        if [ -n "$answer" ]; then
-            echo "$answer"
-            return 0
-        fi
-    done
-}
-
 
 # --- 28. HIDDEN INPUT HELPER ---
 # Reads sensitive input without echoing it to terminal.
@@ -913,155 +929,6 @@ function download_file() {
     fi
 }
 
-
-# --- 39B.1. PRIMARY IPV4 DETECTION HELPER ---
-# Detects the current machine's primary IPv4 address for network-context display.
-function detect_primary_ipv4() {
-    local ip_addr=""
-
-    if command -v ip >/dev/null 2>&1; then
-        ip_addr="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}' || true)"
-    fi
-
-    if [ -z "$ip_addr" ] && command -v hostname >/dev/null 2>&1; then
-        ip_addr="$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\./) {print $i; exit}}' || true)"
-    fi
-
-    printf '%s' "$ip_addr"
-    return 0
-}
-
-# --- 39B.2. DEFAULT GATEWAY DETECTION HELPER ---
-# Detects the default gateway for display only. It is not assumed to be Proxmox.
-function detect_default_gateway_ipv4() {
-    local gateway=""
-
-    if command -v ip >/dev/null 2>&1; then
-        gateway="$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}' || true)"
-    fi
-
-    printf '%s' "$gateway"
-    return 0
-}
-
-# --- 39B.2A. PROXMOX HTTPS PROBE HELPER ---
-# Checks whether a candidate IP appears to be a Proxmox VE web UI on port 8006.
-function probe_proxmox_ip() {
-    local candidate_ip="$1"
-    local probe_output=""
-
-    [[ "$candidate_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
-
-    if command -v curl >/dev/null 2>&1; then
-        probe_output="$(curl -kfsS --connect-timeout 0.35 --max-time 1.2 "https://${candidate_ip}:8006/" 2>/dev/null | head -c 4096 || true)"
-    elif command -v wget >/dev/null 2>&1; then
-        probe_output="$(timeout 2 wget --no-check-certificate -qO- "https://${candidate_ip}:8006/" 2>/dev/null | head -c 4096 || true)"
-    fi
-
-    if grep -Eiq 'proxmox|pve|Proxmox Virtual Environment' <<< "$probe_output"; then
-        printf 'https://%s:8006' "$candidate_ip"
-        return 0
-    fi
-
-    return 1
-}
-
-# --- 39B.2B. LOCAL SUBNET PROXMOX DISCOVERY HELPER ---
-# Attempts to find Proxmox from inside the Ubuntu VM without assuming the default gateway is Proxmox.
-# As soon as a verified Proxmox host is found, this function returns immediately and skips remaining scans.
-function discover_proxmox_url_from_lan() {
-    local primary_ip=""
-    local prefix=""
-    local candidate=""
-    local found_url=""
-    local host=""
-    local resolved_ip=""
-    local octet=""
-
-    if command -v getent >/dev/null 2>&1; then
-        for host in pve2 pve proxmox proxmox.local pve2.local pve.local; do
-            resolved_ip="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}' || true)"
-            if [[ "$resolved_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                if found_url="$(probe_proxmox_ip "$resolved_ip")"; then
-                    printf '%s' "$found_url"
-                    return 0
-                fi
-            fi
-        done
-    fi
-
-    if command -v ip >/dev/null 2>&1; then
-        while IFS= read -r candidate; do
-            if [[ "$candidate" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                if found_url="$(probe_proxmox_ip "$candidate")"; then
-                    printf '%s' "$found_url"
-                    return 0
-                fi
-            fi
-        done < <(ip -4 neigh show 2>/dev/null | awk '{print $1}' | sort -u || true)
-    fi
-
-    primary_ip="$(detect_primary_ipv4)"
-    if [[ "$primary_ip" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
-        prefix="${BASH_REMATCH[1]}"
-
-        for octet in 10 2 3 5 20 50 100 101 102 156 200 1; do
-            candidate="${prefix}.${octet}"
-            [ "$candidate" = "$primary_ip" ] && continue
-            if found_url="$(probe_proxmox_ip "$candidate")"; then
-                printf '%s' "$found_url"
-                return 0
-            fi
-        done
-
-        for octet in $(seq 2 254); do
-            candidate="${prefix}.${octet}"
-            [ "$candidate" = "$primary_ip" ] && continue
-            if found_url="$(probe_proxmox_ip "$candidate")"; then
-                printf '%s' "$found_url"
-                return 0
-            fi
-        done
-    fi
-
-    printf ''
-    return 0
-}
-
-# --- 39B.3. PROXMOX URL DEFAULT DETECTION HELPER ---
-# Builds the Proxmox internal URL default without hardcoding a fake static IP.
-function detect_proxmox_internal_url_default() {
-    local existing_env_url=""
-    local discovered_url=""
-
-    if [ -n "${PROXMOX_URL_DEFAULT:-}" ]; then
-        printf '%s' "$PROXMOX_URL_DEFAULT"
-        return 0
-    fi
-
-    if [ -n "${PROXMOX_URL:-}" ]; then
-        printf '%s' "$PROXMOX_URL"
-        return 0
-    fi
-
-    if [ -n "${DOCKER_DIR:-}" ] && [ -f "${DOCKER_DIR}/.env" ]; then
-        existing_env_url="$(grep -E '^PROXMOX_URL=' "${DOCKER_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | xargs || true)"
-        if [ -n "$existing_env_url" ]; then
-            printf '%s' "$existing_env_url"
-            return 0
-        fi
-    fi
-
-    discovered_url="$(discover_proxmox_url_from_lan || true)"
-    if [ -n "$discovered_url" ]; then
-        printf '%s' "$discovered_url"
-        return 0
-    fi
-
-    printf ''
-    return 0
-}
-
 # --- 39B. TRAEFIK TEMPLATE RENDER HELPER ---
 # Replaces public-safe placeholders in downloaded Traefik templates.
 # Secret values are never embedded into Traefik config files.
@@ -1170,7 +1037,6 @@ function init_script() {
 
     clear
     header_info
-    show_script_version
 
     validate_dependencies
 }
@@ -1377,6 +1243,16 @@ function collect_domain_cloudflare_inputs() {
     done
 
     while true; do
+        CF_API_EMAIL_VALUE="$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")"
+
+        if validate_email "$CF_API_EMAIL_VALUE"; then
+            break
+        fi
+
+        msg_warn "Invalid email format."
+    done
+
+    while true; do
         CF_ZONE_ID_VALUE="$(timed_text_input "Enter Cloudflare Zone ID or leave empty" "$DEFAULT_CF_ZONE_ID")"
 
         if validate_cf_zone_id "$CF_ZONE_ID_VALUE"; then
@@ -1386,214 +1262,20 @@ function collect_domain_cloudflare_inputs() {
         msg_warn "Invalid Cloudflare Zone ID. Leave empty or enter the hex zone ID."
     done
 
-    # Ask for API token before email. When token auth is used, Cloudflare email is not required.
-    # This avoids cf-companion receiving email-style auth values when a scoped API token is intended.
-    CF_API_TOKEN_VALUE="$(sensitive_line_input "Enter Cloudflare API Token, or leave empty")" || CF_API_TOKEN_VALUE=""
+    disable_logging
+    CF_API_TOKEN_VALUE="$(sensitive_line_input "Enter Cloudflare API Token, or leave empty")"
+    enable_logging
+
     CF_API_TOKEN_VALUE="$(printf '%s' "$CF_API_TOKEN_VALUE" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
     if [ -z "$CF_API_TOKEN_VALUE" ] && root_file_not_empty "$CF_API_TOKEN_FILE"; then
         CF_API_TOKEN_VALUE="$(root_read_file "$CF_API_TOKEN_FILE")"
-        CF_AUTH_MODE="api_token_file_reuse"
-        CF_EMAIL_REQUIRED="no"
-        CF_API_EMAIL_VALUE=""
         msg_ok "EXISTING CLOUDFLARE API TOKEN WILL BE REUSED"
-    elif [ -n "$CF_API_TOKEN_VALUE" ]; then
-        CF_AUTH_MODE="api_token"
-        CF_EMAIL_REQUIRED="no"
-        CF_API_EMAIL_VALUE=""
-        msg_ok "CLOUDFLARE API TOKEN CAPTURED"
+    elif [ -z "$CF_API_TOKEN_VALUE" ]; then
+        msg_warn "Cloudflare API token left empty. Traefik DNS challenge, cf-ddns, and cf-companion will need this later."
     else
-        CF_AUTH_MODE="email_or_manual"
-        CF_EMAIL_REQUIRED="yes"
-        msg_warn "Cloudflare API token left empty. Email can be entered for legacy/manual Cloudflare auth, but API token is recommended."
-        while true; do
-            CF_API_EMAIL_VALUE="$(timed_text_input "Enter Cloudflare API Email" "$DEFAULT_CF_API_EMAIL")"
-
-            if validate_email "$CF_API_EMAIL_VALUE"; then
-                break
-            fi
-
-            msg_warn "Invalid email format."
-        done
+        msg_ok "CLOUDFLARE API TOKEN CAPTURED"
     fi
-
-    return 0
-}
-
-
-# --- 46B. ADMIN UI SELECTION INPUTS ---
-# Selects the Docker management UI used by Script 6.5 and Script 7.
-function collect_admin_ui_inputs() {
-    local choice=""
-
-    section "ADMIN UI SELECTION"
-
-    echo -e "${YW}Choose the container management UI to bootstrap after Script 6.${CL}"
-    echo -e "${YW}Default/recommended for this project is Dockge because it is lightweight and compose-focused.${CL}"
-    echo ""
-    echo -e "${BL}1) Dockge${CL}    ${GN}recommended/default${CL}"
-    echo -e "${BL}2) Portainer CE${CL}    advanced Docker UI"
-    echo -e "${BL}3) Komodo${CL}    future Git/OIDC-oriented option"
-    echo -e "${BL}4) Dockhand${CL}    lightweight remote Docker option"
-    echo ""
-
-    while true; do
-        choice="$(untimed_menu_input "Select admin UI [1-4]" "1")"
-
-        case "$choice" in
-            1|dockge|Dockge)
-                ADMIN_UI_VALUE="dockge"
-                ADMIN_UI_DISPLAY_NAME="Dockge"
-                ;;
-            2|portainer|Portainer|portainer-ce)
-                ADMIN_UI_VALUE="portainer"
-                ADMIN_UI_DISPLAY_NAME="Portainer"
-                ;;
-            3|komodo|Komodo)
-                ADMIN_UI_VALUE="komodo"
-                ADMIN_UI_DISPLAY_NAME="Komodo"
-                ;;
-            4|dockhand|Dockhand)
-                ADMIN_UI_VALUE="dockhand"
-                ADMIN_UI_DISPLAY_NAME="Dockhand"
-                ;;
-            *)
-                msg_warn "Invalid choice. Select 1, 2, 3 or 4."
-                continue
-                ;;
-        esac
-
-        break
-    done
-
-    ADMIN_UI_HOST_VALUE="${ADMIN_UI_VALUE}.${DOMAIN_VALUE}"
-    ADMIN_UI_URL_VALUE="https://${ADMIN_UI_HOST_VALUE}"
-
-    msg_ok "ADMIN UI SELECTED: ${ADMIN_UI_DISPLAY_NAME}"
-    detail_line "Admin UI host" "$ADMIN_UI_HOST_VALUE"
-}
-
-# --- 46C. AUTHENTIK BOOTSTRAP INPUTS ---
-# Collects Authentik external URL and bootstrap admin values before .env is written.
-# Bootstrap token is not an Authentik API token. API token input is optional and stored separately.
-function collect_authentik_inputs() {
-    local password_choice=""
-    local token_choice=""
-    local api_choice=""
-    local default_admin_email=""
-
-    section "AUTHENTIK BOOTSTRAP"
-
-    AUTHENTIK_HOST_VALUE="$(timed_text_input "Enter Authentik external URL" "https://auth.${DOMAIN_VALUE}")"
-    AUTHENTIK_HOST_BROWSER_VALUE="$(timed_text_input "Enter Authentik browser URL" "$AUTHENTIK_HOST_VALUE")"
-
-    while true; do
-        if [ -n "$CF_API_EMAIL_VALUE" ]; then
-            default_admin_email="$CF_API_EMAIL_VALUE"
-        else
-            default_admin_email="admin@${DOMAIN_VALUE}"
-        fi
-
-        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(timed_text_input "Enter Authentik bootstrap admin email" "$default_admin_email")"
-
-        if validate_email "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"; then
-            break
-        fi
-
-        msg_warn "Invalid email format."
-    done
-
-    echo ""
-    echo -e "${YW}Choose how Script 6 should set the first Authentik bootstrap admin password.${CL}"
-    echo -e "${YW}This is a menu choice, not the password prompt. Type 2 if you want to paste your own password.${CL}"
-    echo -e "${BL}1) Auto-generate password ${GN}(recommended/default)${CL}"
-    echo -e "${BL}2) Enter custom password${CL}"
-    echo ""
-
-    while true; do
-        password_choice="$(untimed_menu_input "Select Authentik bootstrap password option [1-2]" "1")"
-        case "$password_choice" in
-            1|auto|Auto|generate|generated)
-                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(generate_secret)"
-                msg_ok "AUTHENTIK BOOTSTRAP PASSWORD WILL BE GENERATED"
-                break
-                ;;
-            2|custom|Custom|manual|Manual)
-                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(sensitive_line_input "Enter Authentik bootstrap admin password")" || AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE=""
-                AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" | tr -d '
-')"
-                [ -n "$AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE" ] || msg_error "Authentik bootstrap password cannot be empty."
-                msg_ok "AUTHENTIK BOOTSTRAP PASSWORD CAPTURED"
-                break
-                ;;
-            *)
-                msg_warn "Invalid choice. Type 1 to auto-generate or 2 to enter a custom password. Do not paste the password at this menu prompt."
-                ;;
-        esac
-    done
-
-    echo ""
-    echo -e "${YW}Choose how Script 6 should set the Authentik bootstrap token.${CL}"
-    echo -e "${YW}Reminder: the bootstrap token is not an Authentik API token.${CL}"
-    echo -e "${BL}1) Auto-generate bootstrap token ${GN}(recommended/default)${CL}"
-    echo -e "${BL}2) Enter custom bootstrap token${CL}"
-    echo ""
-
-    while true; do
-        token_choice="$(untimed_menu_input "Select Authentik bootstrap token option [1-2]" "1")"
-        case "$token_choice" in
-            1|auto|Auto|generate|generated)
-                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(generate_secret)"
-                msg_ok "AUTHENTIK BOOTSTRAP TOKEN WILL BE GENERATED"
-                break
-                ;;
-            2|custom|Custom|manual|Manual)
-                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(sensitive_line_input "Enter Authentik bootstrap token")" || AUTHENTIK_BOOTSTRAP_TOKEN_VALUE=""
-                AUTHENTIK_BOOTSTRAP_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" | tr -d '
-')"
-                [ -n "$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE" ] || msg_error "Authentik bootstrap token cannot be empty."
-                msg_ok "AUTHENTIK BOOTSTRAP TOKEN CAPTURED"
-                break
-                ;;
-            *)
-                msg_warn "Invalid choice. Type 1 to auto-generate or 2 to enter a custom bootstrap token."
-                ;;
-        esac
-    done
-
-    echo ""
-    echo -e "${YW}Optional: Script 7 can automate Authentik provider/application setup if you later paste a real Authentik API token.${CL}"
-    echo -e "${YW}Important: AUTHENTIK_BOOTSTRAP_TOKEN is not an API token.${CL}"
-    echo -e "${BL}1) Skip API token now ${GN}(recommended)${CL}"
-    echo -e "${BL}2) Paste existing Authentik API token${CL}"
-    echo -e "${BL}3) Show guidance later in Script 7${CL}"
-    echo ""
-
-    api_choice="$(untimed_menu_input "Select Authentik API token option [1-3]" "1")"
-    case "$api_choice" in
-        2)
-            AUTHENTIK_API_TOKEN_VALUE="$(sensitive_line_input "Paste existing Authentik API token")" || AUTHENTIK_API_TOKEN_VALUE=""
-            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '
-')"
-            if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
-                AUTHENTIK_API_TOKEN_MODE="provided"
-                msg_ok "AUTHENTIK API TOKEN CAPTURED"
-            else
-                AUTHENTIK_API_TOKEN_MODE="skip"
-                msg_warn "No API token pasted. Script 7 automation will ask again if needed."
-            fi
-            ;;
-        3)
-            AUTHENTIK_API_TOKEN_MODE="guide"
-            msg_ok "SCRIPT 7 WILL SHOW API TOKEN GUIDANCE"
-            ;;
-        *)
-            AUTHENTIK_API_TOKEN_MODE="skip"
-            msg_ok "AUTHENTIK API TOKEN SETUP SKIPPED FOR NOW"
-            ;;
-    esac
-
-    return 0
 }
 
 # --- 46A. TRAEFIK CONFIG INPUTS ---
@@ -1603,20 +1285,7 @@ function collect_traefik_inputs() {
     local default_traefik_host="traefik.${DOMAIN_VALUE}"
     local proxmox_yn=""
     local default_proxmox_host="proxmox.${DOMAIN_VALUE}"
-    local default_proxmox_url=""
-    local detected_primary_ip=""
-    local detected_gateway_ip=""
-
-    detected_primary_ip="$(detect_primary_ipv4)"
-    detected_gateway_ip="$(detect_default_gateway_ipv4)"
-
-    tty_println " ${BL}━━━━━▶${CL} ${YW}Discovering Proxmox host on local network...${CL}"
-    default_proxmox_url="$(detect_proxmox_internal_url_default)"
-    if [ -n "$default_proxmox_url" ]; then
-        tty_println " ${CM} ${GN}PROXMOX HOST DISCOVERED:${CL} ${default_proxmox_url}"
-    else
-        tty_println " ${WARN} ${YW}PROXMOX HOST AUTO-DISCOVERY DID NOT FIND A VERIFIED HOST${CL}"
-    fi
+    local default_proxmox_url="https://192.168.1.10:8006"
 
     section "TRAEFIK CONFIG"
 
@@ -1630,17 +1299,7 @@ function collect_traefik_inputs() {
         msg_warn "Invalid Traefik host. Use a bare hostname such as traefik.${DOMAIN_VALUE}."
     done
 
-    echo ""
-    [ -n "$detected_primary_ip" ] && detail_line "Detected current system IPv4" "$detected_primary_ip"
-    [ -n "$detected_gateway_ip" ] && detail_line "Detected default gateway (not assumed Proxmox)" "$detected_gateway_ip"
-    if [ -n "$default_proxmox_url" ]; then
-        detail_line "Suggested Proxmox URL" "$default_proxmox_url"
-    else
-        msg_warn "No Proxmox URL could be auto-detected. You will need to type it if enabling the route."
-    fi
-    echo ""
-
-    proxmox_yn="$(timed_yes_no "Create optional Proxmox route in Traefik dynamic config?" "y")"
+    proxmox_yn="$(timed_yes_no "Create optional Proxmox route in Traefik dynamic config?" "n")"
 
     if [[ "$proxmox_yn" =~ ^[Yy] ]]; then
         PROXMOX_ROUTE_ENABLED="y"
@@ -1668,8 +1327,6 @@ function collect_traefik_inputs() {
     TRAEFIK_ACME_DIR="${TRAEFIK_DIR}/acme"
     TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_DIR}/traefik.yml"
     TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DIR}/dynamic-config.yml"
-
-    return 0
 }
 
 # --- 47. HTPASSWD OPTIONAL INPUT ---
@@ -1735,55 +1392,72 @@ function collect_htpasswd_inputs() {
 # --- 47B. AUTHENTIK BOOTSTRAP INPUTS ---
 # Collects first-login Authentik bootstrap values and keeps them separate from Authentik API tokens.
 # AUTHENTIK_BOOTSTRAP_TOKEN is not an API bearer token; Script 7 asks for a real API token later if automation is desired.
+function collect_authentik_bootstrap_inputs() {
+    local default_auth_host="https://auth.${DOMAIN_VALUE}"
+    local use_cf_email=""
+    local create_password=""
+    local create_token=""
+
+    section "AUTHENTIK BOOTSTRAP"
+
+    echo -e "${BL}Authentik needs bootstrap admin values for the first fresh deployment.${CL}"
+    echo -e "${YW}These are written to .env and displayed once with other secrets.${CL}"
+    echo -e "${YW}Important: AUTHENTIK_BOOTSTRAP_TOKEN is NOT an Authentik API token.${CL}"
+    echo ""
+
+    AUTHENTIK_HOST_VALUE="$(timed_text_input "Enter Authentik external host, example https://auth.example.com" "$default_auth_host")"
+    AUTHENTIK_HOST_BROWSER_VALUE="$(timed_text_input "Enter Authentik browser host, example https://auth.example.com" "$AUTHENTIK_HOST_VALUE")"
+
+    use_cf_email="$(timed_yes_no "Use Cloudflare email as Authentik bootstrap admin email?" "y")"
+    if [[ "$use_cf_email" =~ ^[Yy]$ ]]; then
+        AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$CF_API_EMAIL_VALUE"
+        msg_ok "AUTHENTIK BOOTSTRAP EMAIL SET FROM CLOUDFLARE EMAIL"
+    else
+        while true; do
+            AUTHENTIK_BOOTSTRAP_EMAIL_VALUE="$(timed_text_input "Enter Authentik bootstrap admin email" "$CF_API_EMAIL_VALUE")"
+            if validate_email "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"; then
+                break
+            fi
+            msg_warn "Invalid email format."
+        done
+    fi
+
+    create_password="$(timed_yes_no "Auto-generate Authentik bootstrap password?" "y")"
+    if [[ "$create_password" =~ ^[Yy]$ ]]; then
+        AUTHENTIK_BOOTSTRAP_PASSWORD="$(generate_secret)"
+        msg_ok "AUTHENTIK BOOTSTRAP PASSWORD GENERATED"
+    else
+        disable_logging
+        AUTHENTIK_BOOTSTRAP_PASSWORD="$(sensitive_line_input "Enter Authentik bootstrap password")"
+        enable_logging
+        if [ -z "$AUTHENTIK_BOOTSTRAP_PASSWORD" ]; then
+            AUTHENTIK_BOOTSTRAP_PASSWORD="$(generate_secret)"
+            msg_warn "Empty password entered; generated one instead."
+        fi
+    fi
+
+    create_token="$(timed_yes_no "Auto-generate Authentik bootstrap token?" "y")"
+    if [[ "$create_token" =~ ^[Yy]$ ]]; then
+        AUTHENTIK_BOOTSTRAP_TOKEN="$(generate_secret)"
+        msg_ok "AUTHENTIK BOOTSTRAP TOKEN GENERATED"
+    else
+        disable_logging
+        AUTHENTIK_BOOTSTRAP_TOKEN="$(sensitive_line_input "Enter Authentik bootstrap token")"
+        enable_logging
+        if [ -z "$AUTHENTIK_BOOTSTRAP_TOKEN" ]; then
+            AUTHENTIK_BOOTSTRAP_TOKEN="$(generate_secret)"
+            msg_warn "Empty token entered; generated one instead."
+        fi
+    fi
+
+    detail_line "Authentik host" "$AUTHENTIK_HOST_VALUE"
+    detail_line "Authentik bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
+    echo -e "${YW}Script 7 will ask separately for an Authentik API token if API automation is wanted.${CL}"
+}
 
 # =========================================================
 #  FILE / SECRET CREATION
 # =========================================================
-
-
-# --- 55A. READY TO APPLY SUMMARY ---
-# Shows every collected setting before directories, secrets, .env, templates or permissions are written.
-function show_ready_summary_and_confirm() {
-    local apply_yn=""
-
-    section "READY TO APPLY"
-
-    echo -e "${YW}All questions have been collected. No Docker ENV files, secrets or templates have been written yet.${CL}"
-    echo ""
-    detail_line "Docker user" "$DOCKER_USER"
-    detail_line "User directory" "$USERDIR"
-    detail_line "Docker directory" "$DOCKER_DIR"
-    detail_line "Secrets directory" "$DOCKER_SECRETS_DIR"
-    detail_line "PUID / PGID" "${PUID_VALUE} / ${PGID_VALUE}"
-    detail_line "Timezone" "$TZ_VALUE"
-    detail_line "Domain" "$DOMAIN_VALUE"
-    detail_line "Cloudflare auth mode" "$CF_AUTH_MODE"
-    detail_line "Cloudflare email" "${CF_API_EMAIL_VALUE:-not used with token auth}"
-    detail_line "Cloudflare zone ID" "${CF_ZONE_ID_VALUE:-not set}"
-    detail_line "Admin UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "Admin UI host" "$ADMIN_UI_HOST_VALUE"
-    detail_line "Authentik host" "$AUTHENTIK_HOST_VALUE"
-    detail_line "Authentik bootstrap email" "$AUTHENTIK_BOOTSTRAP_EMAIL_VALUE"
-    detail_line "Traefik dashboard host" "$TRAEFIK_DASHBOARD_HOST"
-    detail_line "Proxmox route enabled" "$PROXMOX_ROUTE_ENABLED"
-    if [ "$PROXMOX_ROUTE_ENABLED" == "y" ]; then
-        detail_line "Proxmox hostname" "$PROXMOX_HOST"
-        detail_line "Proxmox internal URL" "$PROXMOX_URL"
-    fi
-    detail_line "Regenerate secrets" "$(yes_no_label "$REGENERATE_SECRETS")"
-    echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will create/update folders, .env, secrets and templates.${CL}"
-    echo ""
-
-    apply_yn="$(timed_yes_no "Apply this Docker ENV setup plan now?" "y")"
-
-    if [[ "$apply_yn" =~ ^[Nn] ]]; then
-        echo -e "${YW}Docker ENV setup cancelled. No Docker ENV/system-changing actions were applied.${CL}"
-        exit 0
-    fi
-
-    return 0
-}
 
 # --- 48. DOCKER DIRECTORY CREATION ---
 # Creates project folders for compose, appdata, backups, shared files and secrets.
@@ -1800,16 +1474,8 @@ function create_docker_directories() {
 
     run_cmd "creating PostgreSQL data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
-
     run_cmd "creating Redis data directory" mkdir -p "${DOCKER_DIR}/appdata/redis"
-
-    run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "creating Authentik media directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
-    run_cmd "creating Authentik custom templates directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/custom-templates"
-    run_cmd "creating Authentik certs directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/certs"
-
-    run_cmd "creating Filebrowser database directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
-    run_cmd "creating Filebrowser config directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
+    run_cmd "creating Postiz uploads directory" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
 
     run_cmd "creating Traefik config directory" mkdir -p "${TRAEFIK_DIR}"
     run_cmd "creating Traefik ACME directory" mkdir -p "${TRAEFIK_ACME_DIR}"
@@ -1838,7 +1504,6 @@ function generate_or_reuse_secrets() {
 
 # --- 50. POSTGRES INIT SCRIPT CREATION ---
 # Creates unattended PostgreSQL init script for app databases on first PostgreSQL container startup.
-
 function create_postgres_init_script() {
     section "POSTGRES INIT SCRIPT"
 
@@ -1884,7 +1549,6 @@ SQL
 create_user_and_db "authentik" "authentik" "$AUTHENTIK_POSTGRES_PASSWORD"
 create_user_and_db "postiz" "postiz" "$POSTIZ_POSTGRES_PASSWORD"
 create_user_and_db "temporal" "temporal" "$TEMPORAL_POSTGRES_PASSWORD"
-create_user_and_db "temporal" "temporal_visibility" "$TEMPORAL_POSTGRES_PASSWORD"
 EOF
 
     run_cmd "making PostgreSQL init script executable" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
@@ -1927,23 +1591,6 @@ function create_traefik_config_files() {
     msg_info "Securing Traefik ACME storage"
     run_cmd "setting Traefik ACME storage permissions" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
     msg_ok "TRAEFIK ACME STORAGE READY"
-}
-
-
-# --- 50B. TRAEFIK CONFIG POST-RENDER VERIFICATION ---
-# Verifies Traefik files immediately after rendering so Script 6 fails here, not later in Script 6.5.
-function verify_traefik_config_files_created() {
-    section "TRAEFIK CONFIG VERIFICATION"
-
-    [ -f "$TRAEFIK_STATIC_CONFIG_FILE" ] || msg_error "Traefik static config was not created: ${TRAEFIK_STATIC_CONFIG_FILE}"
-    [ -f "$TRAEFIK_DYNAMIC_CONFIG_FILE" ] || msg_error "Traefik dynamic config was not created: ${TRAEFIK_DYNAMIC_CONFIG_FILE}"
-    [ -f "${TRAEFIK_ACME_DIR}/acme.json" ] || msg_error "Traefik ACME storage was not created: ${TRAEFIK_ACME_DIR}/acme.json"
-
-    if grep -R '{{[^}]*}}' "$TRAEFIK_STATIC_CONFIG_FILE" "$TRAEFIK_DYNAMIC_CONFIG_FILE" >/dev/null 2>&1; then
-        msg_error "Unrendered {{PLACEHOLDER}} values remain in Traefik config files."
-    fi
-
-    msg_ok "TRAEFIK CONFIG FILES VERIFIED"
 }
 
 # --- 51. SECRET FILE CREATION ---
@@ -2007,26 +1654,10 @@ TZ="${TZ_VALUE}"
 
 # --- Domain / Cloudflare ---
 DOMAIN="${DOMAIN_VALUE}"
-CF_AUTH_MODE="${CF_AUTH_MODE}"
-CF_EMAIL_REQUIRED="${CF_EMAIL_REQUIRED}"
 CF_API_EMAIL="${CF_API_EMAIL_VALUE}"
 CF_ZONE_ID="${CF_ZONE_ID_VALUE}"
 CF_API_TOKEN_FILE="${CF_API_TOKEN_FILE}"
-CF_TOKEN_FILE="${CF_API_TOKEN_FILE}"
-CF_TOKEN_SECRET_NAME="cf_token"
-PROXMOX_ROUTE_ENABLED="${PROXMOX_ROUTE_ENABLED}"
-PROXMOX_HOST="${PROXMOX_HOST}"
-PROXMOX_URL="${PROXMOX_URL}"
-TRAEFIK_DASHBOARD_HOST="${TRAEFIK_DASHBOARD_HOST}"
-TRAEFIK_STATIC_CONFIG_FILE="${TRAEFIK_STATIC_CONFIG_FILE}"
-TRAEFIK_DYNAMIC_CONFIG_FILE="${TRAEFIK_DYNAMIC_CONFIG_FILE}"
-TRAEFIK_ACME_STORAGE="${TRAEFIK_ACME_DIR}/acme.json"
-
-# --- Admin UI selection ---
-ADMIN_UI="${ADMIN_UI_VALUE}"
-ADMIN_UI_DISPLAY_NAME="${ADMIN_UI_DISPLAY_NAME}"
-ADMIN_UI_HOST="${ADMIN_UI_HOST_VALUE}"
-ADMIN_UI_URL="${ADMIN_UI_URL_VALUE}"
+CF_AUTH_METHOD="api_token"
 
 # --- PostgreSQL root/admin password ---
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
@@ -2035,15 +1666,13 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
 REDIS_PASSWORD="${REDIS_PASSWORD}"
 
 # --- Authentik ---
-AUTHENTIK_HOST="${AUTHENTIK_HOST_VALUE}"
-AUTHENTIK_HOST_BROWSER="${AUTHENTIK_HOST_BROWSER_VALUE}"
 AUTHENTIK_SECRET_KEY="${AUTHENTIK_SECRET_KEY}"
 AUTHENTIK_POSTGRES_PASSWORD="${AUTHENTIK_POSTGRES_PASSWORD}"
+AUTHENTIK_HOST="${AUTHENTIK_HOST_VALUE}"
+AUTHENTIK_HOST_BROWSER="${AUTHENTIK_HOST_BROWSER_VALUE}"
 AUTHENTIK_BOOTSTRAP_EMAIL="${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}"
-AUTHENTIK_BOOTSTRAP_PASSWORD="${AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE}"
-AUTHENTIK_BOOTSTRAP_TOKEN="${AUTHENTIK_BOOTSTRAP_TOKEN_VALUE}"
-AUTHENTIK_API_TOKEN_MODE="${AUTHENTIK_API_TOKEN_MODE}"
-AUTHENTIK_API_TOKEN="${AUTHENTIK_API_TOKEN_VALUE}"
+AUTHENTIK_BOOTSTRAP_PASSWORD="${AUTHENTIK_BOOTSTRAP_PASSWORD}"
+AUTHENTIK_BOOTSTRAP_TOKEN="${AUTHENTIK_BOOTSTRAP_TOKEN}"
 
 # --- Postiz ---
 POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
@@ -2051,8 +1680,6 @@ POSTIZ_JWT_SECRET="${POSTIZ_JWT_SECRET}"
 
 # --- Temporal ---
 TEMPORAL_POSTGRES_PASSWORD="${TEMPORAL_POSTGRES_PASSWORD}"
-TEMPORAL_DBNAME="temporal"
-TEMPORAL_VISIBILITY_DBNAME="temporal_visibility"
 EOF
 
     msg_ok "DOCKER .ENV CREATED"
@@ -2064,58 +1691,64 @@ EOF
 function apply_permissions() {
     section "PERMISSIONS"
 
-    msg_info "Setting Docker base folder ownership"
+    msg_info "Applying service-specific ownership and permissions"
 
-    run_cmd "setting Docker root directory ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
-    run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/compose"
-    run_cmd "setting backups directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/backups"
-    run_cmd "setting shared directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/shared"
-    run_cmd "setting secrets directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_SECRETS_DIR"
-    run_cmd "setting Traefik directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$TRAEFIK_DIR"
-    run_cmd "setting Filebrowser directory ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups" "${DOCKER_DIR}/compose"
+    # Base project ownership: keep only top-level project folders user-owned.
+    # Do not recursively chown all appdata because database containers use service UIDs.
+    run_cmd "setting Docker root ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR" "${DOCKER_DIR}/compose" "${DOCKER_DIR}/backups" "${DOCKER_DIR}/shared" "${DOCKER_SECRETS_DIR}"
+    run_cmd "setting appdata root ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata"
 
-    # Service-specific ownership prevents fresh-start failures:
-    # PostgreSQL and Redis official images commonly run as UID 999.
-    # Authentik runs non-root as UID 1000 in this stack.
+    # Database services: must be owned by the container UID, not by the login user.
     run_cmd "setting PostgreSQL data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
-    run_cmd "setting Redis data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
-    run_cmd "setting Authentik appdata ownership" chown -R 1000:1000 "${DOCKER_DIR}/appdata/authentik"
-
-    msg_ok "DOCKER FOLDER OWNERSHIP SET"
-
-    msg_info "Applying Docker folder permissions"
-
-    run_cmd "setting Docker root directory permissions" chmod 750 "$DOCKER_DIR"
-    run_cmd "setting appdata permissions" chmod 750 "${DOCKER_DIR}/appdata"
-    run_cmd "setting compose permissions" chmod 750 "${DOCKER_DIR}/compose"
-    run_cmd "setting backups permissions" chmod 750 "${DOCKER_DIR}/backups"
-    run_cmd "setting shared permissions" chmod 750 "${DOCKER_DIR}/shared"
-
-    run_cmd "setting PostgreSQL appdata permissions" chmod 750 "${DOCKER_DIR}/appdata/postgres"
     run_cmd "setting PostgreSQL data permissions" chmod 700 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL init directory permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
+    run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
+    run_cmd "setting PostgreSQL init permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
-    run_cmd "setting Redis data permissions" chmod 770 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis writable permissions" chmod -R u+rwX,g-rwx,o-rwx "${DOCKER_DIR}/appdata/redis"
 
-    run_cmd "setting Authentik appdata permissions" chmod -R u+rwX,g+rwX "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "setting Filebrowser permissions" chmod -R u+rwX,g+rwX "${DOCKER_DIR}/appdata/filebrowser" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups" "${DOCKER_DIR}/compose"
+    # Authentik runs non-root and needs write access to media/templates/certs bind mounts.
+    run_cmd "setting Authentik ownership" chown -R 1000:1000 "${DOCKER_DIR}/appdata/authentik"
+    run_cmd "setting Authentik permissions" chmod -R u+rwX,g-rwx,o-rwx "${DOCKER_DIR}/appdata/authentik"
 
+    # User-facing safe folders.
+    run_cmd "setting compose/shared/backups ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/compose" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups"
+    run_cmd "setting compose/shared/backups permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/compose" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups"
+
+    run_cmd "setting Filebrowser ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser"
+    run_cmd "setting Filebrowser permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/filebrowser"
+
+    run_cmd "setting Postiz uploads ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
+    run_cmd "setting Postiz uploads permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
+
+    # Traefik config and ACME.
+    run_cmd "setting Traefik ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${TRAEFIK_DIR}"
     run_cmd "setting Traefik config directory permissions" chmod 750 "${TRAEFIK_DIR}"
     run_cmd "setting Traefik ACME directory permissions" chmod 700 "${TRAEFIK_ACME_DIR}"
     run_cmd "setting Traefik static config permissions" chmod 644 "${TRAEFIK_STATIC_CONFIG_FILE}"
     run_cmd "setting Traefik dynamic config permissions" chmod 644 "${TRAEFIK_DYNAMIC_CONFIG_FILE}"
     run_cmd "setting Traefik ACME storage permissions" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
 
+    # Optional admin UI data directories.
+    case "$ADMIN_UI" in
+        dockge) run_cmd "setting Dockge ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockge" ;;
+        portainer) run_cmd "setting Portainer ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/portainer" ;;
+        komodo) run_cmd "setting Komodo ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo" ;;
+        dockhand) run_cmd "setting Dockhand ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockhand" ;;
+    esac
+
+    # Secrets and .env.
+    run_cmd "setting .env ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/.env"
     run_cmd "setting .env permissions" chmod 600 "${DOCKER_DIR}/.env"
+    run_cmd "setting secrets directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_SECRETS_DIR"
     run_cmd "setting secrets directory permissions" chmod 700 "$DOCKER_SECRETS_DIR"
 
     if compgen -G "${DOCKER_SECRETS_DIR}/*" > /dev/null; then
         run_cmd "setting secret file permissions" chmod 600 "${DOCKER_SECRETS_DIR}"/*
     fi
 
-    msg_ok "PERMISSIONS SET"
+    msg_ok "SERVICE-SPECIFIC PERMISSIONS SET"
 }
 
 # =========================================================
@@ -2137,9 +1770,6 @@ Docker user: $DOCKER_USER
 Docker dir: $DOCKER_DIR
 Secrets dir: $DOCKER_SECRETS_DIR
 Domain: $DOMAIN_VALUE
-Admin UI: $ADMIN_UI_VALUE
-Authentik host: $AUTHENTIK_HOST_VALUE
-Cloudflare auth mode: $CF_AUTH_MODE
 
 Results:
 EOF
@@ -2227,9 +1857,6 @@ Timezone: $TZ_VALUE
 Existing setup detected: $EXISTING_SETUP
 Secrets regenerated: $REGENERATE_SECRETS
 Cloudflare token file: $CF_API_TOKEN_FILE
-Cloudflare auth mode: $CF_AUTH_MODE
-Admin UI: $ADMIN_UI_VALUE
-Authentik host: $AUTHENTIK_HOST_VALUE
 Traefik static config: $TRAEFIK_STATIC_CONFIG_FILE
 Traefik dynamic config: $TRAEFIK_DYNAMIC_CONFIG_FILE
 Traefik ACME storage: ${TRAEFIK_ACME_DIR}/acme.json
@@ -2274,25 +1901,6 @@ EOF
     msg_ok "COMPLETION MARKER WRITTEN"
 }
 
-
-# --- 55B. POST-APPLY AUDIT PAUSE ---
-# Lets the user review all apply-stage output before the screen is cleared for one-time secret display.
-function pause_before_secret_display() {
-    section "APPLY STAGE COMPLETE"
-
-    echo -e "${GN}Docker ENV files, service folders, secrets, templates and permissions have been created/updated.${CL}"
-    echo -e "${YW}Review the output above now. The next screen shows sensitive secrets and clears terminal scrollback after confirmation.${CL}"
-    echo ""
-
-    if [ -r /dev/tty ]; then
-        read -r -p "Press ENTER when you are ready to view the one-time secret display..." _ < /dev/tty || true
-    else
-        read -r -p "Press ENTER when you are ready to view the one-time secret display..." _ || true
-    fi
-
-    return 0
-}
-
 # --- 56. FINAL SECRET DISPLAY ---
 # Shows generated/reused secret values once while logging is disabled.
 # After user confirms they saved them, terminal and scrollback are cleared where supported.
@@ -2322,8 +1930,7 @@ function show_secrets_once_without_logging() {
 
     echo -e "${BL}DOMAIN / CLOUDFLARE:${CL}"
     echo -e "DOMAIN=${GN}${DOMAIN_VALUE}${CL}"
-    echo -e "CF_AUTH_MODE=${GN}${CF_AUTH_MODE}${CL}"
-    echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE:-not used with token auth}${CL}"
+    echo -e "CF_API_EMAIL=${GN}${CF_API_EMAIL_VALUE}${CL}"
     echo -e "CF_ZONE_ID=${GN}${CF_ZONE_ID_VALUE}${CL}"
     echo -e "CF_API_TOKEN_FILE=${GN}${CF_API_TOKEN_FILE}${CL}"
     echo -e "TRAEFIK_STATIC_CONFIG=${GN}${TRAEFIK_STATIC_CONFIG_FILE}${CL}"
@@ -2340,18 +1947,13 @@ function show_secrets_once_without_logging() {
     echo -e "${BL}SERVICE SECRETS:${CL}"
     echo -e "POSTGRES_PASSWORD=${GN}${POSTGRES_PASSWORD}${CL}"
     echo -e "REDIS_PASSWORD=${GN}${REDIS_PASSWORD}${CL}"
+    echo -e "AUTHENTIK_SECRET_KEY=${GN}${AUTHENTIK_SECRET_KEY}${CL}"
+    echo -e "AUTHENTIK_POSTGRES_PASSWORD=${GN}${AUTHENTIK_POSTGRES_PASSWORD}${CL}"
     echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_HOST_VALUE}${CL}"
     echo -e "AUTHENTIK_HOST_BROWSER=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
     echo -e "AUTHENTIK_BOOTSTRAP_EMAIL=${GN}${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${GN}${AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE}${CL}"
-    echo -e "AUTHENTIK_BOOTSTRAP_TOKEN=${GN}${AUTHENTIK_BOOTSTRAP_TOKEN_VALUE}${CL}"
-    if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
-        echo -e "AUTHENTIK_API_TOKEN=${GN}${AUTHENTIK_API_TOKEN_VALUE}${CL}"
-    else
-        echo -e "AUTHENTIK_API_TOKEN=${YW}<not provided>${CL}"
-    fi
-    echo -e "AUTHENTIK_SECRET_KEY=${GN}${AUTHENTIK_SECRET_KEY}${CL}"
-    echo -e "AUTHENTIK_POSTGRES_PASSWORD=${GN}${AUTHENTIK_POSTGRES_PASSWORD}${CL}"
+    echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${GN}${AUTHENTIK_BOOTSTRAP_PASSWORD}${CL}"
+    echo -e "AUTHENTIK_BOOTSTRAP_TOKEN=${GN}${AUTHENTIK_BOOTSTRAP_TOKEN}${CL}"
     echo -e "${YW}Reminder: AUTHENTIK_BOOTSTRAP_TOKEN is not an Authentik API token.${CL}"
     echo -e "POSTIZ_POSTGRES_PASSWORD=${GN}${POSTIZ_POSTGRES_PASSWORD}${CL}"
     echo -e "POSTIZ_JWT_SECRET=${GN}${POSTIZ_JWT_SECRET}${CL}"
@@ -2395,8 +1997,6 @@ function show_clean_final_summary() {
     detail_line "TRAEFIK DYNAMIC CONFIG" "$TRAEFIK_DYNAMIC_CONFIG_FILE"
     detail_line "TRAEFIK ACME STORAGE" "${TRAEFIK_ACME_DIR}/acme.json"
     detail_line "TRAEFIK DASHBOARD HOST" "$TRAEFIK_DASHBOARD_HOST"
-    detail_line "ADMIN UI" "$ADMIN_UI_DISPLAY_NAME"
-    detail_line "AUTHENTIK HOST" "$AUTHENTIK_HOST_VALUE"
     detail_line "CLOUDFLARE TOKEN FILE" "$CF_API_TOKEN_FILE"
     detail_line "HTPASSWD FILE" "${DOCKER_SECRETS_DIR}/htpasswd"
     detail_line "DOMAIN" "$DOMAIN_VALUE"
@@ -2429,22 +2029,19 @@ function main() {
     collect_user_and_path_inputs
     detect_existing_setup
     collect_domain_cloudflare_inputs
-    collect_admin_ui_inputs
-    collect_authentik_inputs
     collect_traefik_inputs
     collect_htpasswd_inputs
-    show_ready_summary_and_confirm
+    collect_admin_ui_selection
+    collect_authentik_bootstrap_inputs
 
     create_docker_directories
     generate_or_reuse_secrets
     create_postgres_init_script
     create_traefik_config_files
-    verify_traefik_config_files_created
     write_secret_files
     write_env_file
     apply_permissions
 
-    pause_before_secret_display
     show_secrets_once_without_logging
 
     write_completion_marker
