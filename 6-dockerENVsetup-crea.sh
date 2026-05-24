@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.4.1"
+SCRIPT_VERSION="v1.4.2"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="pg18-redis-authentik-smtp-prereqs"
+SCRIPT_BUILD="domain-value-env-write-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -2125,7 +2125,7 @@ AUTHENTIK_EMAIL__PASSWORD=""
 AUTHENTIK_EMAIL__USE_TLS="true"
 AUTHENTIK_EMAIL__USE_SSL="false"
 AUTHENTIK_EMAIL__TIMEOUT="30"
-AUTHENTIK_EMAIL__FROM="authentik@${DOMAIN}"
+AUTHENTIK_EMAIL__FROM="authentik@${DOMAIN_VALUE}"
 
 # --- Postiz ---
 POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
