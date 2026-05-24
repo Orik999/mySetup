@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.5"
+SCRIPT_VERSION="v1.3.6"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="temporal-readiness-preflight-diagnostics"
+SCRIPT_BUILD="postgres-readiness-before-temporal"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -816,6 +816,67 @@ function wait_for_temporal_ready() {
 
     echo ""
     msg_error "Temporal is not reachable on ${temporal_address}. Fix Temporal/PostgreSQL startup before running Postiz Temporal Guard."
+}
+
+
+# --- 29D. POSTGRESQL DIAGNOSTIC HELPER ---
+# Prints actionable PostgreSQL container state and recent logs when readiness fails.
+function show_postgres_diagnostics() {
+    echo ""
+    echo -e "${YW}PostgreSQL diagnostics:${CL}"
+
+    echo -e "${BL}Container state:${CL}"
+    docker_cmd ps -a --filter "name=postgres" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}PostgreSQL health detail:${CL}"
+    docker_cmd inspect postgres --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} error={{.State.Error}}' 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}PostgreSQL logs, last 160 lines:${CL}"
+    docker_cmd logs --tail=160 postgres 2>/dev/null || true
+}
+
+# --- 29E. POSTGRESQL READINESS WAIT HELPER ---
+# Verifies PostgreSQL is accepting connections before dependent stacks start.
+# Temporal waits on PostgreSQL internally, but starting it before PostgreSQL is
+# actually ready can leave Temporal unhealthy and block Postiz Temporal Guard.
+function wait_for_postgres_ready() {
+    section "POSTGRESQL READINESS CHECK"
+
+    local attempt=""
+    local max_attempts="150"
+    local err_file=""
+
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    msg_info "Waiting for PostgreSQL to accept local connections"
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        if docker_cmd exec postgres sh -c 'pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1 || pg_isready >/dev/null 2>&1' 2>"$err_file"; then
+            msg_ok "POSTGRESQL READY"
+            detail_line "PostgreSQL container" "postgres"
+            rm -f "$err_file"
+            return 0
+        fi
+
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
+            tty_println "${BFR}${YW}PostgreSQL not ready yet (${attempt}/${max_attempts}). Waiting before Temporal/AuthentiK/Postiz dependencies...${CL}"
+        fi
+
+        sleep 2
+    done
+
+    echo ""
+    msg_warn "PostgreSQL did not become ready before dependent stacks."
+    echo -e "${RD}Last PostgreSQL readiness error:${CL}"
+    cat "$err_file" 2>/dev/null || true
+
+    show_postgres_diagnostics
+
+    echo ""
+    msg_error "PostgreSQL is not accepting connections. Fix PostgreSQL startup/permissions before deploying Temporal."
 }
 
 
@@ -1734,6 +1795,10 @@ function deploy_selected_stacks() {
             else
                 msg_warn "Container ${service} not confirmed yet. It may still be starting; check docker logs if needed."
             fi
+        fi
+
+        if [ "$file" == "$POSTGRES_STACK_FILE" ]; then
+            wait_for_postgres_ready
         fi
 
         if [ "$file" == "$TEMPORAL_STACK_FILE" ]; then
