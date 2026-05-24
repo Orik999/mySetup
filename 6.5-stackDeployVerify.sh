@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.12"
+SCRIPT_VERSION="v1.3.13"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="postgres-pg18-latest-compatibility-pin"
+SCRIPT_BUILD="pg18-redis-authentik-dockge-finalizer"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -151,6 +151,14 @@ TRAEFIK_DNS_DELAY_OK="no"
 TRAEFIK_ENCODED_CHARS_OK="no"
 TRAEFIK_AUTHENTIK_REFERENCES_OK="no"
 AUTHENTIK_FOLDERS_OK="no"
+AUTHENTIK_API_OK="not-run"
+AUTHENTIK_PROVIDER_OK="not-run"
+AUTHENTIK_APPLICATION_OK="not-run"
+AUTHENTIK_OUTPOST_ATTACH_OK="not-run"
+AUTHENTIK_OUTPOST_302_OK="not-run"
+PROTECTED_ROUTE_VERIFY_OK="not-run"
+AUTHENTIK_API_TOKEN="${AUTHENTIK_API_TOKEN:-}"
+AUTHENTIK_API_BASE=""
 CF_COMPANION_SECRET_OK="skipped"
 FILEBROWSER_FOLDERS_OK="skipped"
 SUDO_CMD=""
@@ -530,6 +538,29 @@ function timed_text_input() {
     echo "$answer"
 }
 
+# --- SENSITIVE INPUT HELPER ---
+# Reads secrets/tokens without countdown timers and without echoing the value.
+function sensitive_line_input() {
+    local prompt="$1"
+    local answer=""
+
+    if [ -w /dev/tty ]; then
+        tty_print " ${HOLD} ${YW}${prompt}:${CL} "
+        stty -echo < /dev/tty 2>/dev/null || true
+        IFS= read -r answer < /dev/tty || answer=""
+        stty echo < /dev/tty 2>/dev/null || true
+        tty_println ""
+    else
+        echo -ne " ${HOLD} ${YW}${prompt}:${CL} " >&2
+        stty -echo 2>/dev/null || true
+        IFS= read -r answer || answer=""
+        stty echo 2>/dev/null || true
+        echo "" >&2
+    fi
+
+    printf '%s' "$answer"
+}
+
 # =========================================================
 #  VALIDATION HELPERS
 # =========================================================
@@ -904,11 +935,11 @@ function show_postgres_diagnostics() {
     echo ""
     echo -e "${BL}PostgreSQL host path detail:${CL}"
     if [ -n "$SUDO_CMD" ]; then
-        "$SUDO_CMD" stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/data" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
-        "$SUDO_CMD" find "${DOCKER_DIR}/appdata/postgres/data" -maxdepth 1 -mindepth 1 -printf '%u:%g %m %f\n' 2>/dev/null | head -20 || true
+        "$SUDO_CMD" stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/pgdata" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
+        "$SUDO_CMD" find "${DOCKER_DIR}/appdata/postgres/pgdata" -maxdepth 1 -mindepth 1 -printf '%u:%g %m %f\n' 2>/dev/null | head -20 || true
     else
-        stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/data" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
-        find "${DOCKER_DIR}/appdata/postgres/data" -maxdepth 1 -mindepth 1 -printf '%u:%g %m %f\n' 2>/dev/null | head -20 || true
+        stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/pgdata" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
+        find "${DOCKER_DIR}/appdata/postgres/pgdata" -maxdepth 1 -mindepth 1 -printf '%u:%g %m %f\n' 2>/dev/null | head -20 || true
     fi
 
     echo ""
@@ -1558,28 +1589,11 @@ function upsert_public_env_value() {
 }
 
 function ensure_postgres_image_compatibility() {
-    if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
-        return 0
-    fi
-
-    section "POSTGRESQL IMAGE COMPATIBILITY"
-
-    local current_image=""
-    local safe_image="postgres:16-alpine"
-
-    current_image="$(env_value POSTGRES_IMAGE)"
-
-    case "$current_image" in
-        ""|postgres:latest|postgres:18|postgres:18-*|postgres:18.*|*:latest)
-            msg_warn "POSTGRES_IMAGE is ${current_image:-unset}; pinning to ${safe_image} to avoid PostgreSQL 18 Docker image layout breakage."
-            upsert_public_env_value "POSTGRES_IMAGE" "$safe_image"
-            msg_ok "POSTGRES_IMAGE PINNED TO ${safe_image}"
-            ;;
-        *)
-            msg_ok "POSTGRES_IMAGE COMPATIBLE: ${current_image}"
-            ;;
-    esac
+    # PostgreSQL latest / 18+ is supported by YML 02 using pgdata:/var/lib/postgresql.
+    # Do not pin or rewrite POSTGRES_IMAGE here; Script 7 can create an image lock report later.
+    return 0
 }
+
 
 function require_nonempty_env_value() {
     local key="$1"
@@ -1602,7 +1616,7 @@ function prepare_postgres_runtime_prereqs() {
     section "POSTGRESQL RUNTIME PREREQS"
 
     local pg_root_dir="${DOCKER_DIR}/appdata/postgres"
-    local pg_data_dir="${pg_root_dir}/data"
+    local pg_data_dir="${pg_root_dir}/pgdata"
     local pg_init_dir="${pg_root_dir}/init"
     local pg_container_status=""
     local pg_health_status=""
@@ -1623,7 +1637,7 @@ function prepare_postgres_runtime_prereqs() {
         if [ -n "$SUDO_CMD" ]; then
             if "$SUDO_CMD" find "$pg_data_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
                 backup_dir="${pg_data_dir}.broken-$(date +%Y%m%d-%H%M%S)"
-                msg_warn "PostgreSQL data directory has files but no PG_VERSION; preserving it as a broken partial init backup."
+                msg_warn "PostgreSQL pgdata directory has files but no PG_VERSION; preserving it as a broken partial init backup."
                 run_cmd "backing up partial PostgreSQL data directory" mv "$pg_data_dir" "$backup_dir"
                 run_cmd "recreating clean PostgreSQL data directory" mkdir -p "$pg_data_dir"
                 detail_line "Partial data backup" "$backup_dir"
@@ -1631,7 +1645,7 @@ function prepare_postgres_runtime_prereqs() {
         else
             if find "$pg_data_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
                 backup_dir="${pg_data_dir}.broken-$(date +%Y%m%d-%H%M%S)"
-                msg_warn "PostgreSQL data directory has files but no PG_VERSION; preserving it as a broken partial init backup."
+                msg_warn "PostgreSQL pgdata directory has files but no PG_VERSION; preserving it as a broken partial init backup."
                 run_cmd "backing up partial PostgreSQL data directory" mv "$pg_data_dir" "$backup_dir"
                 run_cmd "recreating clean PostgreSQL data directory" mkdir -p "$pg_data_dir"
                 detail_line "Partial data backup" "$backup_dir"
@@ -1662,7 +1676,64 @@ function prepare_postgres_runtime_prereqs() {
     fi
 }
 
-# --- 33E. ADMIN UI SELECTION VERIFICATION ---
+# --- 33E. REDIS RUNTIME PREREQUISITE REPAIR ---
+# Applies the proven Redis host directory permissions before Redis is started.
+# Redis persistence writes to /data and must be owned by Redis UID/GID 999.
+function prepare_redis_runtime_prereqs() {
+    local redis_data_dir="${DOCKER_DIR}/appdata/redis"
+
+    if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
+        return 0
+    fi
+
+    section "REDIS RUNTIME PREREQS"
+
+    msg_info "Preparing Redis persistent data directory"
+    run_cmd "creating Redis data directory" mkdir -p "$redis_data_dir"
+    run_cmd "setting Redis data ownership" chown -R 999:999 "$redis_data_dir"
+    run_cmd "setting Redis writable permissions" chmod 770 "$redis_data_dir"
+    msg_ok "REDIS DATA DIRECTORY READY"
+    detail_line "Path" "$redis_data_dir"
+    detail_line "Owner" "999:999"
+    detail_line "Mode" "770"
+}
+
+# --- 33F. REDIS PERSISTENCE VERIFICATION ---
+# Verifies Redis health and persistence before Authentik/Postiz depend on it.
+function verify_redis_persistence_ready() {
+    if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
+        return 0
+    fi
+
+    section "REDIS PERSISTENCE CHECK"
+
+    local attempt=""
+    local max_attempts="60"
+    local health_status=""
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        health_status="$(docker_cmd inspect redis --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
+        if [ "$health_status" == "healthy" ] || [ "$health_status" == "running" ]; then
+            break
+        fi
+        sleep 2
+    done
+
+    if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1; then
+        docker_cmd logs --tail=120 redis 2>/dev/null || true
+        msg_error "Redis BGSAVE failed. Fix ${DOCKER_DIR}/appdata/redis ownership/permissions before deploying Authentik/Postiz."
+    fi
+
+    if docker_cmd logs --tail=200 redis 2>/dev/null | grep -qi 'Permission denied'; then
+        docker_cmd logs --tail=120 redis 2>/dev/null || true
+        msg_error "Redis logs contain Permission denied. Fix Redis /data permissions before continuing."
+    fi
+
+    msg_ok "REDIS PERSISTENCE VERIFIED"
+}
+
+
+# --- 33G. ADMIN UI SELECTION VERIFICATION ---
 # Maps .env ADMIN_UI to expected compose template and service.
 function verify_admin_ui_selection() {
     section "ADMIN UI SELECTION"
@@ -1783,6 +1854,79 @@ function verify_filebrowser_folders() {
 
 # --- 33H. STACK REGISTRY HELPERS ---
 # Uses the fixed uploaded project structure. No GitHub scanning is performed.
+
+# --- 34. DOCKGE COMPOSE LAYOUT SYNC ---
+# Dockge discovers stacks in ${DOCKER_DIR}/compose/<stack name>/compose.yaml.
+# Keep flat files for scripted deployment, but mirror every downloaded stack into
+# the Dockge-friendly folder layout so the UI can manage them afterwards.
+function dockge_stack_dir_name_for_file() {
+    local file="$1"
+
+    case "$file" in
+        "$SOCKET_PROXY_STACK_FILE") echo "socket-proxy" ;;
+        "$DOCKGE_STACK_FILE") echo "dockge" ;;
+        "$DOCKHAND_STACK_FILE") echo "dockhand" ;;
+        "$KOMODO_STACK_FILE") echo "komodo" ;;
+        "$PORTAINER_STACK_FILE") echo "portainer" ;;
+        "$POSTGRES_STACK_FILE") echo "postgres" ;;
+        "$REDIS_STACK_FILE") echo "redis" ;;
+        "$TRAEFIK_STACK_FILE") echo "traefik" ;;
+        "$AUTHENTIK_STACK_FILE") echo "authentik" ;;
+        "$TEMPORAL_STACK_FILE") echo "temporal" ;;
+        "$POSTIZ_TEMPORAL_GUARD_STACK_FILE") echo "postiz-temporal-guard" ;;
+        "$POSTIZ_STACK_FILE") echo "postiz" ;;
+        "$CF_DDNS_STACK_FILE") echo "cf-ddns" ;;
+        "$CF_COMPANION_STACK_FILE") echo "cf-companion" ;;
+        "$VSCODE_STACK_FILE") echo "vscode" ;;
+        "$FILEBROWSER_STACK_FILE") echo "filebrowser" ;;
+        *) echo "${file%.yml}" | sed -E 's/^[0-9]+-//' ;;
+    esac
+}
+
+function sync_compose_file_for_dockge() {
+    local file="$1"
+    local source_path="$2"
+    local stack_dir=""
+    local target_dir=""
+    local target_file=""
+
+    if [ "$ADMIN_UI" != "dockge" ]; then
+        return 0
+    fi
+
+    stack_dir="$(dockge_stack_dir_name_for_file "$file")"
+    target_dir="${COMPOSE_DIR}/${stack_dir}"
+    target_file="${target_dir}/compose.yaml"
+
+    run_cmd "creating Dockge stack folder ${stack_dir}" mkdir -p "$target_dir"
+    run_cmd "syncing ${file} into Dockge compose layout" cp "$source_path" "$target_file"
+    run_cmd "setting Dockge compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target_file"
+    run_cmd "setting Dockge compose permissions" chmod 640 "$target_file"
+    msg_ok "DOCKGE COMPOSE READY: ${target_file}"
+}
+
+function sync_bootstrap_override_for_dockge() {
+    local primary_file="$1"
+    local source_path="$2"
+    local stack_dir=""
+    local target_dir=""
+    local target_file=""
+
+    if [ "$ADMIN_UI" != "dockge" ]; then
+        return 0
+    fi
+
+    stack_dir="$(dockge_stack_dir_name_for_file "$primary_file")"
+    target_dir="${COMPOSE_DIR}/${stack_dir}"
+    target_file="${target_dir}/bootstrap-override.yaml"
+
+    run_cmd "creating Dockge stack folder ${stack_dir}" mkdir -p "$target_dir"
+    run_cmd "syncing bootstrap override into Dockge compose layout" cp "$source_path" "$target_file"
+    run_cmd "setting Dockge bootstrap override ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target_file"
+    run_cmd "setting Dockge bootstrap override permissions" chmod 640 "$target_file"
+    msg_ok "DOCKGE BOOTSTRAP OVERRIDE READY: ${target_file}"
+}
+
 function stack_project_for_file() {
     local file="$1"
     case "$file" in
@@ -1980,22 +2124,10 @@ function verify_selected_compose_env_coverage() {
 }
 
 function patch_postgres_compose_image_compatibility() {
-    local compose_path="$1"
-
-    if ! grep -qE 'postgres:(latest|18([.-][A-Za-z0-9_-]+)?)' "$compose_path"; then
-        msg_ok "POSTGRESQL COMPOSE IMAGE IS ALREADY PINNED"
-        return 0
-    fi
-
-    msg_warn "PostgreSQL compose file references postgres:latest/18; pinning downloaded compose to postgres:16-alpine."
-    run_cmd "pinning PostgreSQL compose image to compatible major" sed -i -E 's|postgres:(latest|18([.-][A-Za-z0-9_-]+)?)|postgres:16-alpine|g' "$compose_path"
-
-    if grep -qE 'postgres:(latest|18([.-][A-Za-z0-9_-]+)?)' "$compose_path"; then
-        msg_error "PostgreSQL compose still references postgres:latest or postgres:18 after compatibility patch."
-    fi
-
-    msg_ok "POSTGRESQL COMPOSE IMAGE PINNED TO POSTGRES 16"
+    # No image pinning/rewrite: YML 02 is PostgreSQL latest/18+ compatible via pgdata:/var/lib/postgresql.
+    return 0
 }
+
 
 function download_fixed_stack_file() {
     local file="$1"
@@ -2009,11 +2141,9 @@ function download_fixed_stack_file() {
     if grep -q "$stale_authentik_docker_middleware" "$target"; then
         msg_error "Forbidden stale Authentik Docker-provider middleware reference found in ${file}."
     fi
-    if [ "$file" == "$POSTGRES_STACK_FILE" ]; then
-        patch_postgres_compose_image_compatibility "$target"
-    fi
     run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target"
     run_cmd "setting compose file permissions" chmod 640 "$target"
+    sync_compose_file_for_dockge "$file" "$target"
     msg_ok "DOWNLOADED ${file}"
 }
 
@@ -2099,6 +2229,10 @@ function deploy_selected_stacks() {
             wait_for_postgres_ready
         fi
 
+        if [ "$file" == "$REDIS_STACK_FILE" ]; then
+            verify_redis_persistence_ready
+        fi
+
         if [ "$file" == "$TEMPORAL_STACK_FILE" ]; then
             wait_for_temporal_ready
         fi
@@ -2128,6 +2262,288 @@ function verify_cf_companion_runtime_if_selected() {
 # =========================================================
 #  NETWORK BOOTSTRAP
 # =========================================================
+
+
+# =========================================================
+#  AUTHENTIK FORWARD-AUTH SETUP / ROUTE VERIFICATION
+# =========================================================
+
+function json_get_first_pk() {
+    python3 -c 'import json,sys; data=json.load(sys.stdin); items=data.get("results", data if isinstance(data, list) else []); print(items[0].get("pk", "") if items else "")'
+}
+
+function json_get_first_uuid_or_pk() {
+    python3 -c 'import json,sys; data=json.load(sys.stdin); items=data.get("results", data if isinstance(data, list) else []); print((items[0].get("pk") or items[0].get("uuid") or "") if items else "")'
+}
+
+function json_escape() {
+    python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'
+}
+
+function collect_authentik_api_token_for_deploy() {
+    if [ -n "${AUTHENTIK_API_TOKEN:-}" ]; then
+        msg_ok "AUTHENTIK API TOKEN FOUND"
+        return 0
+    fi
+
+    AUTHENTIK_API_TOKEN="$(env_value AUTHENTIK_API_TOKEN)"
+    if [ -n "$AUTHENTIK_API_TOKEN" ]; then
+        export AUTHENTIK_API_TOKEN
+        msg_ok "AUTHENTIK API TOKEN LOADED FROM .ENV"
+        return 0
+    fi
+
+    section "AUTHENTIK API TOKEN"
+    echo -e "${YW}A real Authentik API token is required to automate provider/application/outpost setup.${CL}"
+    echo -e "${YW}AUTHENTIK_BOOTSTRAP_TOKEN is not an API token.${CL}"
+    echo -e "${YW}Leave blank to skip automation and keep bootstrap/direct access open.${CL}"
+    AUTHENTIK_API_TOKEN="$(sensitive_line_input "Paste Authentik API token, or leave blank")"
+    AUTHENTIK_API_TOKEN="$(printf '%s' "$AUTHENTIK_API_TOKEN" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -z "$AUTHENTIK_API_TOKEN" ]; then
+        msg_warn "AUTHENTIK API TOKEN NOT PROVIDED; PROTECTED ROUTE AUTOMATION SKIPPED"
+    else
+        export AUTHENTIK_API_TOKEN
+        msg_ok "AUTHENTIK API TOKEN CAPTURED WITHOUT LOGGING"
+    fi
+}
+
+function ak_api() {
+    local method="$1"
+    local endpoint="$2"
+    local data="${3:-}"
+
+    [ -n "${AUTHENTIK_API_TOKEN:-}" ] || return 1
+    AUTHENTIK_API_BASE="${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}/api/v3"
+
+    if [ -n "$data" ]; then
+        curl -ksS -X "$method" "${AUTHENTIK_API_BASE}${endpoint}" \
+            -H "Authorization: Bearer ${AUTHENTIK_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data "$data"
+    else
+        curl -ksS -X "$method" "${AUTHENTIK_API_BASE}${endpoint}" \
+            -H "Authorization: Bearer ${AUTHENTIK_API_TOKEN}" \
+            -H "Accept: application/json"
+    fi
+}
+
+function verify_authentik_api_for_deploy() {
+    section "AUTHENTIK API CHECK"
+
+    if [ -z "${AUTHENTIK_API_TOKEN:-}" ]; then
+        AUTHENTIK_API_OK="skipped-no-token"
+        msg_skip "AUTHENTIK API CHECK SKIPPED"
+        return 0
+    fi
+
+    if ak_api GET "/core/users/me/" >/dev/null 2>&1; then
+        AUTHENTIK_API_OK="yes"
+        msg_ok "AUTHENTIK API ACCESS CONFIRMED"
+    else
+        AUTHENTIK_API_OK="failed"
+        AUTHENTIK_API_TOKEN=""
+        msg_warn "Authentik API token did not authenticate. Protected route automation skipped."
+    fi
+}
+
+function authentik_get_flow_pk() {
+    local slug="$1"
+    ak_api GET "/flows/instances/?slug=${slug}" | json_get_first_pk || true
+}
+
+function authentik_find_proxy_provider_pk() {
+    ak_api GET "/providers/proxy/?search=Traefik%20Forward%20Auth" | json_get_first_pk || true
+}
+
+function authentik_find_application_pk() {
+    ak_api GET "/core/applications/?slug=traefik-forward-auth" | json_get_first_pk || true
+}
+
+function authentik_find_embedded_outpost_pk() {
+    local pk=""
+    pk="$(ak_api GET "/outposts/instances/?search=authentik%20Embedded%20Outpost" | json_get_first_uuid_or_pk || true)"
+    [ -n "$pk" ] || pk="$(ak_api GET "/outposts/instances/?search=Embedded%20Outpost" | json_get_first_uuid_or_pk || true)"
+    printf '%s' "$pk"
+}
+
+function create_or_update_authentik_forward_auth_for_deploy() {
+    section "AUTHENTIK FORWARD-AUTH SETUP"
+
+    if [ "$AUTHENTIK_API_OK" != "yes" ]; then
+        AUTHENTIK_PROVIDER_OK="skipped-no-api"
+        AUTHENTIK_APPLICATION_OK="skipped-no-api"
+        AUTHENTIK_OUTPOST_ATTACH_OK="skipped-no-api"
+        msg_skip "AUTHENTIK API AUTOMATION SKIPPED"
+        return 0
+    fi
+
+    local authorization_flow=""
+    local invalidation_flow=""
+    local provider_pk=""
+    local app_pk=""
+    local outpost_pk=""
+    local payload=""
+    local response_file=""
+    local auth_host_json=""
+    local domain_json=""
+
+    response_file="$(mktemp)"
+    TEMP_FILES+=("$response_file")
+
+    authorization_flow="$(authentik_get_flow_pk "default-provider-authorization-implicit-consent")"
+    [ -n "$authorization_flow" ] || authorization_flow="$(authentik_get_flow_pk "default-provider-authorization-explicit-consent")"
+    invalidation_flow="$(authentik_get_flow_pk "default-provider-invalidation-flow")"
+
+    if [ -z "$authorization_flow" ] || [ -z "$invalidation_flow" ]; then
+        AUTHENTIK_PROVIDER_OK="flow-missing"
+        msg_warn "Required Authentik default provider flows were not found."
+        return 0
+    fi
+
+    auth_host_json="$(printf '%s' "${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}" | json_escape)"
+    domain_json="$(printf '%s' ".${DOMAIN_VALUE}" | json_escape)"
+
+    provider_pk="$(authentik_find_proxy_provider_pk)"
+    payload="$(cat <<JSON
+{
+  "name": "Traefik Forward Auth",
+  "authorization_flow": "${authorization_flow}",
+  "invalidation_flow": "${invalidation_flow}",
+  "mode": "forward_domain",
+  "external_host": ${auth_host_json},
+  "cookie_domain": ${domain_json},
+  "basic_auth_enabled": false,
+  "skip_path_regex": "^/outpost.goauthentik.io/.*$"
+}
+JSON
+)"
+
+    if [ -z "$provider_pk" ]; then
+        ak_api POST "/providers/proxy/" "$payload" > "$response_file" || true
+        provider_pk="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(data.get("pk", ""))' "$response_file" 2>/dev/null || true)"
+    else
+        ak_api PATCH "/providers/proxy/${provider_pk}/" "$payload" > "$response_file" || true
+    fi
+
+    if [ -z "$provider_pk" ]; then
+        AUTHENTIK_PROVIDER_OK="failed"
+        msg_warn "Forward-auth provider automation failed."
+        return 0
+    fi
+    AUTHENTIK_PROVIDER_OK="yes"
+    msg_ok "TRAEFIK FORWARD-AUTH PROVIDER READY"
+
+    app_pk="$(authentik_find_application_pk)"
+    payload="$(cat <<JSON
+{
+  "name": "Traefik Forward Auth",
+  "slug": "traefik-forward-auth",
+  "provider": "${provider_pk}",
+  "meta_launch_url": "${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}"
+}
+JSON
+)"
+
+    if [ -z "$app_pk" ]; then
+        ak_api POST "/core/applications/" "$payload" > "$response_file" || true
+        app_pk="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(data.get("pk", ""))' "$response_file" 2>/dev/null || true)"
+    else
+        ak_api PATCH "/core/applications/${app_pk}/" "$payload" > "$response_file" || true
+    fi
+
+    if [ -z "$app_pk" ]; then
+        AUTHENTIK_APPLICATION_OK="failed"
+        msg_warn "Forward-auth application automation failed."
+        return 0
+    fi
+    AUTHENTIK_APPLICATION_OK="yes"
+    msg_ok "TRAEFIK FORWARD-AUTH APPLICATION READY"
+
+    outpost_pk="$(authentik_find_embedded_outpost_pk)"
+    if [ -z "$outpost_pk" ]; then
+        AUTHENTIK_OUTPOST_ATTACH_OK="not-found"
+        msg_warn "Existing authentik Embedded Outpost was not found; do not create a second custom outpost."
+        return 0
+    fi
+
+    payload="$(cat <<JSON
+{
+  "providers": [${provider_pk}]
+}
+JSON
+)"
+
+    if ak_api PATCH "/outposts/instances/${outpost_pk}/" "$payload" >/dev/null 2>&1; then
+        AUTHENTIK_OUTPOST_ATTACH_OK="yes"
+        msg_ok "PROVIDER ATTACHED TO EXISTING EMBEDDED OUTPOST"
+    else
+        AUTHENTIK_OUTPOST_ATTACH_OK="failed"
+        msg_warn "Outpost attach failed. Attach the provider manually in Authentik."
+    fi
+}
+
+function verify_authentik_outpost_route_for_deploy() {
+    section "AUTHENTIK OUTPOST ROUTE CHECK"
+
+    local test_host="${ADMIN_UI_HOST:-dockge.${DOMAIN_VALUE}}"
+    local test_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
+    local http_code=""
+
+    http_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$test_url" || true)"
+    if [ "$http_code" == "302" ]; then
+        AUTHENTIK_OUTPOST_302_OK="yes"
+        msg_ok "AUTHENTIK OUTPOST ROUTE RETURNED HTTP 302"
+    else
+        AUTHENTIK_OUTPOST_302_OK="no"
+        msg_warn "Authentik outpost route returned HTTP ${http_code:-none}; protected routes may still need UI confirmation."
+    fi
+
+    detail_line "Outpost test URL" "$test_url"
+    detail_line "HTTP result" "${http_code:-none}"
+}
+
+function verify_selected_protected_routes() {
+    section "PROTECTED ROUTE CHECKS"
+
+    local host=""
+    local code=""
+    local failures="0"
+    local hosts=()
+
+    hosts+=("${ADMIN_UI_HOST:-dockge.${DOMAIN_VALUE}}")
+    if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then hosts+=("code.${DOMAIN_VALUE}"); fi
+    if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then hosts+=("fb.${DOMAIN_VALUE}"); fi
+
+    for host in "${hosts[@]}"; do
+        code="$(curl -ksS -o /dev/null -w '%{http_code}' "https://${host}/" || true)"
+        case "$code" in
+            200|302|307|401|403)
+                msg_ok "ROUTE RESPONDED: ${host} HTTP ${code}"
+                ;;
+            *)
+                failures=$((failures + 1))
+                msg_warn "ROUTE CHECK NEEDS ATTENTION: ${host} HTTP ${code:-none}"
+                ;;
+        esac
+    done
+
+    if [ "$failures" -eq 0 ]; then
+        PROTECTED_ROUTE_VERIFY_OK="yes"
+    else
+        PROTECTED_ROUTE_VERIFY_OK="needs-review"
+    fi
+}
+
+function configure_authentik_and_verify_routes() {
+    # Always configure/verify Authentik for the selected admin UI. Optional protected
+    # routes for code/filebrowser are added when those stacks are selected.
+    collect_authentik_api_token_for_deploy
+    verify_authentik_api_for_deploy
+    create_or_update_authentik_forward_auth_for_deploy
+    verify_authentik_outpost_route_for_deploy
+    verify_selected_protected_routes
+}
 
 # --- 34. NETWORK CREATION ---
 # Creates the shared external networks used by all independent compose stacks.
@@ -2247,6 +2663,9 @@ function download_bootstrap_compose_files() {
     run_cmd "setting Socket Proxy compose file permissions" chmod 640 "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
     run_cmd "setting ${ADMIN_UI_DISPLAY_NAME} compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$ADMIN_UI_COMPOSE_FILE" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
     run_cmd "setting ${ADMIN_UI_DISPLAY_NAME} compose permissions" chmod 640 "$ADMIN_UI_COMPOSE_FILE" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+    sync_compose_file_for_dockge "$SOCKET_PROXY_STACK_FILE" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    sync_compose_file_for_dockge "$(basename "$ADMIN_UI_COMPOSE_FILE")" "$ADMIN_UI_COMPOSE_FILE"
+    sync_bootstrap_override_for_dockge "$(basename "$ADMIN_UI_COMPOSE_FILE")" "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
 
     detail_line "Socket Proxy stack" "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
     detail_line "Admin UI stack" "$ADMIN_UI_COMPOSE_FILE"
@@ -2595,11 +3014,11 @@ function show_final_summary() {
     echo ""
     echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} is temporarily available by direct IP for bootstrap:${CL}"
     echo -e "${GN}${ADMIN_UI_BOOTSTRAP_ACCESS_URL}${CL}"
-    echo -e "${YW}Script 7 will close this direct bootstrap port and leave access through Traefik/AuthentiK.${CL}"
+    echo -e "${YW}Script 7 will close this direct bootstrap port only after protected Traefik/AuthentiK access is re-verified.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
     echo -e "${YW}Deploy the remaining application stacks in the documented order.${CL}"
-    echo -e "${YW}After all stacks are stable, run Script 7 for SSO and bootstrap-port hardening.${CL}"
+    echo -e "${YW}After all stacks are stable and protected routes are verified, run Script 7 for hardening, cleanup, image lock reporting and bootstrap-port closure.${CL}"
     echo ""
 }
 
@@ -2664,8 +3083,6 @@ function main() {
     verify_selected_stack_preflight
     show_ready_to_apply
 
-    ensure_postgres_image_compatibility
-
     create_shared_networks
     verify_shared_networks
 
@@ -2674,11 +3091,13 @@ function main() {
     verify_selected_compose_env_coverage
     validate_selected_compose_files
     prepare_postgres_runtime_prereqs
+    prepare_redis_runtime_prereqs
 
     configure_bootstrap_firewall
     deploy_selected_stacks
     verify_bootstrap_containers
     verify_cf_companion_runtime_if_selected
+    configure_authentik_and_verify_routes
     create_verification_report
     write_completion_marker
     show_final_summary

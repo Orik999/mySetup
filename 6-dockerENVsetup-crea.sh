@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.4.0"
+SCRIPT_VERSION="v1.4.1"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="authentik-komodo-env-image-lock-ready"
+SCRIPT_BUILD="pg18-redis-authentik-smtp-prereqs"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1836,7 +1836,9 @@ function create_docker_directories() {
     run_cmd "creating Docker shared directory" mkdir -p "${DOCKER_DIR}/shared"
     run_cmd "creating Docker secrets directory" mkdir -p "${DOCKER_SECRETS_DIR}"
 
-    run_cmd "creating PostgreSQL data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
+    # PostgreSQL 18+ / postgres:latest stores data under /var/lib/postgresql,
+    # so the host bind mount must be the pgdata parent directory, not the old data subdirectory.
+    run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/pgdata"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "creating Redis data directory" mkdir -p "${DOCKER_DIR}/appdata/redis"
 
@@ -2110,6 +2112,21 @@ AUTHENTIK_BOOTSTRAP_TOKEN="${AUTHENTIK_BOOTSTRAP_TOKEN_VALUE}"
 AUTHENTIK_API_TOKEN_MODE="${AUTHENTIK_API_TOKEN_MODE}"
 AUTHENTIK_API_TOKEN="${AUTHENTIK_API_TOKEN_VALUE}"
 
+# --- Authentik runtime safety / optional SMTP ---
+# Disable update-check notifications unless SMTP is deliberately configured later.
+# This prevents a healthy fresh Authentik worker from retrying failed update-notification emails.
+AUTHENTIK_DISABLE_UPDATE_CHECK="true"
+AUTHENTIK_DISABLE_STARTUP_ANALYTICS="true"
+AUTHENTIK_ERROR_REPORTING__ENABLED="false"
+AUTHENTIK_EMAIL__HOST=""
+AUTHENTIK_EMAIL__PORT="587"
+AUTHENTIK_EMAIL__USERNAME=""
+AUTHENTIK_EMAIL__PASSWORD=""
+AUTHENTIK_EMAIL__USE_TLS="true"
+AUTHENTIK_EMAIL__USE_SSL="false"
+AUTHENTIK_EMAIL__TIMEOUT="30"
+AUTHENTIK_EMAIL__FROM="authentik@${DOMAIN}"
+
 # --- Postiz ---
 POSTIZ_POSTGRES_PASSWORD="${POSTIZ_POSTGRES_PASSWORD}"
 POSTIZ_JWT_SECRET="${POSTIZ_JWT_SECRET}"
@@ -2170,8 +2187,9 @@ function apply_permissions() {
     run_cmd "setting secrets directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_SECRETS_DIR"
 
     # Database services: must be owned by the container UID, not by the login user.
-    run_cmd "setting PostgreSQL data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL data permissions" chmod 700 "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "setting PostgreSQL PG18-compatible data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL PG18-compatible data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL PG18-compatible data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
     run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"

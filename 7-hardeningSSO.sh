@@ -23,9 +23,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="7-hardeningSSO.sh"
-SCRIPT_VERSION="v1.4.0"
+SCRIPT_VERSION="v1.4.1"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="new-compose-names-untimed-input-image-lock-report"
+SCRIPT_BUILD="hardening-only-authentik-moved-to-6-5"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -706,9 +706,10 @@ function verify_traefik_dynamic_config() {
     [ -f "$dynamic_config" ] || msg_error "Traefik dynamic config not found: ${dynamic_config}"
     [ -f "$static_config" ] || msg_error "Traefik static config not found: ${static_config}"
 
-    msg_info "Checking for stale authentik@docker references"
-    if grep -q 'authentik@docker' "$dynamic_config"; then
-        msg_error "Stale authentik@docker reference found in dynamic-config.yml. Use authentik@file / authentik middleware instead."
+    msg_info "Checking for stale Authentik Docker-provider middleware references"
+    local stale_authentik_docker_middleware="authentik@""docker"
+    if grep -q "$stale_authentik_docker_middleware" "$dynamic_config"; then
+        msg_error "Stale Authentik Docker-provider middleware reference found in dynamic-config.yml. Use the file-provider authentik middleware instead."
     fi
     msg_ok "NO STALE AUTHENTIK@DOCKER REFERENCES"
 
@@ -761,7 +762,7 @@ function collect_authentik_api_token() {
         return 0
     fi
 
-    echo -e "${YW}Script 7 can automate Authentik app/provider/outpost setup only with a real Authentik API token.${CL}"
+    echo -e "${YW}Authentik app/provider/outpost setup is now handled by Script 6.5; Script 7 is hardening-only.${CL}"
     echo -e "${YW}Leave blank to skip API automation and keep verification/manual guidance only.${CL}"
     echo ""
     echo -e "${BL}Manual token path:${CL}"
@@ -1569,7 +1570,7 @@ EOF2
         docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Networks}}' 2>/dev/null || true
         echo ""
         echo "Traefik recent warnings/errors:"
-        docker_cmd logs traefik --tail=80 2>/dev/null | grep -E 'ERR|WRN|authentik@docker|middleware .* does not exist' || true
+        docker_cmd logs traefik --tail=80 2>/dev/null | grep -E "ERR|WRN|authentik@\"\"docker|middleware .* does not exist" || true
     } | if [ -n "$SUDO_CMD" ]; then "$SUDO_CMD" tee -a "$VERIFY_LOG" >/dev/null; else tee -a "$VERIFY_LOG" >/dev/null; fi
 
     msg_ok "FINAL HARDENING VERIFICATION REPORT WRITTEN"
@@ -1725,11 +1726,12 @@ function main() {
     start_confirmation
 
     verify_traefik_dynamic_config
-    collect_authentik_api_token
-    verify_authentik_api
+    AUTHENTIK_API_OK="handled-by-script-6.5"
+    AUTHENTIK_PROVIDER_OK="handled-by-script-6.5"
+    AUTHENTIK_APPLICATION_OK="handled-by-script-6.5"
+    AUTHENTIK_OUTPOST_ATTACH_OK="handled-by-script-6.5"
+    AUTHENTIK_OUTPOST_302_OK="handled-by-script-6.5"
     show_ready_to_apply
-    create_or_update_authentik_forward_auth
-    verify_authentik_outpost_302
 
     configure_admin_ui_sso
     close_portainer_bootstrap_exposure

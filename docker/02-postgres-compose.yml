@@ -17,7 +17,7 @@ services:
       - database
     volumes:
       # PostgreSQL 18+ / postgres:latest requires a single mount at /var/lib/postgresql.
-      # Keep this separate from the legacy appdata/postgres/data folder to avoid PG18 detecting old layout data.
+      # Keep this separate from legacy failed-init folders to avoid PG18 layout detection issues.
       - ${DOCKER_DIR}/appdata/postgres/pgdata:/var/lib/postgresql
       - ${DOCKER_DIR}/appdata/postgres/init:/docker-entrypoint-initdb.d:ro
     environment:

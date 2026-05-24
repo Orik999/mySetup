@@ -45,6 +45,10 @@ services:
       # Default namespace used by clients/apps.
       DEFAULT_NAMESPACE: default
 
+      # NOTE: Temporal currently logs a future-version warning about --allow-no-auth.
+      # Keep this internal-only deployment working for now; Script 7 image-lock/hardening
+      # should revisit the supported no-auth flag/config before pinning final versions.
+
     healthcheck:
       test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health | grep -qi SERVING || exit 1"]
       interval: 30s
