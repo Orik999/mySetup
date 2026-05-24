@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.1"
+SCRIPT_VERSION="v1.3.2"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="curl-globoff-all-downloads"
+SCRIPT_BUILD="compose-env-var-parser-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1496,15 +1496,25 @@ function verify_compose_env_coverage_for_file() {
     [ -f "$path" ] || msg_error "Compose file missing for env coverage check: ${path}"
 
     while IFS= read -r token; do
-        token="${token#\${}"
-        token="${token%}}"
-        if [[ "$token" == *:-* ]] || [[ "$token" == *-* ]]; then
+        # Convert a compose token like ${DOCKER_DIR} or ${POSTIZ_IMAGE:-image:latest}
+        # into a safe variable name before indirect expansion. This prevents Bash from
+        # treating malformed leftovers such as DOCKER_DIR}} as an indirect variable name.
+        var="${token#\$\{}"
+        var="${var%\}}"
+
+        # Skip variables with compose/default fallbacks because they are not mandatory.
+        if [[ "$var" == *:-* ]] || [[ "$var" == *-* ]]; then
             continue
         fi
-        var="$token"
-        [ -z "$var" ] && continue
+
         # Ignore variables intentionally escaped for container-side shell scripts, e.g. $${i} in one-shot guards.
         [ "$var" == "i" ] && continue
+
+        # Defensive guard before ${!var}; indirect expansion requires a valid shell variable name.
+        if ! [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            continue
+        fi
+
         if ! grep -qE "^${var}=" "$ENV_FILE" && [ -z "${!var:-}" ]; then
             echo -e "${RD}Missing variable for ${file}:${CL} ${var}"
             missing="yes"
