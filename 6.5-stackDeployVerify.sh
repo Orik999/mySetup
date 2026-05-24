@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.11"
+SCRIPT_VERSION="v1.3.12"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="debug-visible-compose-logs-postgres-inspect"
+SCRIPT_BUILD="postgres-pg18-latest-compatibility-pin"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1521,6 +1521,66 @@ function verify_authentik_folders() {
 # READY TO APPLY and before the PostgreSQL stack is started. This avoids the
 # common restart loop caused by data directory ownership/mode problems while
 # preserving the existing database files.
+function upsert_public_env_value() {
+    local key="$1"
+    local value="$2"
+    local tmp_file=""
+
+    tmp_file="$(mktemp)"
+    TEMP_FILES+=("$tmp_file")
+
+    awk -v k="$key" -v v="$value" '
+        BEGIN { done = 0 }
+        $0 ~ "^" k "=" {
+            print k "=" v
+            done = 1
+            next
+        }
+        { print }
+        END {
+            if (done == 0) {
+                print k "=" v
+            }
+        }
+    ' "$ENV_FILE" > "$tmp_file"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" cp "$tmp_file" "$ENV_FILE"
+        "$SUDO_CMD" chown "${DOCKER_USER}:${DOCKER_USER}" "$ENV_FILE" 2>/dev/null || true
+        "$SUDO_CMD" chmod 600 "$ENV_FILE" 2>/dev/null || true
+    else
+        cp "$tmp_file" "$ENV_FILE"
+        chown "${DOCKER_USER}:${DOCKER_USER}" "$ENV_FILE" 2>/dev/null || true
+        chmod 600 "$ENV_FILE" 2>/dev/null || true
+    fi
+
+    export "${key}=${value}"
+}
+
+function ensure_postgres_image_compatibility() {
+    if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
+        return 0
+    fi
+
+    section "POSTGRESQL IMAGE COMPATIBILITY"
+
+    local current_image=""
+    local safe_image="postgres:16-alpine"
+
+    current_image="$(env_value POSTGRES_IMAGE)"
+
+    case "$current_image" in
+        ""|postgres:latest|postgres:18|postgres:18-*|postgres:18.*|*:latest)
+            msg_warn "POSTGRES_IMAGE is ${current_image:-unset}; pinning to ${safe_image} to avoid PostgreSQL 18 Docker image layout breakage."
+            upsert_public_env_value "POSTGRES_IMAGE" "$safe_image"
+            msg_ok "POSTGRES_IMAGE PINNED TO ${safe_image}"
+            ;;
+        *)
+            msg_ok "POSTGRES_IMAGE COMPATIBLE: ${current_image}"
+            ;;
+    esac
+}
+
 function require_nonempty_env_value() {
     local key="$1"
     local value=""
@@ -1919,6 +1979,24 @@ function verify_selected_compose_env_coverage() {
     msg_ok "SELECTED COMPOSE VARIABLE COVERAGE PASSED"
 }
 
+function patch_postgres_compose_image_compatibility() {
+    local compose_path="$1"
+
+    if ! grep -qE 'postgres:(latest|18([.-][A-Za-z0-9_-]+)?)' "$compose_path"; then
+        msg_ok "POSTGRESQL COMPOSE IMAGE IS ALREADY PINNED"
+        return 0
+    fi
+
+    msg_warn "PostgreSQL compose file references postgres:latest/18; pinning downloaded compose to postgres:16-alpine."
+    run_cmd "pinning PostgreSQL compose image to compatible major" sed -i -E 's|postgres:(latest|18([.-][A-Za-z0-9_-]+)?)|postgres:16-alpine|g' "$compose_path"
+
+    if grep -qE 'postgres:(latest|18([.-][A-Za-z0-9_-]+)?)' "$compose_path"; then
+        msg_error "PostgreSQL compose still references postgres:latest or postgres:18 after compatibility patch."
+    fi
+
+    msg_ok "POSTGRESQL COMPOSE IMAGE PINNED TO POSTGRES 16"
+}
+
 function download_fixed_stack_file() {
     local file="$1"
     local target="${COMPOSE_DIR}/${file}"
@@ -1930,6 +2008,9 @@ function download_fixed_stack_file() {
     local stale_authentik_docker_middleware="authentik@""docker"
     if grep -q "$stale_authentik_docker_middleware" "$target"; then
         msg_error "Forbidden stale Authentik Docker-provider middleware reference found in ${file}."
+    fi
+    if [ "$file" == "$POSTGRES_STACK_FILE" ]; then
+        patch_postgres_compose_image_compatibility "$target"
     fi
     run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target"
     run_cmd "setting compose file permissions" chmod 640 "$target"
@@ -2582,6 +2663,8 @@ function main() {
     collect_stack_deployment_choices
     verify_selected_stack_preflight
     show_ready_to_apply
+
+    ensure_postgres_image_compatibility
 
     create_shared_networks
     verify_shared_networks
