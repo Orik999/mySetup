@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.10"
+SCRIPT_VERSION="v1.3.11"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="postgres-preflight-secrets-recursive-perms-partial-backup"
+SCRIPT_BUILD="debug-visible-compose-logs-postgres-inspect"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -725,7 +725,64 @@ function run_docker_cmd() {
     rm -f "$err_file"
 }
 
-# --- 29A. POSTIZ TEMPORAL GUARD RUNNER ---
+# --- 29A. DEBUG STACK SNAPSHOT HELPER ---
+# Temporarily prints compose/container state after each deployment so failures can
+# be diagnosed from real runtime data. This is intentionally verbose for testing
+# and can be cleaned back to the sleek UI after the stack is stable.
+function show_stack_debug_snapshot() {
+    local project="$1"
+    local file="$2"
+    local service="${3:-}"
+
+    echo ""
+    echo -e "${BL}DEBUG SNAPSHOT - ${project^^}${CL}"
+    echo -e "${YW}Compose file:${CL} ${COMPOSE_DIR}/${file}"
+
+    echo ""
+    echo -e "${BL}Compose container state:${CL}"
+    docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" ps -a 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}Compose logs, last 120 lines:${CL}"
+    docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" logs --no-color --tail=120 2>/dev/null || true
+
+    if [ -n "$service" ]; then
+        echo ""
+        echo -e "${BL}Primary container inspect summary: ${service}${CL}"
+        docker_cmd inspect "$service" --format 'name={{.Name}} image={{.Config.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} restart_count={{.RestartCount}} oom={{.State.OOMKilled}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} error={{.State.Error}}' 2>/dev/null || true
+
+        echo ""
+        echo -e "${BL}Primary container mounts: ${service}${CL}"
+        docker_cmd inspect "$service" --format '{{range .Mounts}}source={{.Source}} destination={{.Destination}} type={{.Type}} rw={{.RW}}{{println}}{{end}}' 2>/dev/null || true
+
+        echo ""
+        echo -e "${BL}Primary container logs, last 120 lines: ${service}${CL}"
+        docker_cmd logs --tail=120 "$service" 2>/dev/null || true
+    fi
+}
+
+# --- 29AA. VISIBLE COMPOSE DEPLOYMENT RUNNER ---
+# Runs docker compose up without hiding output, then prints an immediate debug
+# snapshot. This is temporary deployment-testing verbosity.
+function run_compose_up_visible() {
+    local project="$1"
+    local file="$2"
+    local service="${3:-}"
+
+    echo -e "${YW}Command:${CL} docker compose --env-file ${ENV_FILE} -p ${project} -f ${COMPOSE_DIR}/${file} up -d"
+
+    if ! docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up -d; then
+        echo ""
+        echo -e "${RD}Docker compose deployment failed for:${CL} ${project}"
+        show_stack_debug_snapshot "$project" "$file" "$service"
+        exit 1
+    fi
+
+    show_stack_debug_snapshot "$project" "$file" "$service"
+}
+
+
+# --- 29B. POSTIZ TEMPORAL GUARD RUNNER ---
 # Runs the one-shot Temporal guard without hiding the container output. The guard
 # is intentionally verbose because a failure here decides whether Postiz can start.
 function run_postiz_temporal_guard_stack() {
@@ -830,7 +887,19 @@ function show_postgres_diagnostics() {
 
     echo ""
     echo -e "${BL}PostgreSQL health detail:${CL}"
-    docker_cmd inspect postgres --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} error={{.State.Error}} restart_count={{.RestartCount}} oom={{.State.OOMKilled}}' 2>/dev/null || true
+    docker_cmd inspect postgres --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} error={{.State.Error}} restart_count={{.RestartCount}} oom={{.State.OOMKilled}} pid={{.State.Pid}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}PostgreSQL compose state:${CL}"
+    docker_cmd compose --env-file "$ENV_FILE" -p postgres -f "${COMPOSE_DIR}/${POSTGRES_STACK_FILE}" ps -a 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}PostgreSQL container image/entrypoint/cmd:${CL}"
+    docker_cmd inspect postgres --format 'image={{.Config.Image}} entrypoint={{json .Config.Entrypoint}} cmd={{json .Config.Cmd}} working_dir={{.Config.WorkingDir}}' 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}PostgreSQL container mounts:${CL}"
+    docker_cmd inspect postgres --format '{{range .Mounts}}source={{.Source}} destination={{.Destination}} type={{.Type}} rw={{.RW}}{{println}}{{end}}' 2>/dev/null || true
 
     echo ""
     echo -e "${BL}PostgreSQL host path detail:${CL}"
@@ -843,8 +912,12 @@ function show_postgres_diagnostics() {
     fi
 
     echo ""
-    echo -e "${BL}PostgreSQL logs, last 160 lines:${CL}"
-    docker_cmd logs --tail=160 postgres 2>/dev/null || true
+    echo -e "${BL}PostgreSQL compose logs, last 200 lines:${CL}"
+    docker_cmd compose --env-file "$ENV_FILE" -p postgres -f "${COMPOSE_DIR}/${POSTGRES_STACK_FILE}" logs --no-color --tail=200 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}PostgreSQL container logs, last 200 lines:${CL}"
+    docker_cmd logs --tail=200 postgres 2>/dev/null || true
 }
 
 # --- 29E. POSTGRESQL READINESS WAIT HELPER ---
@@ -1930,7 +2003,7 @@ function deploy_selected_stacks() {
         fi
 
         section "DEPLOY STACK - ${project^^}"
-        run_docker_cmd "deploying ${project}" compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up -d
+        run_compose_up_visible "$project" "$file" "$service"
         msg_ok "DEPLOYED ${project^^}"
 
         if [ -n "$service" ]; then
