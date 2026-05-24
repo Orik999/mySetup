@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.14"
+SCRIPT_VERSION="v1.3.15"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="quiet-pulls-bootstrap-token-authentik-gate"
+SCRIPT_BUILD="dockerhub-rate-limit-login-retry"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -164,6 +164,7 @@ CF_COMPANION_SECRET_OK="skipped"
 FILEBROWSER_FOLDERS_OK="skipped"
 SUDO_CMD=""
 DOCKER_NEEDS_SUDO="no"
+DOCKERHUB_LOGIN_ATTEMPTED="no"
 TEMP_FILES=()
 
 NETWORKS_CREATED="no"
@@ -710,8 +711,73 @@ function docker_cmd() {
     fi
 }
 
-# --- 29. DOCKER COMMAND RUNNER ---
-# Runs docker commands quietly, with real stderr on failure.
+# --- 29. DOCKER HUB RATE-LIMIT DETECTION ---
+# Detects Docker Hub anonymous pull throttling and offers a secure docker login retry only when needed.
+function is_dockerhub_rate_limit_error() {
+    local err_file="$1"
+
+    grep -Eiq \
+        'toomanyrequests|unauthenticated pull rate limit|You have reached your unauthenticated pull rate limit|increase-rate-limit|docker\.com/increase-rate-limit' \
+        "$err_file"
+}
+
+# --- 29A. DOCKER HUB LOGIN / RETRY HELPER ---
+# Uses Docker's own login prompt instead of collecting credentials in this script.
+# This keeps passwords/tokens out of script variables and logs.
+function offer_dockerhub_login_and_retry() {
+    local description="$1"
+    local err_file="$2"
+    shift 2
+
+    local login_yn=""
+
+    echo ""
+    echo -e "${YW}! Docker Hub unauthenticated pull rate limit was reached.${CL}"
+    echo -e "${YW}This is not a compose/YAML failure. Docker Hub is throttling anonymous image pulls from this IP.${CL}"
+    echo -e "${YW}Use your Docker Hub username and a Personal Access Token when Docker asks for the password.${CL}"
+    echo ""
+    echo -e "${YW}Original Docker error:${CL}"
+    cat "$err_file"
+    echo ""
+
+    if [ "$DOCKERHUB_LOGIN_ATTEMPTED" == "yes" ]; then
+        return 1
+    fi
+
+    login_yn="$(timed_yes_no "Log in to Docker Hub now and retry this pull/deploy?" "y")"
+    if [[ "$login_yn" =~ ^[Nn] ]]; then
+        echo -e "${YW}Docker Hub login skipped. Run 'docker login' manually, then rerun Script 6.5.${CL}"
+        return 1
+    fi
+
+    DOCKERHUB_LOGIN_ATTEMPTED="yes"
+
+    echo ""
+    echo -e "${YW}Starting Docker Hub login. Paste a Docker Hub Personal Access Token at the password prompt.${CL}"
+    if ! docker_cmd login; then
+        echo -e "${RD}Docker Hub login failed.${CL}"
+        return 1
+    fi
+
+    echo ""
+    msg_info "Retrying after Docker Hub login"
+    : > "$err_file"
+    if docker_cmd "$@" > /dev/null 2> "$err_file"; then
+        msg_ok "${description^^}"
+        return 0
+    fi
+
+    echo ""
+    echo -e "${RD}Retry failed after Docker Hub login during:${CL} ${description}"
+    echo -e "${YW}Command:${CL} docker $*"
+    echo ""
+    echo -e "${RD}Real error:${CL}"
+    cat "$err_file"
+    return 1
+}
+
+# --- 29B. DOCKER COMMAND RUNNER ---
+# Runs docker commands quietly, with Docker Hub rate-limit detection and one secure login retry.
 function run_docker_cmd() {
     local description="$1"
     shift
@@ -721,6 +787,13 @@ function run_docker_cmd() {
     TEMP_FILES+=("$err_file")
 
     if ! docker_cmd "$@" > /dev/null 2> "$err_file"; then
+        if is_dockerhub_rate_limit_error "$err_file"; then
+            if offer_dockerhub_login_and_retry "$description" "$err_file" "$@"; then
+                rm -f "$err_file"
+                return 0
+            fi
+        fi
+
         echo ""
         echo -e "${RD}Docker command failed during:${CL} ${description}"
         echo -e "${YW}Command:${CL} docker $*"
