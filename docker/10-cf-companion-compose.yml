@@ -22,8 +22,8 @@ secrets:
 services:
   cf-companion:
     env_file:
-      - /home/orik/docker/.env
-    image: tiredofit/traefik-cloudflare-companion:latest
+      - ${DOCKER_DIR}/.env
+    image: ${CF_COMPANION_IMAGE:-tiredofit/traefik-cloudflare-companion:latest}
     container_name: cf-companion
     restart: unless-stopped
 

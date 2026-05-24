@@ -11,8 +11,8 @@ name: temporal
 services:
   temporal:
     env_file:
-      - /home/orik/docker/.env
-    image: temporalio/auto-setup:latest
+      - ${DOCKER_DIR}/.env
+    image: ${TEMPORAL_IMAGE:-temporalio/auto-setup:latest}
     container_name: temporal
     restart: unless-stopped
     security_opt:

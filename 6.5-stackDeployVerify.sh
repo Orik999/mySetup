@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.2.1"
-SCRIPT_UPDATED="2026-05-23"
-SCRIPT_BUILD="traefik-template-self-heal-untimed-input"
+SCRIPT_VERSION="v1.3.0"
+SCRIPT_UPDATED="2026-05-24"
+SCRIPT_BUILD="fixed-structure-dependency-aware-stack-deployer"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -49,11 +49,11 @@ TRAEFIK_TEMPLATE_RAW_BASE="${TRAEFIK_TEMPLATE_RAW_BASE:-https://raw.githubuserco
 TRAEFIK_STATIC_TEMPLATE_URL="${TRAEFIK_STATIC_TEMPLATE_URL:-${TRAEFIK_TEMPLATE_RAW_BASE}/traefik.yml.template}"
 TRAEFIK_DYNAMIC_TEMPLATE_URL="${TRAEFIK_DYNAMIC_TEMPLATE_URL:-${TRAEFIK_TEMPLATE_RAW_BASE}/dynamic-config.yml.template}"
 SOCKET_PROXY_STACK_FILE="00-socket-proxy-compose.yml"
-PORTAINER_STACK_FILE="01-portainer-compose.yml"
-PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME="01-portainer-bootstrap-override.yml"
-DOCKGE_STACK_FILE="13-dockge-compose.yml"
-KOMODO_STACK_FILE="14-komodo-compose.yml"
-DOCKHAND_STACK_FILE="15-dockhand-compose.yml"
+PORTAINER_STACK_FILE="01-[4]-portainer-compose.yml"
+PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME="01-[4]-portainer-bootstrap-override.yml"
+DOCKGE_STACK_FILE="01-[1]-dockge-compose.yml"
+KOMODO_STACK_FILE="01-[3]-komodo-compose.yml"
+DOCKHAND_STACK_FILE="01-[2]-dockhand-compose.yml"
 
 # Optional environment overrides for advanced/testing workflows.
 # If these are not set, URLs are rebuilt from GITHUB_RAW_BASE after user input.
@@ -61,13 +61,13 @@ SOCKET_PROXY_STACK_URL_OVERRIDE="${SOCKET_PROXY_STACK_URL:-}"
 PORTAINER_STACK_URL_OVERRIDE="${PORTAINER_STACK_URL:-}"
 PORTAINER_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${PORTAINER_BOOTSTRAP_OVERRIDE_URL:-}"
 DOCKGE_STACK_URL_OVERRIDE="${DOCKGE_STACK_URL:-}"
-DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME="13-dockge-bootstrap-override.yml"
+DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME="01-[1]-dockge-bootstrap-override.yml"
 DOCKGE_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${DOCKGE_BOOTSTRAP_OVERRIDE_URL:-}"
 KOMODO_STACK_URL_OVERRIDE="${KOMODO_STACK_URL:-}"
-KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME="14-komodo-bootstrap-override.yml"
+KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME="01-[3]-komodo-bootstrap-override.yml"
 KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${KOMODO_BOOTSTRAP_OVERRIDE_URL:-}"
 DOCKHAND_STACK_URL_OVERRIDE="${DOCKHAND_STACK_URL:-}"
-DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME="15-dockhand-bootstrap-override.yml"
+DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME="01-[2]-dockhand-bootstrap-override.yml"
 DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE="${DOCKHAND_BOOTSTRAP_OVERRIDE_URL:-}"
 SOCKET_PROXY_STACK_URL="${SOCKET_PROXY_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${SOCKET_PROXY_STACK_FILE}}"
 PORTAINER_STACK_URL="${PORTAINER_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${PORTAINER_STACK_FILE}}"
@@ -78,6 +78,31 @@ KOMODO_STACK_URL="${KOMODO_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${KOMODO_STACK
 KOMODO_BOOTSTRAP_OVERRIDE_URL="${KOMODO_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
 DOCKHAND_STACK_URL="${DOCKHAND_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKHAND_STACK_FILE}}"
 DOCKHAND_BOOTSTRAP_OVERRIDE_URL="${DOCKHAND_BOOTSTRAP_OVERRIDE_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME}}"
+
+
+# Fixed project stack registry. No GitHub directory scanning is used.
+POSTGRES_STACK_FILE="02-postgres-compose.yml"
+REDIS_STACK_FILE="03-redis-compose.yml"
+TRAEFIK_STACK_FILE="04-traefik-compose.yml"
+AUTHENTIK_STACK_FILE="05-authentik-compose.yml"
+TEMPORAL_STACK_FILE="06-temporal-compose.yml"
+POSTIZ_TEMPORAL_GUARD_STACK_FILE="07-postiz-temporal-guard-compose.yml"
+POSTIZ_STACK_FILE="08-postiz-compose.yml"
+CF_DDNS_STACK_FILE="09-cf-ddns-compose.yml"
+CF_COMPANION_STACK_FILE="10-cf-companion-compose.yml"
+VSCODE_STACK_FILE="11-vscode-compose.yml"
+FILEBROWSER_STACK_FILE="12-filebrowser-compose.yml"
+
+DEPLOY_POSTIZ="n"
+DEPLOY_CF_DDNS="n"
+DEPLOY_CF_COMPANION="n"
+DEPLOY_VSCODE="n"
+DEPLOY_FILEBROWSER="n"
+
+SELECTED_STACK_FILES=()
+SELECTED_STACK_PROJECTS=()
+SELECTED_STACK_SERVICES=()
+DEPENDENCY_REASONS=()
 
 SOCKET_PROXY_SUBNET_EXPECTED="192.168.91.0/24"
 T2_PROXY_SUBNET_EXPECTED="192.168.90.0/24"
@@ -98,11 +123,11 @@ ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE=""
 ADMIN_UI_BOOTSTRAP_ACCESS_IP=""
 ADMIN_UI_BOOTSTRAP_ACCESS_URL=""
 
-ADMIN_UI="${ADMIN_UI:-portainer}"
-ADMIN_UI_DISPLAY_NAME="Portainer"
-ADMIN_UI_SERVICE_NAME="portainer"
+ADMIN_UI="${ADMIN_UI:-dockge}"
+ADMIN_UI_DISPLAY_NAME="Dockge"
+ADMIN_UI_SERVICE_NAME="dockge"
 ADMIN_UI_COMPOSE_FILE=""
-ADMIN_UI_PROJECT_NAME="portainer"
+ADMIN_UI_PROJECT_NAME="dockge"
 ADMIN_UI_HOST=""
 ADMIN_UI_URL=""
 ADMIN_UI_DEPLOYED="no"
@@ -973,9 +998,21 @@ function collect_bootstrap_settings() {
     fi
 
     DOCKER_DIR="$(timed_text_input "Enter Docker directory" "$DOCKER_DIR")"
-    COMPOSE_DIR="$(timed_text_input "Enter Docker compose directory" "$COMPOSE_DIR")"
-    ENV_FILE="$(timed_text_input "Enter Docker .env path" "$ENV_FILE")"
+    ENV_FILE="$(timed_text_input "Enter Docker .env path" "${DOCKER_DIR}/.env")"
+
+    if [ -f "$ENV_FILE" ]; then
+        # shellcheck disable=SC1090
+        set -a
+        . "$ENV_FILE"
+        set +a
+        DOCKER_DIR="${DOCKER_DIR:-$(env_value DOCKER_DIR)}"
+        COMPOSE_DIR="${COMPOSE_DIR:-$(env_value COMPOSE_DIR)}"
+    fi
+
+    COMPOSE_DIR="$(timed_text_input "Enter Docker compose directory" "${COMPOSE_DIR:-${DOCKER_DIR}/compose}")"
     GITHUB_RAW_BASE="$(timed_text_input "Enter GitHub raw compose base" "$GITHUB_RAW_BASE")"
+
+    export DOCKER_DIR COMPOSE_DIR ENV_FILE
 
     if ! validate_url "$GITHUB_RAW_BASE"; then
         msg_error "GitHub raw base is not a valid HTTP/HTTPS URL."
@@ -1042,6 +1079,15 @@ function validate_project_paths() {
     run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
     run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$COMPOSE_DIR"
 
+    # shellcheck disable=SC1090
+    set -a
+    . "$ENV_FILE"
+    set +a
+
+    DOCKER_DIR="${DOCKER_DIR:-$(env_value DOCKER_DIR)}"
+    COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"
+    export DOCKER_DIR COMPOSE_DIR ENV_FILE
+
     DOMAIN_VALUE="$(env_value DOMAIN)"
     DOCKER_SECRETS_DIR="$(env_value DOCKER_SECRETS_DIR)"
     CF_API_TOKEN_FILE="$(env_value CF_API_TOKEN_FILE)"
@@ -1053,7 +1099,7 @@ function validate_project_paths() {
     PROXMOX_HOST="$(env_value PROXMOX_HOST)"
     PROXMOX_URL="$(env_value PROXMOX_URL)"
     ADMIN_UI="$(env_value ADMIN_UI)"
-    ADMIN_UI="${ADMIN_UI:-portainer}"
+    ADMIN_UI="${ADMIN_UI:-dockge}"
 
     TRAEFIK_STATIC_CONFIG_FILE="$(env_value TRAEFIK_STATIC_CONFIG_FILE)"
     [ -z "$TRAEFIK_STATIC_CONFIG_FILE" ] && TRAEFIK_STATIC_CONFIG_FILE="${DOCKER_DIR}/appdata/traefik/traefik.yml"
@@ -1202,9 +1248,9 @@ function verify_admin_ui_selection() {
             ;;
         portainer|portainer-ce)
             ADMIN_UI="portainer"
-            ADMIN_UI_PROJECT_NAME="portainer"
-            ADMIN_UI_SERVICE_NAME="portainer"
-            ADMIN_UI_DISPLAY_NAME="Portainer"
+            ADMIN_UI_PROJECT_NAME="dockge"
+            ADMIN_UI_SERVICE_NAME="dockge"
+            ADMIN_UI_DISPLAY_NAME="Dockge"
             ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
             ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME"
             ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}"
@@ -1298,6 +1344,306 @@ function verify_filebrowser_folders() {
     FILEBROWSER_FOLDERS_OK="yes"
 }
 
+
+# --- 33H. STACK REGISTRY HELPERS ---
+# Uses the fixed uploaded project structure. No GitHub scanning is performed.
+function stack_project_for_file() {
+    local file="$1"
+    case "$file" in
+        "$POSTGRES_STACK_FILE") echo "postgres" ;;
+        "$REDIS_STACK_FILE") echo "redis" ;;
+        "$TRAEFIK_STACK_FILE") echo "traefik" ;;
+        "$AUTHENTIK_STACK_FILE") echo "authentik" ;;
+        "$TEMPORAL_STACK_FILE") echo "temporal" ;;
+        "$POSTIZ_TEMPORAL_GUARD_STACK_FILE") echo "postiz-temporal-guard" ;;
+        "$POSTIZ_STACK_FILE") echo "postiz" ;;
+        "$CF_DDNS_STACK_FILE") echo "cf-ddns" ;;
+        "$CF_COMPANION_STACK_FILE") echo "cf-companion" ;;
+        "$VSCODE_STACK_FILE") echo "vscode" ;;
+        "$FILEBROWSER_STACK_FILE") echo "filebrowser" ;;
+        *) echo "${file%.yml}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+
+function stack_primary_service_for_file() {
+    local file="$1"
+    case "$file" in
+        "$POSTGRES_STACK_FILE") echo "postgres" ;;
+        "$REDIS_STACK_FILE") echo "redis" ;;
+        "$TRAEFIK_STACK_FILE") echo "traefik" ;;
+        "$AUTHENTIK_STACK_FILE") echo "authentik-server" ;;
+        "$TEMPORAL_STACK_FILE") echo "temporal" ;;
+        "$POSTIZ_TEMPORAL_GUARD_STACK_FILE") echo "postiz-temporal-guard" ;;
+        "$POSTIZ_STACK_FILE") echo "postiz" ;;
+        "$CF_DDNS_STACK_FILE") echo "cf-ddns" ;;
+        "$CF_COMPANION_STACK_FILE") echo "cf-companion" ;;
+        "$VSCODE_STACK_FILE") echo "vscode" ;;
+        "$FILEBROWSER_STACK_FILE") echo "filebrowser" ;;
+        *) echo "" ;;
+    esac
+}
+
+function add_selected_stack_once() {
+    local file="$1"
+    local reason="$2"
+    local existing=""
+
+    for existing in "${SELECTED_STACK_FILES[@]}"; do
+        [ "$existing" == "$file" ] && return 0
+    done
+
+    SELECTED_STACK_FILES+=("$file")
+    SELECTED_STACK_PROJECTS+=("$(stack_project_for_file "$file")")
+    SELECTED_STACK_SERVICES+=("$(stack_primary_service_for_file "$file")")
+    DEPENDENCY_REASONS+=("$reason")
+}
+
+function add_authentik_routing_dependencies() {
+    local source_reason="$1"
+
+    add_selected_stack_once "$POSTGRES_STACK_FILE" "PostgreSQL auto-selected because ${source_reason} requires Authentik/database-backed SSO."
+    add_selected_stack_once "$REDIS_STACK_FILE" "Redis auto-selected because ${source_reason} requires Authentik cache/session storage."
+    add_selected_stack_once "$TRAEFIK_STACK_FILE" "Traefik auto-selected because ${source_reason} requires HTTPS routing."
+    add_selected_stack_once "$AUTHENTIK_STACK_FILE" "Authentik auto-selected because ${source_reason} is protected by file-provider forward-auth."
+}
+
+function add_traefik_only_dependency() {
+    local source_reason="$1"
+    add_selected_stack_once "$TRAEFIK_STACK_FILE" "Traefik auto-selected because ${source_reason} requires Traefik routing/labels."
+}
+
+# --- 33I. STACK DEPLOYMENT CHOICE COLLECTION ---
+# Collects all deployment choices before any compose files, networks or containers are changed.
+function collect_stack_deployment_choices() {
+    section "STACK DEPLOYMENT SELECTION"
+
+    echo -e "${YW}Socket Proxy is required and will always be deployed.${CL}"
+    echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} was selected in Script 6 and will be deployed with temporary bootstrap access.${CL}"
+    echo ""
+
+    DEPLOY_POSTIZ="$(timed_yes_no "Deploy Postiz social media stack?" "y")"
+    if [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
+        add_selected_stack_once "$POSTGRES_STACK_FILE" "PostgreSQL auto-selected because Authentik, Temporal and Postiz need database storage."
+        add_selected_stack_once "$REDIS_STACK_FILE" "Redis auto-selected because Authentik and Postiz need cache/session storage."
+        add_selected_stack_once "$TRAEFIK_STACK_FILE" "Traefik auto-selected because public HTTPS routing is required."
+        add_selected_stack_once "$AUTHENTIK_STACK_FILE" "Authentik auto-selected because SSO/front-door protection is required."
+        add_selected_stack_once "$TEMPORAL_STACK_FILE" "Temporal auto-selected because Postiz requires workflow orchestration."
+        add_selected_stack_once "$POSTIZ_TEMPORAL_GUARD_STACK_FILE" "Postiz Temporal Guard auto-selected because Postiz can crash if Temporal Text attributes remain."
+        add_selected_stack_once "$POSTIZ_STACK_FILE" "Postiz selected by user."
+    else
+        echo -e "${YW}Postiz not selected. You can still deploy optional utility stacks below.${CL}"
+    fi
+
+    DEPLOY_CF_DDNS="$(timed_yes_no "Deploy Cloudflare DDNS stack?" "n")"
+    [[ "$DEPLOY_CF_DDNS" =~ ^[Yy] ]] && add_selected_stack_once "$CF_DDNS_STACK_FILE" "Cloudflare DDNS selected by user."
+
+    DEPLOY_CF_COMPANION="$(timed_yes_no "Deploy Cloudflare Companion DNS automation stack?" "n")"
+    if [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
+        add_traefik_only_dependency "Cloudflare Companion"
+        add_selected_stack_once "$CF_COMPANION_STACK_FILE" "Cloudflare Companion selected by user for Traefik label-driven DNS automation."
+    fi
+
+    DEPLOY_VSCODE="$(timed_yes_no "Deploy VS Code server utility stack?" "n")"
+    if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then
+        add_authentik_routing_dependencies "VS Code"
+        add_selected_stack_once "$VSCODE_STACK_FILE" "VS Code utility stack selected by user."
+    fi
+
+    DEPLOY_FILEBROWSER="$(timed_yes_no "Deploy Filebrowser utility stack?" "n")"
+    if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
+        add_authentik_routing_dependencies "Filebrowser"
+        add_selected_stack_once "$FILEBROWSER_STACK_FILE" "Filebrowser utility stack selected by user."
+    fi
+
+    msg_ok "STACK CHOICES COLLECTED"
+}
+
+# --- 33J. SELECTED STACK PREFLIGHTS ---
+# Performs permission and secret checks for the selected plan before READY TO APPLY.
+function verify_selected_stack_preflight() {
+    section "SELECTED STACK PREFLIGHT"
+
+    if [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
+        verify_redis_host_tuning
+        verify_traefik_rendered_configs
+        verify_authentik_folders
+    fi
+
+    if [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
+        verify_cf_companion_secret_file
+    else
+        CF_COMPANION_SECRET_OK="skipped"
+        msg_skip "CF-COMPANION SECRET CHECK SKIPPED; STACK NOT SELECTED"
+    fi
+
+    if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
+        verify_filebrowser_folders
+    else
+        FILEBROWSER_FOLDERS_OK="skipped"
+        msg_skip "FILEBROWSER FOLDER CHECK SKIPPED; STACK NOT SELECTED"
+    fi
+}
+
+# --- 33K. COMPOSE ENV VARIABLE COVERAGE CHECK ---
+# Checks selected compose files for required ${VARIABLE} references without fallbacks.
+function verify_compose_env_coverage_for_file() {
+    local file="$1"
+    local path="${COMPOSE_DIR}/${file}"
+    local missing="no"
+    local token=""
+    local var=""
+
+    [ -f "$path" ] || msg_error "Compose file missing for env coverage check: ${path}"
+
+    while IFS= read -r token; do
+        token="${token#\${}"
+        token="${token%}}"
+        if [[ "$token" == *:-* ]] || [[ "$token" == *-* ]]; then
+            continue
+        fi
+        var="$token"
+        [ -z "$var" ] && continue
+        # Ignore variables intentionally escaped for container-side shell scripts, e.g. $${i} in one-shot guards.
+        [ "$var" == "i" ] && continue
+        if ! grep -qE "^${var}=" "$ENV_FILE" && [ -z "${!var:-}" ]; then
+            echo -e "${RD}Missing variable for ${file}:${CL} ${var}"
+            missing="yes"
+        fi
+    done < <(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}' "$path" | sort -u || true)
+
+    [ "$missing" == "no" ] || msg_error "Compose variable coverage failed for ${file}. Run fixed Script 6 first."
+}
+
+function verify_selected_compose_env_coverage() {
+    section "COMPOSE VARIABLE COVERAGE"
+    local file=""
+
+    verify_compose_env_coverage_for_file "$SOCKET_PROXY_STACK_FILE"
+    verify_compose_env_coverage_for_file "$(basename "$ADMIN_UI_COMPOSE_FILE")"
+
+    for file in "${SELECTED_STACK_FILES[@]}"; do
+        verify_compose_env_coverage_for_file "$file"
+    done
+
+    msg_ok "SELECTED COMPOSE VARIABLE COVERAGE PASSED"
+}
+
+function download_fixed_stack_file() {
+    local file="$1"
+    local target="${COMPOSE_DIR}/${file}"
+    local url="${GITHUB_RAW_BASE}/${file}"
+
+    msg_info "Downloading ${file}"
+    curl -fsSL "$url" -o "$target" || msg_error "Failed to download ${url}"
+    [ -s "$target" ] || msg_error "Downloaded file is empty: ${target}"
+    if grep -q 'authentik@docker' "$target"; then
+        msg_error "Forbidden stale authentik@docker reference found in ${file}."
+    fi
+    run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target"
+    run_cmd "setting compose file permissions" chmod 640 "$target"
+    msg_ok "DOWNLOADED ${file}"
+}
+
+function download_selected_compose_files() {
+    section "STACK COMPOSE DOWNLOAD"
+    local file=""
+
+    download_fixed_stack_file "$SOCKET_PROXY_STACK_FILE"
+    download_fixed_stack_file "$(basename "$ADMIN_UI_COMPOSE_FILE")"
+    download_fixed_stack_file "$ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME"
+
+    for file in "${SELECTED_STACK_FILES[@]}"; do
+        download_fixed_stack_file "$file"
+    done
+
+    SOCKET_PROXY_STACK_DOWNLOADED="yes"
+    ADMIN_UI_BOOTSTRAP_OVERRIDE_WRITTEN="downloaded"
+}
+
+function validate_selected_compose_files() {
+    section "SELECTED STACK COMPOSE VALIDATION"
+    local i=""
+    local file=""
+    local project=""
+
+    export DOCKER_DIR COMPOSE_DIR ENV_FILE PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
+
+    msg_info "Validating Socket Proxy stack compose"
+    run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}" config -q
+    msg_ok "SOCKET PROXY STACK COMPOSE VALID"
+
+    msg_info "Validating ${ADMIN_UI_DISPLAY_NAME} stack compose with bootstrap override"
+    run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" config -q
+    msg_ok "${ADMIN_UI_DISPLAY_NAME^^} STACK COMPOSE VALID"
+
+    for i in "${!SELECTED_STACK_FILES[@]}"; do
+        file="${SELECTED_STACK_FILES[$i]}"
+        project="${SELECTED_STACK_PROJECTS[$i]}"
+        msg_info "Validating ${file}"
+        run_docker_cmd "validating ${file}" compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" config -q
+        msg_ok "VALID COMPOSE: ${file}"
+    done
+
+    ADMIN_UI_VALIDATED="yes"
+}
+
+function deploy_selected_stacks() {
+    section "DEPENDENCY-AWARE STACK DEPLOYMENT"
+    local i=""
+    local file=""
+    local project=""
+    local service=""
+
+    deploy_socket_proxy
+    deploy_admin_ui
+
+    for i in "${!SELECTED_STACK_FILES[@]}"; do
+        file="${SELECTED_STACK_FILES[$i]}"
+        project="${SELECTED_STACK_PROJECTS[$i]}"
+        service="${SELECTED_STACK_SERVICES[$i]}"
+
+        if [ "$file" == "$POSTIZ_TEMPORAL_GUARD_STACK_FILE" ]; then
+            section "RUN STACK - POSTIZ TEMPORAL GUARD"
+            echo -e "${YW}Temporal Guard runs after Temporal is up and before Postiz starts. Do NOT restart Temporal after this succeeds.${CL}"
+            run_docker_cmd "running Postiz Temporal Guard" compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up --abort-on-container-exit --exit-code-from postiz-temporal-guard
+            msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
+            continue
+        fi
+
+        section "DEPLOY STACK - ${project^^}"
+        run_docker_cmd "deploying ${project}" compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up -d
+        msg_ok "DEPLOYED ${project^^}"
+
+        if [ -n "$service" ]; then
+            if docker_cmd ps --format '{{.Names}}' | grep -qx "$service"; then
+                msg_ok "RUNNING CONTAINER CONFIRMED: ${service}"
+            else
+                msg_warn "Container ${service} not confirmed yet. It may still be starting; check docker logs if needed."
+            fi
+        fi
+    done
+}
+
+function verify_cf_companion_runtime_if_selected() {
+    section "CF-COMPANION RUNTIME VERIFICATION"
+
+    if ! [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
+        msg_skip "CF-COMPANION RUNTIME CHECK SKIPPED; STACK NOT SELECTED"
+        return 0
+    fi
+
+    if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'cf-companion'; then
+        msg_warn "cf-companion container is not running yet. Check logs after startup."
+        return 0
+    fi
+
+    if docker_cmd logs cf-companion --tail=120 2>/dev/null | grep -Eiq 'unauthorized|authentication failed|invalid token|missing token|permission denied'; then
+        msg_error "Cloudflare Companion logs show authentication/token errors. Verify cf_token secret and API token permissions."
+    fi
+
+    msg_ok "CF-COMPANION LOGS SHOW NO OBVIOUS AUTH FAILURE"
+}
+
 # =========================================================
 #  NETWORK BOOTSTRAP
 # =========================================================
@@ -1372,7 +1718,7 @@ function download_bootstrap_compose_files() {
             msg_info "Downloading Portainer stack compose"
             curl -fsSL "$PORTAINER_STACK_URL" -o "${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
             PORTAINER_STACK_DOWNLOADED="yes"
-            msg_ok "PORTAINER STACK COMPOSE DOWNLOADED"
+            msg_ok "ADMIN UI STACK COMPOSE DOWNLOADED"
 
             msg_info "Downloading Admin UI bootstrap override"
             curl -fsSL "$PORTAINER_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
@@ -1674,7 +2020,7 @@ socket_proxy subnet: $SOCKET_PROXY_SUBNET_ACTUAL
 t2_proxy subnet: $T2_PROXY_SUBNET_ACTUAL
 database network: $DATABASE_NETWORK_NAME
 Socket Proxy stack downloaded: $SOCKET_PROXY_STACK_DOWNLOADED
-Portainer stack downloaded: $PORTAINER_STACK_DOWNLOADED
+Admin stack downloaded: $PORTAINER_STACK_DOWNLOADED
 Portainer bootstrap override downloaded: $PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED
 Dockge stack compose downloaded: $DOCKGE_STACK_DOWNLOADED
 Komodo stack compose downloaded: $KOMODO_STACK_DOWNLOADED
@@ -1713,7 +2059,7 @@ socket_proxy subnet: $SOCKET_PROXY_SUBNET_ACTUAL
 t2_proxy subnet: $T2_PROXY_SUBNET_ACTUAL
 database network: $DATABASE_NETWORK_NAME
 Socket Proxy stack downloaded: $SOCKET_PROXY_STACK_DOWNLOADED
-Portainer stack downloaded: $PORTAINER_STACK_DOWNLOADED
+Admin stack downloaded: $PORTAINER_STACK_DOWNLOADED
 Portainer bootstrap override downloaded: $PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED
 Dockge stack compose downloaded: $DOCKGE_STACK_DOWNLOADED
 Komodo stack compose downloaded: $KOMODO_STACK_DOWNLOADED
@@ -1800,7 +2146,18 @@ function show_ready_to_apply() {
     detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
     detail_line "GitHub raw base" "$GITHUB_RAW_BASE"
     echo ""
-    echo -e "${RD}${CLF}After confirmation, the script will create networks, download compose files, open bootstrap access and deploy containers.${CL}"
+    echo -e "${BL}DEPENDENCY / STACK PLAN:${CL}"
+    detail_line "Required" "Socket Proxy + ${ADMIN_UI_DISPLAY_NAME} bootstrap"
+    if [ "${#SELECTED_STACK_FILES[@]}" -eq 0 ]; then
+        detail_line "Additional stacks" "none selected"
+    else
+        local i=""
+        for i in "${!SELECTED_STACK_FILES[@]}"; do
+            detail_line "${SELECTED_STACK_FILES[$i]}" "${DEPENDENCY_REASONS[$i]}"
+        done
+    fi
+    echo ""
+    echo -e "${RD}${CLF}After confirmation, the script will create networks, download fixed compose files, open bootstrap access and deploy selected containers in safe order.${CL}"
     echo ""
 
     apply_yn="$(timed_yes_no "Apply this Docker Bootstrap setup plan now?" "y")"
@@ -1822,24 +2179,22 @@ function main() {
     collect_bootstrap_settings
     validate_project_paths
     verify_admin_ui_selection
+    collect_stack_deployment_choices
+    verify_selected_stack_preflight
     show_ready_to_apply
 
-    verify_redis_host_tuning
-    verify_traefik_rendered_configs
-    verify_authentik_folders
-    verify_cf_companion_secret_file
-    verify_filebrowser_folders
     create_shared_networks
     verify_shared_networks
 
-    download_bootstrap_compose_files
+    download_selected_compose_files
     verify_admin_ui_bootstrap_override_file
-    validate_bootstrap_compose_files
+    verify_selected_compose_env_coverage
+    validate_selected_compose_files
 
     configure_bootstrap_firewall
-    deploy_socket_proxy
-    deploy_admin_ui
+    deploy_selected_stacks
     verify_bootstrap_containers
+    verify_cf_companion_runtime_if_selected
     create_verification_report
     write_completion_marker
     show_final_summary

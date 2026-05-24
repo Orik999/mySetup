@@ -7,7 +7,7 @@ name: postiz-temporal-guard
 
 services:
   postiz-temporal-guard:
-    image: temporalio/admin-tools:latest
+    image: ${TEMPORAL_ADMIN_TOOLS_IMAGE:-temporalio/admin-tools:latest}
     container_name: postiz-temporal-guard
     restart: "no"
     networks:

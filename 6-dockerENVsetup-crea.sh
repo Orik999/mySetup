@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.3.4"
-SCRIPT_UPDATED="2026-05-23"
-SCRIPT_BUILD="full-audit-regression-fix"
+SCRIPT_VERSION="v1.4.0"
+SCRIPT_UPDATED="2026-05-24"
+SCRIPT_BUILD="authentik-komodo-env-image-lock-ready"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -78,6 +78,10 @@ AUTHENTIK_POSTGRES_PASSWORD=""
 POSTIZ_POSTGRES_PASSWORD=""
 POSTIZ_JWT_SECRET=""
 TEMPORAL_POSTGRES_PASSWORD=""
+KOMODO_DB_PASSWORD=""
+KOMODO_PASSKEY=""
+KOMODO_JWT_SECRET=""
+KOMODO_WEBHOOK_SECRET=""
 
 ADMIN_UI="${DEFAULT_ADMIN_UI}"
 ADMIN_UI_DISPLAY_NAME="Dockge"
@@ -1844,6 +1848,7 @@ function create_docker_directories() {
     run_cmd "creating Filebrowser database directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
     run_cmd "creating Filebrowser config directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
     run_cmd "creating Postiz uploads directory" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
+    run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
 
     case "$ADMIN_UI" in
         dockge)
@@ -1883,6 +1888,10 @@ function generate_or_reuse_secrets() {
     POSTIZ_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_postgres_password")"
     POSTIZ_JWT_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/postiz_jwt_secret")"
     TEMPORAL_POSTGRES_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/temporal_postgres_password")"
+    KOMODO_DB_PASSWORD="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_db_password")"
+    KOMODO_PASSKEY="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_passkey")"
+    KOMODO_JWT_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_jwt_secret")"
+    KOMODO_WEBHOOK_SECRET="$(get_or_generate_secret "${DOCKER_SECRETS_DIR}/komodo_webhook_secret")"
 
     msg_ok "SECRETS GENERATED / REUSED"
 }
@@ -2011,6 +2020,10 @@ function write_secret_files() {
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postiz_postgres_password" "$POSTIZ_POSTGRES_PASSWORD"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/postiz_jwt_secret" "$POSTIZ_JWT_SECRET"
     write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/temporal_postgres_password" "$TEMPORAL_POSTGRES_PASSWORD"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/komodo_db_password" "$KOMODO_DB_PASSWORD"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/komodo_passkey" "$KOMODO_PASSKEY"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/komodo_jwt_secret" "$KOMODO_JWT_SECRET"
+    write_secret_file_no_newline "${DOCKER_SECRETS_DIR}/komodo_webhook_secret" "$KOMODO_WEBHOOK_SECRET"
 
     if [ -n "$CF_API_TOKEN_VALUE" ]; then
         write_secret_file_no_newline "$CF_API_TOKEN_FILE" "$CF_API_TOKEN_VALUE"
@@ -2105,6 +2118,35 @@ POSTIZ_JWT_SECRET="${POSTIZ_JWT_SECRET}"
 TEMPORAL_POSTGRES_PASSWORD="${TEMPORAL_POSTGRES_PASSWORD}"
 TEMPORAL_DBNAME="temporal"
 TEMPORAL_VISIBILITY_DBNAME="temporal_visibility"
+
+# --- Komodo ---
+KOMODO_DB_PASSWORD="${KOMODO_DB_PASSWORD}"
+KOMODO_PASSKEY="${KOMODO_PASSKEY}"
+KOMODO_JWT_SECRET="${KOMODO_JWT_SECRET}"
+KOMODO_WEBHOOK_SECRET="${KOMODO_WEBHOOK_SECRET}"
+
+# --- Image defaults / development mode ---
+# These intentionally default to latest during active testing.
+# Script 7 can generate a lock report after a successful deployment.
+SOCKET_PROXY_IMAGE="tecnativa/docker-socket-proxy:latest"
+DOCKGE_IMAGE="louislam/dockge:latest"
+DOCKHAND_IMAGE="fnsys/dockhand:latest"
+KOMODO_POSTGRES_IMAGE="postgres:latest"
+KOMODO_FERRETDB_IMAGE="ghcr.io/ferretdb/ferretdb:latest"
+KOMODO_CORE_IMAGE="ghcr.io/moghtech/komodo-core:latest"
+KOMODO_PERIPHERY_IMAGE="ghcr.io/moghtech/komodo-periphery:latest"
+PORTAINER_IMAGE="portainer/portainer-ce:latest"
+POSTGRES_IMAGE="postgres:latest"
+REDIS_IMAGE="redis:latest"
+TRAEFIK_IMAGE="traefik:latest"
+AUTHENTIK_IMAGE="ghcr.io/goauthentik/server:latest"
+TEMPORAL_IMAGE="temporalio/auto-setup:latest"
+TEMPORAL_ADMIN_TOOLS_IMAGE="temporalio/admin-tools:latest"
+POSTIZ_IMAGE="ghcr.io/gitroomhq/postiz-app:latest"
+CF_DDNS_IMAGE="oznu/cloudflare-ddns:latest"
+CF_COMPANION_IMAGE="tiredofit/traefik-cloudflare-companion:latest"
+VSCODE_IMAGE="lscr.io/linuxserver/code-server:latest"
+FILEBROWSER_IMAGE="filebrowser/filebrowser:latest"
 EOF
 
     msg_ok "DOCKER .ENV CREATED"
@@ -2237,7 +2279,11 @@ EOF
             authentik_postgres_password \
             postiz_postgres_password \
             postiz_jwt_secret \
-            temporal_postgres_password
+            temporal_postgres_password \
+            komodo_db_password \
+            komodo_passkey \
+            komodo_jwt_secret \
+            komodo_webhook_secret
         do
             if [ -s "${DOCKER_SECRETS_DIR}/${secret_file}" ]; then
                 echo "✓ PASS - ${secret_file} exists and is non-empty"
@@ -2399,6 +2445,21 @@ function show_secrets_once_without_logging() {
     fi
 
     echo ""
+    echo -e "${BL}AUTHENTIK BOOTSTRAP / API:${CL}"
+    echo -e "AUTHENTIK_HOST=${GN}${AUTHENTIK_HOST_VALUE}${CL}"
+    echo -e "AUTHENTIK_HOST_BROWSER=${GN}${AUTHENTIK_HOST_BROWSER_VALUE}${CL}"
+    echo -e "AUTHENTIK_BOOTSTRAP_EMAIL=${GN}${AUTHENTIK_BOOTSTRAP_EMAIL_VALUE}${CL}"
+    echo -e "AUTHENTIK_BOOTSTRAP_PASSWORD=${GN}${AUTHENTIK_BOOTSTRAP_PASSWORD_VALUE}${CL}"
+    echo -e "AUTHENTIK_BOOTSTRAP_TOKEN=${GN}${AUTHENTIK_BOOTSTRAP_TOKEN_VALUE}${CL}"
+    echo -e "AUTHENTIK_API_TOKEN_MODE=${GN}${AUTHENTIK_API_TOKEN_MODE}${CL}"
+    if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
+        echo -e "AUTHENTIK_API_TOKEN=${GN}${AUTHENTIK_API_TOKEN_VALUE}${CL}"
+    else
+        echo -e "AUTHENTIK_API_TOKEN=${YW}<empty / skipped>${CL}"
+    fi
+    echo -e "${YW}Reminder: AUTHENTIK_BOOTSTRAP_TOKEN is not an Authentik API token.${CL}"
+
+    echo ""
     echo -e "${BL}SERVICE SECRETS:${CL}"
     echo -e "POSTGRES_PASSWORD=${GN}${POSTGRES_PASSWORD}${CL}"
     echo -e "REDIS_PASSWORD=${GN}${REDIS_PASSWORD}${CL}"
@@ -2407,6 +2468,10 @@ function show_secrets_once_without_logging() {
     echo -e "POSTIZ_POSTGRES_PASSWORD=${GN}${POSTIZ_POSTGRES_PASSWORD}${CL}"
     echo -e "POSTIZ_JWT_SECRET=${GN}${POSTIZ_JWT_SECRET}${CL}"
     echo -e "TEMPORAL_POSTGRES_PASSWORD=${GN}${TEMPORAL_POSTGRES_PASSWORD}${CL}"
+    echo -e "KOMODO_DB_PASSWORD=${GN}${KOMODO_DB_PASSWORD}${CL}"
+    echo -e "KOMODO_PASSKEY=${GN}${KOMODO_PASSKEY}${CL}"
+    echo -e "KOMODO_JWT_SECRET=${GN}${KOMODO_JWT_SECRET}${CL}"
+    echo -e "KOMODO_WEBHOOK_SECRET=${GN}${KOMODO_WEBHOOK_SECRET}${CL}"
     echo ""
 
     echo -e "${BL}HTPASSWD:${CL}"
@@ -2425,6 +2490,28 @@ function show_secrets_once_without_logging() {
         echo -e "${YW}This is fine when Authentik/Authelia/SSO is used instead of Traefik basic-auth.${CL}"
     fi
 
+
+    echo ""
+    echo -e "${BL}IMAGE DEFAULTS / DEVELOPMENT MODE:${CL}"
+    echo -e "SOCKET_PROXY_IMAGE=${GN}tecnativa/docker-socket-proxy:latest${CL}"
+    echo -e "DOCKGE_IMAGE=${GN}louislam/dockge:latest${CL}"
+    echo -e "DOCKHAND_IMAGE=${GN}fnsys/dockhand:latest${CL}"
+    echo -e "KOMODO_POSTGRES_IMAGE=${GN}postgres:latest${CL}"
+    echo -e "KOMODO_FERRETDB_IMAGE=${GN}ghcr.io/ferretdb/ferretdb:latest${CL}"
+    echo -e "KOMODO_CORE_IMAGE=${GN}ghcr.io/moghtech/komodo-core:latest${CL}"
+    echo -e "KOMODO_PERIPHERY_IMAGE=${GN}ghcr.io/moghtech/komodo-periphery:latest${CL}"
+    echo -e "PORTAINER_IMAGE=${GN}portainer/portainer-ce:latest${CL}"
+    echo -e "POSTGRES_IMAGE=${GN}postgres:latest${CL}"
+    echo -e "REDIS_IMAGE=${GN}redis:latest${CL}"
+    echo -e "TRAEFIK_IMAGE=${GN}traefik:latest${CL}"
+    echo -e "AUTHENTIK_IMAGE=${GN}ghcr.io/goauthentik/server:latest${CL}"
+    echo -e "TEMPORAL_IMAGE=${GN}temporalio/auto-setup:latest${CL}"
+    echo -e "TEMPORAL_ADMIN_TOOLS_IMAGE=${GN}temporalio/admin-tools:latest${CL}"
+    echo -e "POSTIZ_IMAGE=${GN}ghcr.io/gitroomhq/postiz-app:latest${CL}"
+    echo -e "CF_DDNS_IMAGE=${GN}oznu/cloudflare-ddns:latest${CL}"
+    echo -e "CF_COMPANION_IMAGE=${GN}tiredofit/traefik-cloudflare-companion:latest${CL}"
+    echo -e "VSCODE_IMAGE=${GN}lscr.io/linuxserver/code-server:latest${CL}"
+    echo -e "FILEBROWSER_IMAGE=${GN}filebrowser/filebrowser:latest${CL}"
     echo ""
     echo -e "${YW}Sensitive final output above was intentionally not written to ${LOG_FILE}.${CL}"
 
@@ -2459,7 +2546,7 @@ function show_clean_final_summary() {
     echo -e "${YW}Sensitive values were displayed once, not logged, then terminal output was cleared where supported.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Run script 6.5 to create Docker networks and bootstrap socket-proxy + Portainer.${CL}"
+    echo -e "${YW}Run script 6.5 to create Docker networks and deploy the selected dependency-aware stack plan.${CL}"
     echo ""
 }
 

@@ -14,8 +14,8 @@ secrets:
 services:
   traefik:
     env_file:
-      - /home/orik/docker/.env
-    image: traefik:v3.7.1
+      - ${DOCKER_DIR}/.env
+    image: ${TRAEFIK_IMAGE:-traefik:latest}
     container_name: traefik
     restart: unless-stopped
     security_opt:

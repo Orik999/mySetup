@@ -1,4 +1,4 @@
-# 15-dockhand-bootstrap-override.yml
+# 01-[2]-dockhand-bootstrap-override.yml
 # Project: Dockhand Bootstrap Override
 # Purpose: Temporarily exposes Dockhand by direct IP/port before Traefik + Authentik are fully deployed.
 #

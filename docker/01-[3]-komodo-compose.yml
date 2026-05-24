@@ -1,4 +1,4 @@
-# 14-komodo-compose.yml
+# 01-[3]-komodo-compose.yml
 # Project: Komodo
 # Purpose: Advanced Docker/compose deployment platform.
 #
@@ -20,8 +20,8 @@ name: komodo
 services:
   komodo-postgres:
     env_file:
-      - /home/orik/docker/.env
-    image: postgres:17-alpine
+      - ${DOCKER_DIR}/.env
+    image: ${KOMODO_POSTGRES_IMAGE:-postgres:latest}
     container_name: komodo-postgres
     restart: unless-stopped
 
@@ -45,8 +45,8 @@ services:
 
   ferretdb:
     env_file:
-      - /home/orik/docker/.env
-    image: ghcr.io/ferretdb/ferretdb:2
+      - ${DOCKER_DIR}/.env
+    image: ${KOMODO_FERRETDB_IMAGE:-ghcr.io/ferretdb/ferretdb:latest}
     container_name: komodo-ferretdb
     restart: unless-stopped
 
@@ -63,8 +63,8 @@ services:
 
   komodo-core:
     env_file:
-      - /home/orik/docker/.env
-    image: ghcr.io/moghtech/komodo-core:latest
+      - ${DOCKER_DIR}/.env
+    image: ${KOMODO_CORE_IMAGE:-ghcr.io/moghtech/komodo-core:latest}
     container_name: komodo-core
     restart: unless-stopped
 
@@ -107,8 +107,8 @@ services:
 
   komodo-periphery:
     env_file:
-      - /home/orik/docker/.env
-    image: ghcr.io/moghtech/komodo-periphery:latest
+      - ${DOCKER_DIR}/.env
+    image: ${KOMODO_PERIPHERY_IMAGE:-ghcr.io/moghtech/komodo-periphery:latest}
     container_name: komodo-periphery
     restart: unless-stopped
 

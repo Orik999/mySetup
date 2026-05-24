@@ -12,8 +12,8 @@ secrets:
 services:
   cf-ddns:
     env_file:
-      - /home/orik/docker/.env
-    image: oznu/cloudflare-ddns:latest
+      - ${DOCKER_DIR}/.env
+    image: ${CF_DDNS_IMAGE:-oznu/cloudflare-ddns:latest}
     container_name: cf-ddns
     restart: unless-stopped
     security_opt:

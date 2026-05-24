@@ -1,4 +1,4 @@
-# 01-portainer-compose.yml
+# 01-[4]-portainer-compose.yml
 # Project: Portainer CE
 # Purpose: Legacy/advanced Docker management UI through socket-proxy and Traefik.
 #
@@ -8,7 +8,7 @@
 # - No direct host ports are published in production.
 #
 # Bootstrap note:
-# - Script 6.5 may temporarily add 01-portainer-bootstrap-override.yml
+# - Script 6.5 may temporarily add 01-[4]-portainer-bootstrap-override.yml
 #   to expose Portainer on 9443 for first-time setup.
 # - Script 7 should redeploy Portainer without the bootstrap override and
 #   remove any temporary UFW 9443 rule.
@@ -34,8 +34,8 @@ name: portainer
 services:
   portainer:
     env_file:
-      - /home/orik/docker/.env
-    image: portainer/portainer-ce:latest
+      - ${DOCKER_DIR}/.env
+    image: ${PORTAINER_IMAGE:-portainer/portainer-ce:latest}
     container_name: portainer
     restart: unless-stopped
 

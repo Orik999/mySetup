@@ -23,9 +23,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="7-hardeningSSO.sh"
-SCRIPT_VERSION="v1.3.0"
-SCRIPT_UPDATED="2026-05-22"
-SCRIPT_BUILD="authentik-api-token-separation-ready-apply-admin-ui-safe"
+SCRIPT_VERSION="v1.4.0"
+SCRIPT_UPDATED="2026-05-24"
+SCRIPT_BUILD="new-compose-names-untimed-input-image-lock-report"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -79,6 +79,7 @@ POSTIZ_TEMPORAL_GUARD_STATUS="not-found"
 POSTIZ_TEMPORAL_GUARD_STOPPED="not-applicable"
 
 TEMP_FILES=()
+IMAGE_LOCK_REPORT=""
 
 # =========================================================
 #  OUTPUT HELPERS
@@ -421,59 +422,15 @@ function timed_text_input() {
     local prompt="$1"
     local default="$2"
     local answer=""
-    local key=""
-    local deadline=""
-    local now=""
-    local remaining=""
 
-    flush_input_buffer
-    deadline=$(( $(date +%s) + T ))
-
-    while true; do
-        now=$(date +%s)
-        remaining=$(( deadline - now ))
-
-        if [ "$remaining" -le 0 ]; then
-            answer="$default"
-            break
-        fi
-
-        tty_print "${BFR}${YW}${prompt} [default: ${default}] [${remaining}s]: ${CL}"
-
-        if [ -r /dev/tty ]; then
-            if IFS= read -rsn1 -t 1 key < /dev/tty; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        else
-            if IFS= read -rsn1 -t 1 key; then
-                if [[ "$key" == " " ]]; then
-                    answer="$(editable_input_loop "$prompt" "$default" "")"
-                    break
-                elif [[ -z "$key" ]]; then
-                    answer="$default"
-                    break
-                else
-                    answer="$(editable_input_loop "$prompt" "$default" "$key")"
-                    break
-                fi
-            fi
-        fi
-    done
-
+    # Text/path/name/domain/token prompts are deliberately NOT timed.
+    # Countdown prompts are reserved only for Y/n decisions.
+    answer="$(editable_input_loop "$prompt" "$default" "")"
     [ -z "$answer" ] && answer="$default"
 
     tty_print "${BFR}"
     tty_println "${CM} ${GN}${prompt} ${answer}${CL}"
-    flush_input_buffer
+    flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
 }
@@ -635,6 +592,11 @@ function load_env_file() {
     set -a
     . "$ENV_FILE"
     set +a
+
+    DOCKER_DIR="${DOCKER_DIR:-/home/${DOCKER_USER}/docker}"
+    COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"
+    ENV_FILE="${ENV_FILE:-${DOCKER_DIR}/.env}"
+    export DOCKER_DIR COMPOSE_DIR ENV_FILE
 
     DOMAIN="${DOMAIN:-}"
     AUTHENTIK_HOST="${AUTHENTIK_HOST_BROWSER:-${AUTHENTIK_HOST:-https://auth.${DOMAIN}}}"
@@ -1161,13 +1123,13 @@ function close_portainer_bootstrap_exposure() {
 
     case "$ADMIN_UI" in
         portainer)
-            project="portainer"; service="portainer"; compose_file="${COMPOSE_DIR}/01-portainer-compose.yml"; override_file="${COMPOSE_DIR}/01-portainer-bootstrap-override.yml"; internal_port="9443"; bootstrap_port="9443";;
+            project="portainer"; service="portainer"; compose_file="${COMPOSE_DIR}/01-[4]-portainer-compose.yml"; override_file="${COMPOSE_DIR}/01-[4]-portainer-bootstrap-override.yml"; internal_port="9443"; bootstrap_port="9443";;
         dockge)
-            project="dockge"; service="dockge"; compose_file="${COMPOSE_DIR}/13-dockge-compose.yml"; override_file="${COMPOSE_DIR}/13-dockge-bootstrap-override.yml"; internal_port="5001"; bootstrap_port="5001";;
+            project="dockge"; service="dockge"; compose_file="${COMPOSE_DIR}/01-[1]-dockge-compose.yml"; override_file="${COMPOSE_DIR}/01-[1]-dockge-bootstrap-override.yml"; internal_port="5001"; bootstrap_port="5001";;
         komodo)
-            project="komodo"; service="komodo-core"; compose_file="${COMPOSE_DIR}/14-komodo-compose.yml"; override_file="${COMPOSE_DIR}/14-komodo-bootstrap-override.yml"; internal_port="9120"; bootstrap_port="9120";;
+            project="komodo"; service="komodo-core"; compose_file="${COMPOSE_DIR}/01-[3]-komodo-compose.yml"; override_file="${COMPOSE_DIR}/01-[3]-komodo-bootstrap-override.yml"; internal_port="9120"; bootstrap_port="9120";;
         dockhand)
-            project="dockhand"; service="dockhand"; compose_file="${COMPOSE_DIR}/15-dockhand-compose.yml"; override_file="${COMPOSE_DIR}/15-dockhand-bootstrap-override.yml"; internal_port="3000"; bootstrap_port="3000";;
+            project="dockhand"; service="dockhand"; compose_file="${COMPOSE_DIR}/01-[2]-dockhand-compose.yml"; override_file="${COMPOSE_DIR}/01-[2]-dockhand-bootstrap-override.yml"; internal_port="3000"; bootstrap_port="3000";;
         *)
             ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
             PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
@@ -1484,6 +1446,49 @@ function show_container_summary() {
     docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Networks}}' || true
 }
 
+
+# --- 22A. IMAGE LOCK REPORT ---
+# Generates a post-deployment image/digest report without automatically rewriting YAML files.
+function generate_image_lock_report() {
+    section "IMAGE LOCK REPORT"
+
+    local report="${DOCKER_DIR}/docker-image-lock-report.txt"
+    local tmp_report=""
+
+    tmp_report="$(mktemp)"
+    TEMP_FILES+=("$tmp_report")
+
+    {
+        echo "--- CREA DOCKER IMAGE LOCK REPORT ---"
+        echo "Date: $(date)"
+        echo "Docker dir: ${DOCKER_DIR}"
+        echo ""
+        echo "Purpose: deploy with latest during active testing, then review this report before pinning known-good tags/digests."
+        echo "No compose YAML was modified by Script 7."
+        echo ""
+        docker_cmd ps --format '{{.Names}}' | while IFS= read -r container; do
+            [ -n "$container" ] || continue
+            image="$(docker_cmd inspect --format '{{.Config.Image}}' "$container" 2>/dev/null || true)"
+            digest="$(docker_cmd inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$container" 2>/dev/null || true)"
+            echo "Container: ${container}"
+            echo "Current image: ${image:-unknown}"
+            echo "Resolved digest: ${digest:-not available locally}"
+            echo "Recommendation: pin after this deployment is verified stable."
+            echo ""
+        done
+    } > "$tmp_report"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" install -m 0640 -o "$DOCKER_USER" -g "$DOCKER_USER" "$tmp_report" "$report"
+    else
+        install -m 0640 "$tmp_report" "$report"
+    fi
+
+    IMAGE_LOCK_REPORT="$report"
+    msg_ok "IMAGE LOCK REPORT CREATED"
+    detail_line "Image lock report" "$IMAGE_LOCK_REPORT"
+}
+
 # --- 23. VERIFICATION REPORT ---
 function create_verification_report() {
     section "VERIFICATION REPORT"
@@ -1522,6 +1527,7 @@ Postiz web route OK: $POSTIZ_WEB_ROUTE_OK
 Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
 Postiz Temporal guard stopped: $POSTIZ_TEMPORAL_GUARD_STOPPED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
+Image lock report: $IMAGE_LOCK_REPORT
 EOF2
     else
         cat > "$VERIFY_LOG" <<EOF2
@@ -1553,6 +1559,7 @@ Postiz web route OK: $POSTIZ_WEB_ROUTE_OK
 Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
 Postiz Temporal guard stopped: $POSTIZ_TEMPORAL_GUARD_STOPPED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
+Image lock report: $IMAGE_LOCK_REPORT
 EOF2
     fi
 
@@ -1651,6 +1658,7 @@ function show_final_summary() {
     detail_line "POSTIZ TEMPORAL GUARD" "$POSTIZ_TEMPORAL_GUARD_STOPPED"
     detail_line "DOCKER-USER REVIEW" "$DOCKER_USER_RULES_REVIEWED"
     detail_line "VERIFY LOG" "$VERIFY_LOG"
+    detail_line "IMAGE LOCK REPORT" "$IMAGE_LOCK_REPORT"
 
     echo ""
     echo -e "${BL}IMPORTANT:${CL}"
@@ -1734,6 +1742,7 @@ function main() {
     docker_user_firewall_review
 
     show_container_summary
+    generate_image_lock_report
     create_verification_report
     write_completion_marker
     show_final_summary

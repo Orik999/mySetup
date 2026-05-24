@@ -1,4 +1,4 @@
-# 13-dockge-bootstrap-override.yml
+# 01-[1]-dockge-bootstrap-override.yml
 # Temporary bootstrap override used before Traefik/AuthentiK access is ready.
 # Script 7 redeploys Dockge without this override to close direct access.
 

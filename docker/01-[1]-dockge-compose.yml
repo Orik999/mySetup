@@ -1,4 +1,4 @@
-# 13-dockge-compose.yml
+# 01-[1]-dockge-compose.yml
 # Project: Dockge
 # Purpose: Lightweight Docker Compose stack manager.
 #
@@ -11,15 +11,15 @@
 # Notes:
 # - Dockge officially uses louislam/dockge:1.
 # - DOCKGE_STACKS_DIR points to where compose stacks live.
-# - Temporary direct access is added only by 13-dockge-bootstrap-override.yml.
+# - Temporary direct access is added only by 01-[1]-dockge-bootstrap-override.yml.
 
 name: dockge
 
 services:
   dockge:
     env_file:
-      - /home/orik/docker/.env
-    image: louislam/dockge:1
+      - ${DOCKER_DIR}/.env
+    image: ${DOCKGE_IMAGE:-louislam/dockge:latest}
     container_name: dockge
     restart: unless-stopped
 

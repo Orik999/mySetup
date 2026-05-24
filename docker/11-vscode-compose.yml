@@ -8,8 +8,8 @@ name: vscode
 services:
   vscode:
     env_file:
-      - /home/orik/docker/.env
-    image: lscr.io/linuxserver/code-server:latest
+      - ${DOCKER_DIR}/.env
+    image: ${VSCODE_IMAGE:-lscr.io/linuxserver/code-server:latest}
     container_name: vscode
     restart: unless-stopped
     security_opt:

@@ -7,8 +7,8 @@ name: redis
 services:
   redis:
     env_file:
-      - /home/orik/docker/.env
-    image: redis:7-alpine
+      - ${DOCKER_DIR}/.env
+    image: ${REDIS_IMAGE:-redis:latest}
     container_name: redis
     restart: unless-stopped
     security_opt:

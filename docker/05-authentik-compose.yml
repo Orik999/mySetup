@@ -22,8 +22,8 @@ name: authentik
 services:
   authentik-server:
     env_file:
-      - /home/orik/docker/.env
-    image: ghcr.io/goauthentik/server:latest
+      - ${DOCKER_DIR}/.env
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:latest}
     container_name: authentik-server
     restart: unless-stopped
     command: server
@@ -89,8 +89,8 @@ services:
 
   authentik-worker:
     env_file:
-      - /home/orik/docker/.env
-    image: ghcr.io/goauthentik/server:latest
+      - ${DOCKER_DIR}/.env
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:latest}
     container_name: authentik-worker
     restart: unless-stopped
     command: worker

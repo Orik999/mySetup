@@ -1,4 +1,4 @@
-# 01-portainer-bootstrap-override.yml
+# 01-[4]-portainer-bootstrap-override.yml
 # Temporary bootstrap override used before Traefik/AuthentiK access is ready.
 # Remove or stop using this override in script 7 final hardening.
 

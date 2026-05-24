@@ -14,8 +14,8 @@ name: socket-proxy
 services:
   socket-proxy:
     env_file:
-      - /home/orik/docker/.env
-    image: tecnativa/docker-socket-proxy:latest
+      - ${DOCKER_DIR}/.env
+    image: ${SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:latest}
     container_name: socket-proxy
     restart: unless-stopped
 
