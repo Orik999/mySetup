@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.15"
+SCRIPT_VERSION="v1.3.16"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="dockerhub-rate-limit-login-retry"
+SCRIPT_BUILD="clean-ui-redis-persistence-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -711,6 +711,22 @@ function docker_cmd() {
     fi
 }
 
+# --- 28A. TRANSIENT LINE CLEAR HELPER ---
+# Clears short live/progress messages after the operation completes.
+function clear_transient_line() {
+    tty_print "${BFR}"
+}
+
+# --- 28B. DOCKER CREDENTIAL STORE PATH HELPER ---
+# Reports the Docker config path used by docker login without exposing credentials.
+function docker_config_path_hint() {
+    if [ "$DOCKER_NEEDS_SUDO" == "yes" ]; then
+        echo "/root/.docker/config.json"
+    else
+        echo "${HOME:-/home/${DOCKER_USER}}/.docker/config.json"
+    fi
+}
+
 # --- 29. DOCKER HUB RATE-LIMIT DETECTION ---
 # Detects Docker Hub anonymous pull throttling and offers a secure docker login retry only when needed.
 function is_dockerhub_rate_limit_error() {
@@ -730,17 +746,18 @@ function offer_dockerhub_login_and_retry() {
     shift 2
 
     local login_yn=""
+    local docker_username=""
+    local config_hint=""
 
     echo ""
-    echo -e "${YW}! Docker Hub unauthenticated pull rate limit was reached.${CL}"
-    echo -e "${YW}This is not a compose/YAML failure. Docker Hub is throttling anonymous image pulls from this IP.${CL}"
-    echo -e "${YW}Use your Docker Hub username and a Personal Access Token when Docker asks for the password.${CL}"
-    echo ""
-    echo -e "${YW}Original Docker error:${CL}"
-    cat "$err_file"
+    msg_warn "DOCKER HUB RATE LIMIT DETECTED"
+    echo -e "${YW}Docker Hub is throttling anonymous pulls from this IP. This is not a compose/YAML error.${CL}"
+    echo -e "${YW}Login is only requested because the rate-limit error was detected.${CL}"
+    echo -e "${BL}Tip:${CL} use your Docker Hub username and a Personal Access Token when Docker asks for a password."
     echo ""
 
     if [ "$DOCKERHUB_LOGIN_ATTEMPTED" == "yes" ]; then
+        echo -e "${YW}Docker Hub login was already attempted once in this run.${CL}"
         return 1
     fi
 
@@ -753,17 +770,24 @@ function offer_dockerhub_login_and_retry() {
     DOCKERHUB_LOGIN_ATTEMPTED="yes"
 
     echo ""
-    echo -e "${YW}Starting Docker Hub login. Paste a Docker Hub Personal Access Token at the password prompt.${CL}"
+    echo -e "${YW}Starting Docker Hub login...${CL}"
     if ! docker_cmd login; then
         echo -e "${RD}Docker Hub login failed.${CL}"
         return 1
     fi
 
+    docker_username="$(docker_cmd info --format '{{.Username}}' 2>/dev/null || true)"
+    config_hint="$(docker_config_path_hint)"
+    msg_ok "DOCKER HUB LOGIN SUCCEEDED"
+    [ -n "$docker_username" ] && detail_line "Docker Hub user" "$docker_username"
+    detail_line "Docker credentials file" "$config_hint"
+    echo -e "${YW}Docker may store credentials unencrypted unless a credential helper is configured.${CL}"
     echo ""
-    msg_info "Retrying after Docker Hub login"
+
+    msg_info "Retrying failed Docker operation"
     : > "$err_file"
     if docker_cmd "$@" > /dev/null 2> "$err_file"; then
-        msg_ok "${description^^}"
+        msg_ok "RETRY SUCCEEDED: ${description^^}"
         return 0
     fi
 
@@ -827,17 +851,40 @@ function compose_up_quiet() {
 function run_postiz_temporal_guard_stack() {
     local project="$1"
     local file="$2"
+    local guard_log=""
 
-    if ! docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up --abort-on-container-exit --exit-code-from postiz-temporal-guard; then
-        echo ""
-        echo -e "${RD}Docker command failed during:${CL} running Postiz Temporal Guard"
-        echo -e "${YW}Command:${CL} docker compose --env-file ${ENV_FILE} -p ${project} -f ${COMPOSE_DIR}/${file} up --abort-on-container-exit --exit-code-from postiz-temporal-guard"
-        echo ""
-        echo -e "${YW}Postiz Temporal Guard logs:${CL}"
-        docker_cmd logs postiz-temporal-guard 2>/dev/null || true
-        exit 1
+    guard_log="$(mktemp)"
+    TEMP_FILES+=("$guard_log")
+
+    msg_info "Running Postiz Temporal Guard"
+
+    if docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up --abort-on-container-exit --exit-code-from postiz-temporal-guard > "$guard_log" 2>&1; then
+        clear_transient_line
+        msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
+        return 0
     fi
+
+    if is_dockerhub_rate_limit_error "$guard_log"; then
+        if offer_dockerhub_login_and_retry "running Postiz Temporal Guard" "$guard_log" compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up --abort-on-container-exit --exit-code-from postiz-temporal-guard; then
+            clear_transient_line
+            msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
+            return 0
+        fi
+    fi
+
+    clear_transient_line
+    echo ""
+    echo -e "${RD}Docker command failed during:${CL} running Postiz Temporal Guard"
+    echo -e "${YW}Command:${CL} docker compose --env-file ${ENV_FILE} -p ${project} -f ${COMPOSE_DIR}/${file} up --abort-on-container-exit --exit-code-from postiz-temporal-guard"
+    echo ""
+    echo -e "${YW}Captured Postiz Temporal Guard output:${CL}"
+    cat "$guard_log" 2>/dev/null || true
+    echo ""
+    echo -e "${YW}Postiz Temporal Guard container logs:${CL}"
+    docker_cmd logs postiz-temporal-guard 2>/dev/null || true
+    exit 1
 }
+
 
 
 
@@ -1566,25 +1613,27 @@ function wait_for_postgres_ready() {
         restart_count="$(docker_cmd inspect postgres --format '{{.RestartCount}}' 2>/dev/null || true)"
 
         if [ "$container_status" == "running" ] && [ "$health_status" == "healthy" ]; then
+            clear_transient_line
             msg_ok "POSTGRESQL READY"
             detail_line "PostgreSQL container" "postgres"
             return 0
         fi
 
         if [ "$container_status" == "restarting" ] && [ "${restart_count:-0}" -ge 1 ]; then
+            clear_transient_line
             msg_warn "PostgreSQL container is restarting instead of starting cleanly."
             show_postgres_diagnostics
             msg_error "PostgreSQL is in a restart loop. Fix data directory permission/init/existing-data issue before continuing."
         fi
 
         if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
-            tty_println "${BFR}${YW}PostgreSQL not ready yet (${attempt}/${max_attempts}). Waiting before dependencies...${CL}"
-            tty_println "${YW}Latest PostgreSQL readiness detail:${CL} status=${container_status:-missing} health=${health_status:-none} restart_count=${restart_count:-unknown}"
+            tty_print "${BFR}${YW}PostgreSQL not ready yet (${attempt}/${max_attempts}) | status=${container_status:-missing} health=${health_status:-none} restart_count=${restart_count:-unknown}${CL}"
         fi
 
         sleep 2
     done
 
+    clear_transient_line
     show_postgres_diagnostics
     msg_error "PostgreSQL did not become healthy before dependent stacks."
 }
@@ -1599,26 +1648,47 @@ function verify_redis_persistence_ready() {
     local attempt=""
     local max_attempts="60"
     local state=""
+    local info=""
+    local bgsave_status=""
+    local bgsave_in_progress=""
 
     for attempt in $(seq 1 "$max_attempts"); do
         state="$(docker_cmd inspect redis --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
         if [ "$state" == "healthy" ] || [ "$state" == "running" ]; then
             break
         fi
+        tty_print "${BFR}${YW}Redis not ready yet (${attempt}/${max_attempts}) | state=${state:-missing}${CL}"
         sleep 2
     done
+    clear_transient_line
+
+    # Re-apply the proven host path fix immediately before the write test.
+    run_cmd "repairing Redis data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "repairing Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
+    run_cmd "repairing Redis data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
 
     if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1; then
         docker_cmd logs --tail=120 redis 2>/dev/null || true
         msg_error "Redis BGSAVE failed. Fix ${DOCKER_DIR}/appdata/redis ownership/permissions before continuing."
     fi
 
-    if docker_cmd logs --tail=200 redis 2>/dev/null | grep -Eiq 'MISCONF|Permission denied|Background saving error'; then
-        docker_cmd logs --tail=120 redis 2>/dev/null || true
-        msg_error "Redis logs show persistence errors. Fix Redis /data permissions before continuing."
-    fi
+    for attempt in $(seq 1 30); do
+        info="$(docker_cmd exec redis redis-cli INFO persistence 2>/dev/null || true)"
+        bgsave_in_progress="$(printf '%s\n' "$info" | awk -F: '/^rdb_bgsave_in_progress:/ {gsub(/\r/,"",$2); print $2; exit}')"
+        bgsave_status="$(printf '%s\n' "$info" | awk -F: '/^rdb_last_bgsave_status:/ {gsub(/\r/,"",$2); print $2; exit}')"
 
-    msg_ok "REDIS PERSISTENCE VERIFIED"
+        if [ "$bgsave_in_progress" == "0" ] && [ "$bgsave_status" == "ok" ]; then
+            msg_ok "REDIS PERSISTENCE VERIFIED"
+            detail_line "BGSAVE status" "ok"
+            return 0
+        fi
+
+        sleep 1
+    done
+
+    docker_cmd exec redis redis-cli INFO persistence 2>/dev/null || true
+    docker_cmd logs --tail=120 redis 2>/dev/null || true
+    msg_error "Redis persistence did not report rdb_last_bgsave_status:ok after BGSAVE. Fix ${DOCKER_DIR}/appdata/redis before continuing."
 }
 
 function wait_for_temporal_ready() {
@@ -2006,9 +2076,7 @@ function deploy_selected_stacks() {
 
         if [ "$file" == "$POSTIZ_TEMPORAL_GUARD_STACK_FILE" ]; then
             section "RUN STACK - POSTIZ TEMPORAL GUARD"
-            echo -e "${YW}Temporal Guard runs after Temporal is up and before Postiz starts. Do NOT restart Temporal after this succeeds.${CL}"
             run_postiz_temporal_guard_stack "$project" "$file"
-            msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
             continue
         fi
 
