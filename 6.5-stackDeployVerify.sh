@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.8"
+SCRIPT_VERSION="v1.3.9"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="postgres-readiness-health-log-no-container-spawn"
+SCRIPT_BUILD="postgres-prereq-repair-restart-diagnostics"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -849,6 +849,7 @@ function wait_for_postgres_ready() {
     local err_file=""
     local container_status=""
     local health_status=""
+    local restart_count=""
     local ready_log_count="0"
     local previous_ready_log_count="-1"
 
@@ -861,9 +862,22 @@ function wait_for_postgres_ready() {
         container_status="$(docker_cmd inspect postgres --format '{{.State.Status}}' 2>/dev/null || true)"
         health_status="$(docker_cmd inspect postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
 
-        if [ "$container_status" != "running" ]; then
-            printf 'postgres container status: %s
-' "${container_status:-missing}" > "$err_file"
+        restart_count="$(docker_cmd inspect postgres --format '{{.RestartCount}}' 2>/dev/null || true)"
+
+        if [ "$container_status" == "restarting" ]; then
+            printf 'postgres container status: restarting restart_count=%s
+' "${restart_count:-unknown}" > "$err_file"
+
+            if [ "$attempt" -ge 3 ]; then
+                echo ""
+                msg_warn "PostgreSQL container is restarting instead of starting cleanly."
+                show_postgres_diagnostics
+                echo ""
+                msg_error "PostgreSQL is in a restart loop. Check the PostgreSQL logs above; most commonly this is a data directory permission, init, or existing-data issue."
+            fi
+        elif [ "$container_status" != "running" ]; then
+            printf 'postgres container status: %s restart_count=%s
+' "${container_status:-missing}" "${restart_count:-unknown}" > "$err_file"
         elif [ "$health_status" == "healthy" ]; then
             msg_ok "POSTGRESQL READY"
             detail_line "PostgreSQL container" "postgres"
@@ -1416,6 +1430,44 @@ function verify_authentik_folders() {
     done
 
     AUTHENTIK_FOLDERS_OK="yes"
+}
+
+
+# --- 33D. POSTGRESQL RUNTIME PREREQUISITE REPAIR ---
+# Applies the safe, service-specific PostgreSQL host directory permissions after
+# READY TO APPLY and before the PostgreSQL stack is started. This avoids the
+# common restart loop caused by data directory ownership/mode problems while
+# preserving the existing database files.
+function prepare_postgres_runtime_prereqs() {
+    if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
+        return 0
+    fi
+
+    section "POSTGRESQL RUNTIME PREREQS"
+
+    local pg_data_dir="${DOCKER_DIR}/appdata/postgres/data"
+    local pg_container_status=""
+    local pg_health_status=""
+
+    msg_info "Preparing PostgreSQL data directory"
+    run_cmd "creating PostgreSQL data directory" mkdir -p "$pg_data_dir"
+    run_cmd "setting PostgreSQL data ownership" chown 999:999 "$pg_data_dir"
+    run_cmd "setting PostgreSQL data permissions" chmod 700 "$pg_data_dir"
+    msg_ok "POSTGRESQL DATA DIRECTORY READY"
+    detail_line "Path" "$pg_data_dir"
+    detail_line "Owner" "999:999"
+    detail_line "Mode" "700"
+
+    pg_container_status="$(docker_cmd inspect postgres --format '{{.State.Status}}' 2>/dev/null || true)"
+    pg_health_status="$(docker_cmd inspect postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
+
+    if [[ "$pg_container_status" =~ ^(restarting|exited|dead|created)$ ]] || [ "$pg_health_status" == "unhealthy" ]; then
+        msg_warn "Existing PostgreSQL container is ${pg_container_status:-unknown}/${pg_health_status:-none}; recreating container without deleting data."
+        docker_cmd rm -f postgres >/dev/null 2>&1 || true
+        msg_ok "STALE POSTGRESQL CONTAINER REMOVED"
+    else
+        msg_ok "NO STALE POSTGRESQL CONTAINER RECREATE NEEDED"
+    fi
 }
 
 # --- 33E. ADMIN UI SELECTION VERIFICATION ---
@@ -2406,6 +2458,7 @@ function main() {
     verify_admin_ui_bootstrap_override_file
     verify_selected_compose_env_coverage
     validate_selected_compose_files
+    prepare_postgres_runtime_prereqs
 
     configure_bootstrap_firewall
     deploy_selected_stacks
