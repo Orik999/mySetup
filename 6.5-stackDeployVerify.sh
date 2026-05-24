@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.13"
+SCRIPT_VERSION="v1.3.14"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="pg18-redis-authentik-dockge-finalizer"
+SCRIPT_BUILD="quiet-pulls-bootstrap-token-authentik-gate"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -151,6 +151,7 @@ TRAEFIK_DNS_DELAY_OK="no"
 TRAEFIK_ENCODED_CHARS_OK="no"
 TRAEFIK_AUTHENTIK_REFERENCES_OK="no"
 AUTHENTIK_FOLDERS_OK="no"
+AUTHENTIK_DEPENDENCIES_OK="not-run"
 AUTHENTIK_API_OK="not-run"
 AUTHENTIK_PROVIDER_OK="not-run"
 AUTHENTIK_APPLICATION_OK="not-run"
@@ -538,29 +539,6 @@ function timed_text_input() {
     echo "$answer"
 }
 
-# --- SENSITIVE INPUT HELPER ---
-# Reads secrets/tokens without countdown timers and without echoing the value.
-function sensitive_line_input() {
-    local prompt="$1"
-    local answer=""
-
-    if [ -w /dev/tty ]; then
-        tty_print " ${HOLD} ${YW}${prompt}:${CL} "
-        stty -echo < /dev/tty 2>/dev/null || true
-        IFS= read -r answer < /dev/tty || answer=""
-        stty echo < /dev/tty 2>/dev/null || true
-        tty_println ""
-    else
-        echo -ne " ${HOLD} ${YW}${prompt}:${CL} " >&2
-        stty -echo 2>/dev/null || true
-        IFS= read -r answer || answer=""
-        stty echo 2>/dev/null || true
-        echo "" >&2
-    fi
-
-    printf '%s' "$answer"
-}
-
 # =========================================================
 #  VALIDATION HELPERS
 # =========================================================
@@ -756,64 +734,21 @@ function run_docker_cmd() {
     rm -f "$err_file"
 }
 
-# --- 29A. DEBUG STACK SNAPSHOT HELPER ---
-# Temporarily prints compose/container state after each deployment so failures can
-# be diagnosed from real runtime data. This is intentionally verbose for testing
-# and can be cleaned back to the sleek UI after the stack is stable.
-function show_stack_debug_snapshot() {
-    local project="$1"
-    local file="$2"
-    local service="${3:-}"
 
-    echo ""
-    echo -e "${BL}DEBUG SNAPSHOT - ${project^^}${CL}"
-    echo -e "${YW}Compose file:${CL} ${COMPOSE_DIR}/${file}"
+# --- 29B. CLEAN COMPOSE UP HELPER ---
+# Runs docker compose up without terminal-flooding image pull/extract progress.
+function compose_up_quiet() {
+    local description="$1"
+    shift
 
-    echo ""
-    echo -e "${BL}Compose container state:${CL}"
-    docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" ps -a 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}Compose logs, last 120 lines:${CL}"
-    docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" logs --no-color --tail=120 2>/dev/null || true
-
-    if [ -n "$service" ]; then
-        echo ""
-        echo -e "${BL}Primary container inspect summary: ${service}${CL}"
-        docker_cmd inspect "$service" --format 'name={{.Name}} image={{.Config.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} restart_count={{.RestartCount}} oom={{.State.OOMKilled}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} error={{.State.Error}}' 2>/dev/null || true
-
-        echo ""
-        echo -e "${BL}Primary container mounts: ${service}${CL}"
-        docker_cmd inspect "$service" --format '{{range .Mounts}}source={{.Source}} destination={{.Destination}} type={{.Type}} rw={{.RW}}{{println}}{{end}}' 2>/dev/null || true
-
-        echo ""
-        echo -e "${BL}Primary container logs, last 120 lines: ${service}${CL}"
-        docker_cmd logs --tail=120 "$service" 2>/dev/null || true
+    if docker_cmd compose up --help 2>/dev/null | grep -q -- '--quiet-pull'; then
+        run_docker_cmd "$description" compose "$@" up -d --quiet-pull
+    else
+        run_docker_cmd "$description" compose "$@" up -d
     fi
 }
 
-# --- 29AA. VISIBLE COMPOSE DEPLOYMENT RUNNER ---
-# Runs docker compose up without hiding output, then prints an immediate debug
-# snapshot. This is temporary deployment-testing verbosity.
-function run_compose_up_visible() {
-    local project="$1"
-    local file="$2"
-    local service="${3:-}"
-
-    echo -e "${YW}Command:${CL} docker compose --env-file ${ENV_FILE} -p ${project} -f ${COMPOSE_DIR}/${file} up -d"
-
-    if ! docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up -d; then
-        echo ""
-        echo -e "${RD}Docker compose deployment failed for:${CL} ${project}"
-        show_stack_debug_snapshot "$project" "$file" "$service"
-        exit 1
-    fi
-
-    show_stack_debug_snapshot "$project" "$file" "$service"
-}
-
-
-# --- 29B. POSTIZ TEMPORAL GUARD RUNNER ---
+# --- 29A. POSTIZ TEMPORAL GUARD RUNNER ---
 # Runs the one-shot Temporal guard without hiding the container output. The guard
 # is intentionally verbose because a failure here decides whether Postiz can start.
 function run_postiz_temporal_guard_stack() {
@@ -829,215 +764,6 @@ function run_postiz_temporal_guard_stack() {
         docker_cmd logs postiz-temporal-guard 2>/dev/null || true
         exit 1
     fi
-}
-
-
-
-# --- 29B. TEMPORAL DIAGNOSTIC HELPER ---
-# Prints actionable Temporal container state and logs when readiness fails.
-function show_temporal_diagnostics() {
-    echo ""
-    echo -e "${YW}Temporal diagnostics:${CL}"
-
-    echo -e "${BL}Container state:${CL}"
-    docker_cmd ps -a --filter "name=temporal" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}Temporal logs, last 160 lines:${CL}"
-    docker_cmd logs --tail=160 temporal 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}Temporal auto-setup logs, last 120 lines if present:${CL}"
-    docker_cmd logs --tail=120 temporal-admin-tools 2>/dev/null || true
-    docker_cmd logs --tail=120 temporal-schema 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}PostgreSQL logs, last 80 lines:${CL}"
-    docker_cmd logs --tail=80 postgres 2>/dev/null || true
-}
-
-# --- 29C. TEMPORAL READINESS WAIT HELPER ---
-# Verifies Temporal is actually reachable before running Postiz Temporal Guard.
-# A running container alone is not enough; port 7233 must accept Temporal CLI calls.
-function wait_for_temporal_ready() {
-    section "TEMPORAL READINESS CHECK"
-
-    local temporal_address="${TEMPORAL_ADDRESS:-temporal:7233}"
-    local temporal_namespace="${TEMPORAL_NAMESPACE:-default}"
-    local temporal_admin_tools_image=""
-    local attempt=""
-    local max_attempts="150"
-    local err_file=""
-
-    temporal_admin_tools_image="$(env_value TEMPORAL_ADMIN_TOOLS_IMAGE)"
-    [ -z "$temporal_admin_tools_image" ] && temporal_admin_tools_image="temporalio/admin-tools:latest"
-
-    err_file="$(mktemp)"
-    TEMP_FILES+=("$err_file")
-
-    msg_info "Waiting for Temporal API at ${temporal_address}"
-
-    for attempt in $(seq 1 "$max_attempts"); do
-        if docker_cmd run --rm --network database "$temporal_admin_tools_image" \
-            temporal --address "$temporal_address" --namespace "$temporal_namespace" \
-            operator search-attribute list >/dev/null 2>"$err_file"; then
-            msg_ok "TEMPORAL API READY"
-            detail_line "Temporal address" "$temporal_address"
-            detail_line "Temporal namespace" "$temporal_namespace"
-            rm -f "$err_file"
-            return 0
-        fi
-
-        if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
-            tty_println "${BFR}${YW}Temporal API not ready yet (${attempt}/${max_attempts}). Waiting before Postiz Temporal Guard...${CL}"
-        fi
-
-        sleep 2
-    done
-
-    echo ""
-    msg_warn "Temporal API did not become ready before Postiz Temporal Guard."
-    echo -e "${RD}Last Temporal CLI error:${CL}"
-    cat "$err_file" 2>/dev/null || true
-
-    show_temporal_diagnostics
-
-    echo ""
-    msg_error "Temporal is not reachable on ${temporal_address}. Fix Temporal/PostgreSQL startup before running Postiz Temporal Guard."
-}
-
-
-# --- 29D. POSTGRESQL DIAGNOSTIC HELPER ---
-# Prints actionable PostgreSQL container state and recent logs when readiness fails.
-function show_postgres_diagnostics() {
-    echo ""
-    echo -e "${YW}PostgreSQL diagnostics:${CL}"
-
-    echo -e "${BL}Container state:${CL}"
-    docker_cmd ps -a --filter "name=postgres" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}PostgreSQL health detail:${CL}"
-    docker_cmd inspect postgres --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} error={{.State.Error}} restart_count={{.RestartCount}} oom={{.State.OOMKilled}} pid={{.State.Pid}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}PostgreSQL compose state:${CL}"
-    docker_cmd compose --env-file "$ENV_FILE" -p postgres -f "${COMPOSE_DIR}/${POSTGRES_STACK_FILE}" ps -a 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}PostgreSQL container image/entrypoint/cmd:${CL}"
-    docker_cmd inspect postgres --format 'image={{.Config.Image}} entrypoint={{json .Config.Entrypoint}} cmd={{json .Config.Cmd}} working_dir={{.Config.WorkingDir}}' 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}PostgreSQL container mounts:${CL}"
-    docker_cmd inspect postgres --format '{{range .Mounts}}source={{.Source}} destination={{.Destination}} type={{.Type}} rw={{.RW}}{{println}}{{end}}' 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}PostgreSQL host path detail:${CL}"
-    if [ -n "$SUDO_CMD" ]; then
-        "$SUDO_CMD" stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/pgdata" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
-        "$SUDO_CMD" find "${DOCKER_DIR}/appdata/postgres/pgdata" -maxdepth 1 -mindepth 1 -printf '%u:%g %m %f\n' 2>/dev/null | head -20 || true
-    else
-        stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/pgdata" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
-        find "${DOCKER_DIR}/appdata/postgres/pgdata" -maxdepth 1 -mindepth 1 -printf '%u:%g %m %f\n' 2>/dev/null | head -20 || true
-    fi
-
-    echo ""
-    echo -e "${BL}PostgreSQL compose logs, last 200 lines:${CL}"
-    docker_cmd compose --env-file "$ENV_FILE" -p postgres -f "${COMPOSE_DIR}/${POSTGRES_STACK_FILE}" logs --no-color --tail=200 2>/dev/null || true
-
-    echo ""
-    echo -e "${BL}PostgreSQL container logs, last 200 lines:${CL}"
-    docker_cmd logs --tail=200 postgres 2>/dev/null || true
-}
-
-# --- 29E. POSTGRESQL READINESS WAIT HELPER ---
-# Verifies PostgreSQL is accepting connections before dependent stacks start.
-# Temporal waits on PostgreSQL internally, but starting it before PostgreSQL is
-# actually ready can leave Temporal unhealthy and block Postiz Temporal Guard.
-function wait_for_postgres_ready() {
-    section "POSTGRESQL READINESS CHECK"
-
-    local attempt=""
-    local max_attempts="150"
-    local err_file=""
-    local container_status=""
-    local health_status=""
-    local restart_count=""
-    local ready_log_count="0"
-    local previous_ready_log_count="-1"
-
-    err_file="$(mktemp)"
-    TEMP_FILES+=("$err_file")
-
-    msg_info "Waiting for PostgreSQL container health/log readiness"
-
-    for attempt in $(seq 1 "$max_attempts"); do
-        container_status="$(docker_cmd inspect postgres --format '{{.State.Status}}' 2>/dev/null || true)"
-        health_status="$(docker_cmd inspect postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
-
-        restart_count="$(docker_cmd inspect postgres --format '{{.RestartCount}}' 2>/dev/null || true)"
-
-        if [ "$container_status" == "restarting" ]; then
-            printf 'postgres container status: restarting restart_count=%s
-' "${restart_count:-unknown}" > "$err_file"
-
-            if [ "$attempt" -ge 3 ]; then
-                echo ""
-                msg_warn "PostgreSQL container is restarting instead of starting cleanly."
-                show_postgres_diagnostics
-                echo ""
-                msg_error "PostgreSQL is in a restart loop. Check the PostgreSQL logs above; most commonly this is a data directory permission, init, or existing-data issue."
-            fi
-        elif [ "$container_status" != "running" ]; then
-            printf 'postgres container status: %s restart_count=%s
-' "${container_status:-missing}" "${restart_count:-unknown}" > "$err_file"
-        elif [ "$health_status" == "healthy" ]; then
-            msg_ok "POSTGRESQL READY"
-            detail_line "PostgreSQL container" "postgres"
-            detail_line "Readiness source" "container healthcheck"
-            rm -f "$err_file"
-            return 0
-        else
-            # Avoid docker exec and one-shot client containers here. During early
-            # PostgreSQL startup Docker can fail to create exec/run helper processes
-            # with OCI/procReady/broken-pipe errors. Use Docker inspect plus the
-            # PostgreSQL startup log marker instead; this keeps the readiness gate
-            # stable and avoids noisy false failures.
-            ready_log_count="$(docker_cmd logs postgres --tail=200 2>/dev/null | grep -c 'database system is ready to accept connections' || true)"
-
-            if [ "$ready_log_count" -gt 0 ] && [ "$ready_log_count" == "$previous_ready_log_count" ]; then
-                msg_ok "POSTGRESQL READY"
-                detail_line "PostgreSQL container" "postgres"
-                detail_line "Readiness source" "stable PostgreSQL startup log marker"
-                rm -f "$err_file"
-                return 0
-            fi
-
-            previous_ready_log_count="$ready_log_count"
-            printf 'postgres container status=%s health=%s ready_log_markers=%s
-' "${container_status:-missing}" "${health_status:-none}" "${ready_log_count:-0}" > "$err_file"
-        fi
-
-        if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
-            tty_println "${BFR}${YW}PostgreSQL not ready yet (${attempt}/${max_attempts}). Waiting before Temporal/AuthentiK/Postiz dependencies...${CL}"
-            if [ -s "$err_file" ]; then
-                tty_println "${YW}Latest PostgreSQL readiness detail:${CL} $(tail -n 1 "$err_file" 2>/dev/null || true)"
-            fi
-        fi
-
-        sleep 2
-    done
-
-    echo ""
-    msg_warn "PostgreSQL did not become ready before dependent stacks."
-    echo -e "${RD}Last PostgreSQL readiness detail:${CL}"
-    cat "$err_file" 2>/dev/null || true
-
-    show_postgres_diagnostics
-
-    echo ""
-    msg_error "PostgreSQL is not healthy or ready in logs. Fix PostgreSQL startup/permissions before deploying Temporal."
 }
 
 
@@ -1480,14 +1206,11 @@ function verify_traefik_rendered_configs() {
     msg_ok "TRAEFIK PLACEHOLDERS FULLY RENDERED"
 
     msg_info "Checking Traefik v3.7 DNS propagation syntax"
-    local traefik_current_delay_key="delayBefore""Checks"
-    local traefik_deprecated_delay_key="delayBefore""Check:"
-
-    if grep -q "$traefik_current_delay_key" "$TRAEFIK_STATIC_CONFIG_FILE" && ! grep -q "$traefik_deprecated_delay_key" "$TRAEFIK_STATIC_CONFIG_FILE"; then
+    if grep -q 'delayBefore''Checks' "$TRAEFIK_STATIC_CONFIG_FILE" && ! grep -q 'delayBefore''Check:' "$TRAEFIK_STATIC_CONFIG_FILE"; then
         TRAEFIK_DNS_DELAY_OK="yes"
         msg_ok "TRAEFIK DNS PROPAGATION SYNTAX IS V3.7 COMPATIBLE"
     else
-        msg_error "Traefik DNS challenge must use the current v3.7 propagation delay key, not the deprecated singular key."
+        msg_error "Traefik DNS challenge must use the current Traefik v3 propagation delay key, not the deprecated singular key."
     fi
 
     msg_info "Checking Traefik encoded-character options"
@@ -1499,10 +1222,8 @@ function verify_traefik_rendered_configs() {
     fi
 
     msg_info "Checking for stale Authentik Docker-provider middleware references"
-    local stale_authentik_docker_middleware="authentik@""docker"
-
-    if grep -q "$stale_authentik_docker_middleware" "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then
-        msg_error "Stale Authentik Docker-provider middleware reference found in dynamic config. Use Authentik file-provider middleware."
+    if grep -q "authentik@""docker" "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then
+        msg_error "Stale Authentik Docker-provider middleware reference found in dynamic config. Use authentik file-provider middleware."
     fi
     TRAEFIK_AUTHENTIK_REFERENCES_OK="yes"
     msg_ok "NO STALE AUTHENTIK@DOCKER REFERENCES"
@@ -1546,194 +1267,7 @@ function verify_authentik_folders() {
     AUTHENTIK_FOLDERS_OK="yes"
 }
 
-
-# --- 33D. POSTGRESQL RUNTIME PREREQUISITE REPAIR ---
-# Applies the safe, service-specific PostgreSQL host directory permissions after
-# READY TO APPLY and before the PostgreSQL stack is started. This avoids the
-# common restart loop caused by data directory ownership/mode problems while
-# preserving the existing database files.
-function upsert_public_env_value() {
-    local key="$1"
-    local value="$2"
-    local tmp_file=""
-
-    tmp_file="$(mktemp)"
-    TEMP_FILES+=("$tmp_file")
-
-    awk -v k="$key" -v v="$value" '
-        BEGIN { done = 0 }
-        $0 ~ "^" k "=" {
-            print k "=" v
-            done = 1
-            next
-        }
-        { print }
-        END {
-            if (done == 0) {
-                print k "=" v
-            }
-        }
-    ' "$ENV_FILE" > "$tmp_file"
-
-    if [ -n "$SUDO_CMD" ]; then
-        "$SUDO_CMD" cp "$tmp_file" "$ENV_FILE"
-        "$SUDO_CMD" chown "${DOCKER_USER}:${DOCKER_USER}" "$ENV_FILE" 2>/dev/null || true
-        "$SUDO_CMD" chmod 600 "$ENV_FILE" 2>/dev/null || true
-    else
-        cp "$tmp_file" "$ENV_FILE"
-        chown "${DOCKER_USER}:${DOCKER_USER}" "$ENV_FILE" 2>/dev/null || true
-        chmod 600 "$ENV_FILE" 2>/dev/null || true
-    fi
-
-    export "${key}=${value}"
-}
-
-function ensure_postgres_image_compatibility() {
-    # PostgreSQL latest / 18+ is supported by YML 02 using pgdata:/var/lib/postgresql.
-    # Do not pin or rewrite POSTGRES_IMAGE here; Script 7 can create an image lock report later.
-    return 0
-}
-
-
-function require_nonempty_env_value() {
-    local key="$1"
-    local value=""
-
-    value="$(env_value "$key")"
-
-    if [ -z "$value" ]; then
-        msg_error "Required .env value ${key} is missing or empty. Run fixed Script 6 before deploying PostgreSQL."
-    fi
-
-    msg_ok "REQUIRED SECRET/VALUE PRESENT: ${key}"
-}
-
-function prepare_postgres_runtime_prereqs() {
-    if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
-        return 0
-    fi
-
-    section "POSTGRESQL RUNTIME PREREQS"
-
-    local pg_root_dir="${DOCKER_DIR}/appdata/postgres"
-    local pg_data_dir="${pg_root_dir}/pgdata"
-    local pg_init_dir="${pg_root_dir}/init"
-    local pg_container_status=""
-    local pg_health_status=""
-    local backup_dir=""
-
-    require_nonempty_env_value "POSTGRES_PASSWORD"
-    require_nonempty_env_value "AUTHENTIK_POSTGRES_PASSWORD"
-    require_nonempty_env_value "POSTIZ_POSTGRES_PASSWORD"
-    require_nonempty_env_value "TEMPORAL_POSTGRES_PASSWORD"
-
-    msg_info "Preparing PostgreSQL directories"
-    run_cmd "creating PostgreSQL root directory" mkdir -p "$pg_root_dir"
-    run_cmd "creating PostgreSQL data directory" mkdir -p "$pg_data_dir"
-    run_cmd "creating PostgreSQL init directory" mkdir -p "$pg_init_dir"
-    msg_ok "POSTGRESQL DIRECTORIES EXIST"
-
-    if ! root_path_exists "${pg_data_dir}/PG_VERSION"; then
-        if [ -n "$SUDO_CMD" ]; then
-            if "$SUDO_CMD" find "$pg_data_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
-                backup_dir="${pg_data_dir}.broken-$(date +%Y%m%d-%H%M%S)"
-                msg_warn "PostgreSQL pgdata directory has files but no PG_VERSION; preserving it as a broken partial init backup."
-                run_cmd "backing up partial PostgreSQL data directory" mv "$pg_data_dir" "$backup_dir"
-                run_cmd "recreating clean PostgreSQL data directory" mkdir -p "$pg_data_dir"
-                detail_line "Partial data backup" "$backup_dir"
-            fi
-        else
-            if find "$pg_data_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
-                backup_dir="${pg_data_dir}.broken-$(date +%Y%m%d-%H%M%S)"
-                msg_warn "PostgreSQL pgdata directory has files but no PG_VERSION; preserving it as a broken partial init backup."
-                run_cmd "backing up partial PostgreSQL data directory" mv "$pg_data_dir" "$backup_dir"
-                run_cmd "recreating clean PostgreSQL data directory" mkdir -p "$pg_data_dir"
-                detail_line "Partial data backup" "$backup_dir"
-            fi
-        fi
-    fi
-
-    msg_info "Applying PostgreSQL-specific ownership and permissions"
-    run_cmd "setting PostgreSQL data ownership recursively" chown -R 999:999 "$pg_data_dir"
-    run_cmd "setting PostgreSQL data permissions recursively" chmod -R u+rwX,go-rwx "$pg_data_dir"
-    run_cmd "setting PostgreSQL data directory mode" chmod 700 "$pg_data_dir"
-    run_cmd "setting PostgreSQL init directory readability" chmod 755 "$pg_init_dir"
-    msg_ok "POSTGRESQL DATA DIRECTORY READY"
-    detail_line "Data path" "$pg_data_dir"
-    detail_line "Data owner" "999:999 recursive"
-    detail_line "Data mode" "u+rwX,go-rwx / root 700"
-    detail_line "Init path" "$pg_init_dir"
-
-    pg_container_status="$(docker_cmd inspect postgres --format '{{.State.Status}}' 2>/dev/null || true)"
-    pg_health_status="$(docker_cmd inspect postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
-
-    if [[ "$pg_container_status" =~ ^(restarting|exited|dead|created)$ ]] || [ "$pg_health_status" == "unhealthy" ]; then
-        msg_warn "Existing PostgreSQL container is ${pg_container_status:-unknown}/${pg_health_status:-none}; recreating container without deleting data."
-        docker_cmd rm -f postgres >/dev/null 2>&1 || true
-        msg_ok "STALE POSTGRESQL CONTAINER REMOVED"
-    else
-        msg_ok "NO STALE POSTGRESQL CONTAINER RECREATE NEEDED"
-    fi
-}
-
-# --- 33E. REDIS RUNTIME PREREQUISITE REPAIR ---
-# Applies the proven Redis host directory permissions before Redis is started.
-# Redis persistence writes to /data and must be owned by Redis UID/GID 999.
-function prepare_redis_runtime_prereqs() {
-    local redis_data_dir="${DOCKER_DIR}/appdata/redis"
-
-    if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
-        return 0
-    fi
-
-    section "REDIS RUNTIME PREREQS"
-
-    msg_info "Preparing Redis persistent data directory"
-    run_cmd "creating Redis data directory" mkdir -p "$redis_data_dir"
-    run_cmd "setting Redis data ownership" chown -R 999:999 "$redis_data_dir"
-    run_cmd "setting Redis writable permissions" chmod 770 "$redis_data_dir"
-    msg_ok "REDIS DATA DIRECTORY READY"
-    detail_line "Path" "$redis_data_dir"
-    detail_line "Owner" "999:999"
-    detail_line "Mode" "770"
-}
-
-# --- 33F. REDIS PERSISTENCE VERIFICATION ---
-# Verifies Redis health and persistence before Authentik/Postiz depend on it.
-function verify_redis_persistence_ready() {
-    if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
-        return 0
-    fi
-
-    section "REDIS PERSISTENCE CHECK"
-
-    local attempt=""
-    local max_attempts="60"
-    local health_status=""
-
-    for attempt in $(seq 1 "$max_attempts"); do
-        health_status="$(docker_cmd inspect redis --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-        if [ "$health_status" == "healthy" ] || [ "$health_status" == "running" ]; then
-            break
-        fi
-        sleep 2
-    done
-
-    if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1; then
-        docker_cmd logs --tail=120 redis 2>/dev/null || true
-        msg_error "Redis BGSAVE failed. Fix ${DOCKER_DIR}/appdata/redis ownership/permissions before deploying Authentik/Postiz."
-    fi
-
-    if docker_cmd logs --tail=200 redis 2>/dev/null | grep -qi 'Permission denied'; then
-        docker_cmd logs --tail=120 redis 2>/dev/null || true
-        msg_error "Redis logs contain Permission denied. Fix Redis /data permissions before continuing."
-    fi
-
-    msg_ok "REDIS PERSISTENCE VERIFIED"
-}
-
-
-# --- 33G. ADMIN UI SELECTION VERIFICATION ---
+# --- 33E. ADMIN UI SELECTION VERIFICATION ---
 # Maps .env ADMIN_UI to expected compose template and service.
 function verify_admin_ui_selection() {
     section "ADMIN UI SELECTION"
@@ -1852,13 +1386,214 @@ function verify_filebrowser_folders() {
 }
 
 
-# --- 33H. STACK REGISTRY HELPERS ---
-# Uses the fixed uploaded project structure. No GitHub scanning is performed.
 
-# --- 34. DOCKGE COMPOSE LAYOUT SYNC ---
-# Dockge discovers stacks in ${DOCKER_DIR}/compose/<stack name>/compose.yaml.
-# Keep flat files for scripted deployment, but mirror every downloaded stack into
-# the Dockge-friendly folder layout so the UI can manage them afterwards.
+# --- 33H. POSTGRESQL / REDIS RUNTIME REPAIR + READINESS ---
+# Re-applies proven safe service-specific permissions immediately before deployment.
+function selected_stack_contains() {
+    local wanted="$1"
+    local item=""
+    for item in "${SELECTED_STACK_FILES[@]:-}"; do
+        [ "$item" == "$wanted" ] && return 0
+    done
+    return 1
+}
+
+function prepare_postgres_runtime_prereqs() {
+    if ! selected_stack_contains "$POSTGRES_STACK_FILE"; then
+        return 0
+    fi
+
+    section "POSTGRESQL RUNTIME PREREQS"
+
+    local pg_root_dir="${DOCKER_DIR}/appdata/postgres"
+    local pg_data_dir="${pg_root_dir}/pgdata"
+    local pg_init_dir="${pg_root_dir}/init"
+
+    require_nonempty_env_value "POSTGRES_PASSWORD"
+    require_nonempty_env_value "AUTHENTIK_POSTGRES_PASSWORD"
+    require_nonempty_env_value "POSTIZ_POSTGRES_PASSWORD"
+    require_nonempty_env_value "TEMPORAL_POSTGRES_PASSWORD"
+
+    run_cmd "creating PostgreSQL data directory" mkdir -p "$pg_data_dir"
+    run_cmd "creating PostgreSQL init directory" mkdir -p "$pg_init_dir"
+    run_cmd "setting PostgreSQL data ownership recursively" chown -R 999:999 "$pg_data_dir"
+    run_cmd "setting PostgreSQL data permissions recursively" chmod -R u+rwX,go-rwx "$pg_data_dir"
+    run_cmd "setting PostgreSQL data directory mode" chmod 700 "$pg_data_dir"
+    run_cmd "setting PostgreSQL init directory readability" chmod 755 "$pg_init_dir"
+
+    msg_ok "POSTGRESQL DATA DIRECTORY READY"
+    detail_line "Data path" "$pg_data_dir"
+    detail_line "Data owner" "999:999 recursive"
+    detail_line "Data mode" "700 root, u+rwX,go-rwx recursive"
+
+    if docker_cmd inspect postgres --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null | grep -Eq 'restarting|unhealthy|exited|dead'; then
+        msg_warn "Existing PostgreSQL container is stale/unhealthy; removing container only, keeping data."
+        docker_cmd rm -f postgres >/dev/null 2>&1 || true
+        msg_ok "STALE POSTGRESQL CONTAINER REMOVED"
+    fi
+}
+
+function prepare_redis_runtime_prereqs() {
+    if ! selected_stack_contains "$REDIS_STACK_FILE"; then
+        return 0
+    fi
+
+    section "REDIS RUNTIME PREREQS"
+
+    local redis_data_dir="${DOCKER_DIR}/appdata/redis"
+
+    run_cmd "creating Redis data directory" mkdir -p "$redis_data_dir"
+    run_cmd "setting Redis data ownership" chown -R 999:999 "$redis_data_dir"
+    run_cmd "setting Redis writable permissions" chmod 770 "$redis_data_dir"
+
+    msg_ok "REDIS DATA DIRECTORY READY"
+    detail_line "Path" "$redis_data_dir"
+    detail_line "Owner" "999:999"
+    detail_line "Mode" "770"
+}
+
+function require_nonempty_env_value() {
+    local key="$1"
+    local value=""
+
+    value="$(env_value "$key")"
+
+    if [ -z "$value" ]; then
+        msg_error "Required .env value ${key} is missing or empty. Run fixed Script 6 before deployment."
+    fi
+
+    msg_ok "REQUIRED SECRET/VALUE PRESENT: ${key}"
+}
+
+function show_postgres_diagnostics() {
+    echo ""
+    echo -e "${YW}PostgreSQL diagnostics:${CL}"
+    docker_cmd ps -a --filter "name=postgres" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+    docker_cmd inspect postgres --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} restart_count={{.RestartCount}} oom={{.State.OOMKilled}} error={{.State.Error}}' 2>/dev/null || true
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/pgdata" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
+    else
+        stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/pgdata" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
+    fi
+    docker_cmd logs --tail=160 postgres 2>/dev/null || true
+}
+
+function wait_for_postgres_ready() {
+    section "POSTGRESQL READINESS CHECK"
+
+    local attempt=""
+    local max_attempts="150"
+    local container_status=""
+    local health_status=""
+    local restart_count=""
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        container_status="$(docker_cmd inspect postgres --format '{{.State.Status}}' 2>/dev/null || true)"
+        health_status="$(docker_cmd inspect postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
+        restart_count="$(docker_cmd inspect postgres --format '{{.RestartCount}}' 2>/dev/null || true)"
+
+        if [ "$container_status" == "running" ] && [ "$health_status" == "healthy" ]; then
+            msg_ok "POSTGRESQL READY"
+            detail_line "PostgreSQL container" "postgres"
+            return 0
+        fi
+
+        if [ "$container_status" == "restarting" ] && [ "${restart_count:-0}" -ge 1 ]; then
+            msg_warn "PostgreSQL container is restarting instead of starting cleanly."
+            show_postgres_diagnostics
+            msg_error "PostgreSQL is in a restart loop. Fix data directory permission/init/existing-data issue before continuing."
+        fi
+
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
+            tty_println "${BFR}${YW}PostgreSQL not ready yet (${attempt}/${max_attempts}). Waiting before dependencies...${CL}"
+            tty_println "${YW}Latest PostgreSQL readiness detail:${CL} status=${container_status:-missing} health=${health_status:-none} restart_count=${restart_count:-unknown}"
+        fi
+
+        sleep 2
+    done
+
+    show_postgres_diagnostics
+    msg_error "PostgreSQL did not become healthy before dependent stacks."
+}
+
+function verify_redis_persistence_ready() {
+    if ! selected_stack_contains "$REDIS_STACK_FILE"; then
+        return 0
+    fi
+
+    section "REDIS PERSISTENCE CHECK"
+
+    local attempt=""
+    local max_attempts="60"
+    local state=""
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        state="$(docker_cmd inspect redis --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
+        if [ "$state" == "healthy" ] || [ "$state" == "running" ]; then
+            break
+        fi
+        sleep 2
+    done
+
+    if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1; then
+        docker_cmd logs --tail=120 redis 2>/dev/null || true
+        msg_error "Redis BGSAVE failed. Fix ${DOCKER_DIR}/appdata/redis ownership/permissions before continuing."
+    fi
+
+    if docker_cmd logs --tail=200 redis 2>/dev/null | grep -Eiq 'MISCONF|Permission denied|Background saving error'; then
+        docker_cmd logs --tail=120 redis 2>/dev/null || true
+        msg_error "Redis logs show persistence errors. Fix Redis /data permissions before continuing."
+    fi
+
+    msg_ok "REDIS PERSISTENCE VERIFIED"
+}
+
+function wait_for_temporal_ready() {
+    if ! selected_stack_contains "$TEMPORAL_STACK_FILE"; then
+        return 0
+    fi
+
+    section "TEMPORAL READINESS CHECK"
+
+    local temporal_address="${TEMPORAL_ADDRESS:-temporal:7233}"
+    local temporal_namespace="${TEMPORAL_NAMESPACE:-default}"
+    local temporal_admin_tools_image=""
+    local attempt=""
+    local max_attempts="150"
+    local err_file=""
+
+    temporal_admin_tools_image="$(env_value TEMPORAL_ADMIN_TOOLS_IMAGE)"
+    [ -z "$temporal_admin_tools_image" ] && temporal_admin_tools_image="temporalio/admin-tools:latest"
+
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        if docker_cmd run --rm --network database "$temporal_admin_tools_image" \
+            temporal --address "$temporal_address" --namespace "$temporal_namespace" \
+            operator search-attribute list >/dev/null 2>"$err_file"; then
+            msg_ok "TEMPORAL API READY"
+            detail_line "Temporal address" "$temporal_address"
+            detail_line "Temporal namespace" "$temporal_namespace"
+            return 0
+        fi
+
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
+            tty_println "${BFR}${YW}Temporal API not ready yet (${attempt}/${max_attempts}). Waiting before Postiz Temporal Guard...${CL}"
+        fi
+
+        sleep 2
+    done
+
+    echo -e "${RD}Last Temporal CLI error:${CL}"
+    cat "$err_file" 2>/dev/null || true
+    docker_cmd logs --tail=160 temporal 2>/dev/null || true
+    docker_cmd logs --tail=100 postgres 2>/dev/null || true
+    msg_error "Temporal is not reachable on ${temporal_address}. Fix Temporal/PostgreSQL before running Postiz Temporal Guard."
+}
+
+# --- 33I. DOCKGE COMPOSE LAYOUT SYNC ---
+# Dockge expects stacks in ${DOCKER_DIR}/compose/<stack name>/compose.yaml.
 function dockge_stack_dir_name_for_file() {
     local file="$1"
 
@@ -1927,6 +1662,9 @@ function sync_bootstrap_override_for_dockge() {
     msg_ok "DOCKGE BOOTSTRAP OVERRIDE READY: ${target_file}"
 }
 
+
+# --- 33H. STACK REGISTRY HELPERS ---
+# Uses the fixed uploaded project structure. No GitHub scanning is performed.
 function stack_project_for_file() {
     local file="$1"
     case "$file" in
@@ -2072,15 +1810,8 @@ function verify_compose_env_coverage_for_file() {
     local missing="no"
     local token=""
     local var=""
-    local scan_content=""
 
     [ -f "$path" ] || msg_error "Compose file missing for env coverage check: ${path}"
-
-    # Docker Compose uses $${...} to pass ${...} through to the container shell.
-    # Those are container-side variables, not host .env requirements. Strip them
-    # before scanning so one-shot helper scripts do not create false positives like
-    # temporal_address or temporal_namespace.
-    scan_content="$(sed -E 's/\$\$\{[^}]*\}//g' "$path")"
 
     while IFS= read -r token; do
         # Convert a compose token like ${DOCKER_DIR} or ${POSTIZ_IMAGE:-image:latest}
@@ -2094,6 +1825,9 @@ function verify_compose_env_coverage_for_file() {
             continue
         fi
 
+        # Ignore variables intentionally escaped for container-side shell scripts, e.g. $${i} in one-shot guards.
+        [ "$var" == "i" ] && continue
+
         # Defensive guard before ${!var}; indirect expansion requires a valid shell variable name.
         if ! [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
             continue
@@ -2103,8 +1837,7 @@ function verify_compose_env_coverage_for_file() {
             echo -e "${RD}Missing variable for ${file}:${CL} ${var}"
             missing="yes"
         fi
-    done < <(printf '%s
-' "$scan_content" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}' | sort -u || true)
+    done < <(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}' "$path" | sort -u || true)
 
     [ "$missing" == "no" ] || msg_error "Compose variable coverage failed for ${file}. Run fixed Script 6 first."
 }
@@ -2123,12 +1856,6 @@ function verify_selected_compose_env_coverage() {
     msg_ok "SELECTED COMPOSE VARIABLE COVERAGE PASSED"
 }
 
-function patch_postgres_compose_image_compatibility() {
-    # No image pinning/rewrite: YML 02 is PostgreSQL latest/18+ compatible via pgdata:/var/lib/postgresql.
-    return 0
-}
-
-
 function download_fixed_stack_file() {
     local file="$1"
     local target="${COMPOSE_DIR}/${file}"
@@ -2137,8 +1864,7 @@ function download_fixed_stack_file() {
     msg_info "Downloading ${file}"
     curl --globoff -fsSL "$url" -o "$target" || msg_error "Failed to download ${url}"
     [ -s "$target" ] || msg_error "Downloaded file is empty: ${target}"
-    local stale_authentik_docker_middleware="authentik@""docker"
-    if grep -q "$stale_authentik_docker_middleware" "$target"; then
+    if grep -q "authentik@""docker" "$target"; then
         msg_error "Forbidden stale Authentik Docker-provider middleware reference found in ${file}."
     fi
     run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target"
@@ -2214,7 +1940,7 @@ function deploy_selected_stacks() {
         fi
 
         section "DEPLOY STACK - ${project^^}"
-        run_compose_up_visible "$project" "$file" "$service"
+        compose_up_quiet "deploying ${project}" --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}"
         msg_ok "DEPLOYED ${project^^}"
 
         if [ -n "$service" ]; then
@@ -2259,10 +1985,6 @@ function verify_cf_companion_runtime_if_selected() {
     msg_ok "CF-COMPANION LOGS SHOW NO OBVIOUS AUTH FAILURE"
 }
 
-# =========================================================
-#  NETWORK BOOTSTRAP
-# =========================================================
-
 
 # =========================================================
 #  AUTHENTIK FORWARD-AUTH SETUP / ROUTE VERIFICATION
@@ -2280,25 +2002,106 @@ function json_escape() {
     python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'
 }
 
-function collect_authentik_api_token_for_deploy() {
-    if [ -n "${AUTHENTIK_API_TOKEN:-}" ]; then
-        msg_ok "AUTHENTIK API TOKEN FOUND"
+function verify_authentik_dependencies_for_deploy() {
+    section "AUTHENTIK DEPENDENCY GATE"
+
+    local required="no"
+    local check_output=""
+
+    if [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]] || [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]] || [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
+        required="yes"
+    fi
+
+    if [ "$required" != "yes" ]; then
+        AUTHENTIK_DEPENDENCIES_OK="skipped"
+        msg_skip "AUTHENTIK DEPENDENCY GATE SKIPPED"
         return 0
     fi
 
-    AUTHENTIK_API_TOKEN="$(env_value AUTHENTIK_API_TOKEN)"
-    if [ -n "$AUTHENTIK_API_TOKEN" ]; then
+    if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'authentik-server'; then
+        AUTHENTIK_DEPENDENCIES_OK="authentik-not-running"
+        msg_warn "authentik-server is not running; API automation skipped."
+        return 0
+    fi
+
+    if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'postgres'; then
+        msg_error "PostgreSQL container is not running. Fix PostgreSQL before Authentik automation."
+    fi
+
+    if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'redis'; then
+        msg_error "Redis container is not running. Fix Redis before Authentik automation."
+    fi
+
+    run_cmd "repairing PostgreSQL pgdata ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "repairing PostgreSQL pgdata permissions" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "repairing PostgreSQL pgdata mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "repairing Redis data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "repairing Redis data permissions" chmod 770 "${DOCKER_DIR}/appdata/redis"
+
+    if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1 || docker_cmd logs --tail=120 redis 2>/dev/null | grep -Eiq 'MISCONF|Permission denied|Background saving error'; then
+        docker_cmd logs --tail=120 redis 2>/dev/null || true
+        msg_error "Redis persistence is not healthy. Fix ${DOCKER_DIR}/appdata/redis before Authentik API automation."
+    fi
+
+    check_output="$(docker_cmd exec authentik-server sh -lc '
+python - <<PY
+import socket, sys
+failed = False
+for host, port in [("postgres", 5432), ("redis", 6379)]:
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+        print(f"OK {host}:{port}")
+    except Exception as e:
+        print(f"FAIL {host}:{port} {e}")
+        failed = True
+sys.exit(1 if failed else 0)
+PY
+' 2>&1)" || {
+        echo "$check_output"
+        docker_cmd logs --tail=100 postgres 2>/dev/null || true
+        docker_cmd logs --tail=100 redis 2>/dev/null || true
+        msg_error "authentik-server cannot reach PostgreSQL/Redis. Fix dependency DNS/connectivity before API token setup."
+    }
+
+    echo "$check_output"
+    AUTHENTIK_DEPENDENCIES_OK="yes"
+    msg_ok "AUTHENTIK DEPENDENCIES VERIFIED"
+}
+
+function collect_authentik_api_token_for_deploy() {
+    local env_api_token=""
+    local env_bootstrap_token=""
+
+    if [ -n "${AUTHENTIK_API_TOKEN:-}" ]; then
+        msg_ok "AUTHENTIK API TOKEN FOUND IN ENVIRONMENT"
+        return 0
+    fi
+
+    env_api_token="$(env_value AUTHENTIK_API_TOKEN)"
+    env_bootstrap_token="$(env_value AUTHENTIK_BOOTSTRAP_TOKEN)"
+
+    if [ -n "$env_api_token" ]; then
+        AUTHENTIK_API_TOKEN="$env_api_token"
         export AUTHENTIK_API_TOKEN
         msg_ok "AUTHENTIK API TOKEN LOADED FROM .ENV"
         return 0
     fi
 
+    if [ -n "$env_bootstrap_token" ]; then
+        AUTHENTIK_API_TOKEN="$env_bootstrap_token"
+        export AUTHENTIK_API_TOKEN
+        msg_ok "AUTHENTIK API TOKEN LOADED FROM AUTHENTIK_BOOTSTRAP_TOKEN"
+        return 0
+    fi
+
     section "AUTHENTIK API TOKEN"
-    echo -e "${YW}A real Authentik API token is required to automate provider/application/outpost setup.${CL}"
-    echo -e "${YW}AUTHENTIK_BOOTSTRAP_TOKEN is not an API token.${CL}"
+    echo -e "${YW}A valid Authentik API token is required to automate provider/application/outpost setup.${CL}"
+    echo -e "${YW}Fresh Authentik creates the akadmin API Access token from AUTHENTIK_BOOTSTRAP_TOKEN.${CL}"
     echo -e "${YW}Leave blank to skip automation and keep bootstrap/direct access open.${CL}"
+
     AUTHENTIK_API_TOKEN="$(sensitive_line_input "Paste Authentik API token, or leave blank")"
     AUTHENTIK_API_TOKEN="$(printf '%s' "$AUTHENTIK_API_TOKEN" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
     if [ -z "$AUTHENTIK_API_TOKEN" ]; then
         msg_warn "AUTHENTIK API TOKEN NOT PROVIDED; PROTECTED ROUTE AUTOMATION SKIPPED"
     else
@@ -2536,14 +2339,18 @@ function verify_selected_protected_routes() {
 }
 
 function configure_authentik_and_verify_routes() {
-    # Always configure/verify Authentik for the selected admin UI. Optional protected
-    # routes for code/filebrowser are added when those stacks are selected.
+    verify_authentik_dependencies_for_deploy
     collect_authentik_api_token_for_deploy
     verify_authentik_api_for_deploy
     create_or_update_authentik_forward_auth_for_deploy
     verify_authentik_outpost_route_for_deploy
     verify_selected_protected_routes
 }
+
+
+# =========================================================
+#  NETWORK BOOTSTRAP
+# =========================================================
 
 # --- 34. NETWORK CREATION ---
 # Creates the shared external networks used by all independent compose stacks.
@@ -2712,7 +2519,7 @@ function deploy_socket_proxy() {
     section "DEPLOY STACK - SOCKET PROXY"
 
     msg_info "Deploying socket-proxy"
-    run_docker_cmd "deploying socket-proxy" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}" up -d
+    compose_up_quiet "deploying socket-proxy" --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
     SOCKET_PROXY_DEPLOYED="yes"
     msg_ok "SOCKET-PROXY DEPLOYED"
 }
@@ -2724,7 +2531,7 @@ function deploy_admin_ui() {
 
     export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
     msg_info "Deploying ${ADMIN_UI_DISPLAY_NAME} with bootstrap port"
-    run_docker_cmd "deploying ${ADMIN_UI_DISPLAY_NAME}" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" up -d
+    compose_up_quiet "deploying ${ADMIN_UI_DISPLAY_NAME}" --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
     ADMIN_UI_DEPLOYED="yes"
 
     if [ "$ADMIN_UI" == "portainer" ]; then
@@ -2891,6 +2698,13 @@ VERIFY_LOG_EOF
         echo "Authentik folders: ${AUTHENTIK_FOLDERS_OK}"
         echo "CF companion secret: ${CF_COMPANION_SECRET_OK}"
         echo "Filebrowser folders: ${FILEBROWSER_FOLDERS_OK}"
+        echo "Authentik dependency gate: ${AUTHENTIK_DEPENDENCIES_OK}"
+        echo "Authentik API: ${AUTHENTIK_API_OK}"
+        echo "Authentik provider: ${AUTHENTIK_PROVIDER_OK}"
+        echo "Authentik application: ${AUTHENTIK_APPLICATION_OK}"
+        echo "Authentik outpost attach: ${AUTHENTIK_OUTPOST_ATTACH_OK}"
+        echo "Authentik outpost 302: ${AUTHENTIK_OUTPOST_302_OK}"
+        echo "Protected routes: ${PROTECTED_ROUTE_VERIFY_OK}"
                 echo ""
         echo "Docker containers:"
         docker_cmd ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
@@ -2943,6 +2757,13 @@ Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
 Authentik folders OK: $AUTHENTIK_FOLDERS_OK
 CF companion secret OK: $CF_COMPANION_SECRET_OK
 Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
+Authentik dependency gate: $AUTHENTIK_DEPENDENCIES_OK
+Authentik API OK: $AUTHENTIK_API_OK
+Authentik provider OK: $AUTHENTIK_PROVIDER_OK
+Authentik application OK: $AUTHENTIK_APPLICATION_OK
+Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
+Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Protected routes OK: $PROTECTED_ROUTE_VERIFY_OK
 Verify log: $VERIFY_LOG
 MARKER_EOF
     else
@@ -2982,6 +2803,13 @@ Traefik authentik references OK: $TRAEFIK_AUTHENTIK_REFERENCES_OK
 Authentik folders OK: $AUTHENTIK_FOLDERS_OK
 CF companion secret OK: $CF_COMPANION_SECRET_OK
 Filebrowser folders OK: $FILEBROWSER_FOLDERS_OK
+Authentik dependency gate: $AUTHENTIK_DEPENDENCIES_OK
+Authentik API OK: $AUTHENTIK_API_OK
+Authentik provider OK: $AUTHENTIK_PROVIDER_OK
+Authentik application OK: $AUTHENTIK_APPLICATION_OK
+Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
+Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Protected routes OK: $PROTECTED_ROUTE_VERIFY_OK
 Verify log: $VERIFY_LOG
 MARKER_EOF
     fi
@@ -3007,6 +2835,9 @@ function show_final_summary() {
     detail_line "TRAEFIK ENCODED CHARS" "$TRAEFIK_ENCODED_CHARS_OK"
     detail_line "AUTHENTIK FOLDERS" "$AUTHENTIK_FOLDERS_OK"
     detail_line "FILEBROWSER FOLDERS" "$FILEBROWSER_FOLDERS_OK"
+    detail_line "AUTHENTIK DEPENDENCIES" "$AUTHENTIK_DEPENDENCIES_OK"
+    detail_line "AUTHENTIK API" "$AUTHENTIK_API_OK"
+    detail_line "PROTECTED ROUTES" "$PROTECTED_ROUTE_VERIFY_OK"
     detail_line "Admin UI temporary URL" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
     detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"
     detail_line "Verify log" "$VERIFY_LOG"
@@ -3014,11 +2845,11 @@ function show_final_summary() {
     echo ""
     echo -e "${YW}${ADMIN_UI_DISPLAY_NAME} is temporarily available by direct IP for bootstrap:${CL}"
     echo -e "${GN}${ADMIN_UI_BOOTSTRAP_ACCESS_URL}${CL}"
-    echo -e "${YW}Script 7 will close this direct bootstrap port only after protected Traefik/AuthentiK access is re-verified.${CL}"
+    echo -e "${YW}Script 7 will close this direct bootstrap port and leave access through Traefik/AuthentiK.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
     echo -e "${YW}Deploy the remaining application stacks in the documented order.${CL}"
-    echo -e "${YW}After all stacks are stable and protected routes are verified, run Script 7 for hardening, cleanup, image lock reporting and bootstrap-port closure.${CL}"
+    echo -e "${YW}After all stacks are stable, run Script 7 for SSO and bootstrap-port hardening.${CL}"
     echo ""
 }
 
