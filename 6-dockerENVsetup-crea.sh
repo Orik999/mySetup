@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.4.4"
+SCRIPT_VERSION="v1.4.5"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="domain-value-final-heredoc-fix"
+SCRIPT_BUILD="env-write-domain-alias-and-heredoc-audit"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1715,9 +1715,9 @@ function collect_authentik_inputs() {
 
     echo ""
     echo -e "${YW}Choose how Script 6 should set the Authentik bootstrap token.${CL}"
-    echo -e "${YW}For fresh Authentik startup this becomes the akadmin API Access token.${CL}"
-    echo -e "${BL}1) Auto-generate bootstrap/API token ${GN}(recommended/default)${CL}"
-    echo -e "${BL}2) Enter custom bootstrap/API token${CL}"
+    echo -e "${YW}Reminder: the bootstrap token is not an Authentik API token.${CL}"
+    echo -e "${BL}1) Auto-generate bootstrap token ${GN}(recommended/default)${CL}"
+    echo -e "${BL}2) Enter custom bootstrap token${CL}"
     echo ""
 
     while true; do
@@ -1742,38 +1742,33 @@ function collect_authentik_inputs() {
     done
 
     echo ""
-    echo -e "${YW}Script 6.5 will configure Authentik provider/application/outpost setup during deployment.${CL}"
-    echo -e "${YW}Fresh Authentik creates an akadmin API Access token from AUTHENTIK_BOOTSTRAP_TOKEN.${CL}"
-    echo -e "${YW}Default: reuse the bootstrap token automatically. Paste a different API token only for an existing Authentik install.${CL}"
-    echo -e "${BL}1) Use AUTHENTIK_BOOTSTRAP_TOKEN as API token ${GN}(recommended/default)${CL}"
+    echo -e "${YW}Optional: Script 7 can automate Authentik provider/application setup if you later paste a real Authentik API token.${CL}"
+    echo -e "${YW}Important: AUTHENTIK_BOOTSTRAP_TOKEN is not an API token.${CL}"
+    echo -e "${BL}1) Skip API token now ${GN}(recommended)${CL}"
     echo -e "${BL}2) Paste existing Authentik API token${CL}"
-    echo -e "${BL}3) Skip API automation for now${CL}"
+    echo -e "${BL}3) Show guidance later in Script 7${CL}"
     echo ""
 
     api_choice="$(untimed_menu_input "Select Authentik API token option [1-3]" "1")"
     case "$api_choice" in
         2)
             AUTHENTIK_API_TOKEN_VALUE="$(sensitive_line_input "Paste existing Authentik API token")" || AUTHENTIK_API_TOKEN_VALUE=""
-            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '
-')"
+            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '\r\n')"
             if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
                 AUTHENTIK_API_TOKEN_MODE="provided"
                 msg_ok "AUTHENTIK API TOKEN CAPTURED"
             else
-                AUTHENTIK_API_TOKEN_MODE="bootstrap"
-                AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
-                msg_warn "No API token pasted. Script 6.5 will try AUTHENTIK_BOOTSTRAP_TOKEN."
+                AUTHENTIK_API_TOKEN_MODE="skip"
+                msg_warn "No API token pasted. Script 7 automation will ask again if needed."
             fi
             ;;
         3)
-            AUTHENTIK_API_TOKEN_MODE="skip"
-            AUTHENTIK_API_TOKEN_VALUE=""
-            msg_ok "AUTHENTIK API AUTOMATION SKIPPED FOR NOW"
+            AUTHENTIK_API_TOKEN_MODE="guide"
+            msg_ok "SCRIPT 7 WILL SHOW API TOKEN GUIDANCE"
             ;;
         *)
-            AUTHENTIK_API_TOKEN_MODE="bootstrap"
-            AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
-            msg_ok "AUTHENTIK API TOKEN WILL REUSE BOOTSTRAP TOKEN"
+            AUTHENTIK_API_TOKEN_MODE="skip"
+            msg_ok "AUTHENTIK API TOKEN SETUP SKIPPED FOR NOW"
             ;;
     esac
 
@@ -2058,6 +2053,19 @@ function write_env_file() {
     section "DOCKER .ENV"
 
     msg_info "Creating Docker .env file"
+
+    # Defensive compatibility alias for any legacy/template line that still
+    # references the old DOMAIN variable name. Script 6's collected canonical
+    # value is DOMAIN_VALUE, but set -u turns stale expansion into a hard
+    # failure during heredoc rendering.
+    local DOMAIN="${DOMAIN_VALUE}"
+
+    # Fail with a clear message before the heredoc if any required collected
+    # value is unexpectedly empty/unset. This avoids cryptic set -u messages.
+    : "${DOMAIN_VALUE:?DOMAIN_VALUE is required before writing .env}"
+    : "${DOCKER_DIR:?DOCKER_DIR is required before writing .env}"
+    : "${DOCKER_SECRETS_DIR:?DOCKER_SECRETS_DIR is required before writing .env}"
+    : "${USERDIR:?USERDIR is required before writing .env}"
 
     write_root_file "${DOCKER_DIR}/.env" <<EOF
 # =========================================================
@@ -2480,7 +2488,7 @@ function show_secrets_once_without_logging() {
     else
         echo -e "AUTHENTIK_API_TOKEN=${YW}<empty / skipped>${CL}"
     fi
-    echo -e "${YW}Reminder: for fresh Authentik, AUTHENTIK_BOOTSTRAP_TOKEN creates an akadmin API Access token and Script 6.5 can reuse it.${CL}"
+    echo -e "${YW}Reminder: AUTHENTIK_BOOTSTRAP_TOKEN is not an Authentik API token.${CL}"
 
     echo ""
     echo -e "${BL}SERVICE SECRETS:${CL}"
