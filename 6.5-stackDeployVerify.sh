@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.4"
+SCRIPT_VERSION="v1.3.5"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="compose-parser-skip-escaped-container-vars"
+SCRIPT_BUILD="temporal-readiness-preflight-diagnostics"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -741,6 +741,81 @@ function run_postiz_temporal_guard_stack() {
         docker_cmd logs postiz-temporal-guard 2>/dev/null || true
         exit 1
     fi
+}
+
+
+
+# --- 29B. TEMPORAL DIAGNOSTIC HELPER ---
+# Prints actionable Temporal container state and logs when readiness fails.
+function show_temporal_diagnostics() {
+    echo ""
+    echo -e "${YW}Temporal diagnostics:${CL}"
+
+    echo -e "${BL}Container state:${CL}"
+    docker_cmd ps -a --filter "name=temporal" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}Temporal logs, last 160 lines:${CL}"
+    docker_cmd logs --tail=160 temporal 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}Temporal auto-setup logs, last 120 lines if present:${CL}"
+    docker_cmd logs --tail=120 temporal-admin-tools 2>/dev/null || true
+    docker_cmd logs --tail=120 temporal-schema 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}PostgreSQL logs, last 80 lines:${CL}"
+    docker_cmd logs --tail=80 postgres 2>/dev/null || true
+}
+
+# --- 29C. TEMPORAL READINESS WAIT HELPER ---
+# Verifies Temporal is actually reachable before running Postiz Temporal Guard.
+# A running container alone is not enough; port 7233 must accept Temporal CLI calls.
+function wait_for_temporal_ready() {
+    section "TEMPORAL READINESS CHECK"
+
+    local temporal_address="${TEMPORAL_ADDRESS:-temporal:7233}"
+    local temporal_namespace="${TEMPORAL_NAMESPACE:-default}"
+    local temporal_admin_tools_image=""
+    local attempt=""
+    local max_attempts="150"
+    local err_file=""
+
+    temporal_admin_tools_image="$(env_value TEMPORAL_ADMIN_TOOLS_IMAGE)"
+    [ -z "$temporal_admin_tools_image" ] && temporal_admin_tools_image="temporalio/admin-tools:latest"
+
+    err_file="$(mktemp)"
+    TEMP_FILES+=("$err_file")
+
+    msg_info "Waiting for Temporal API at ${temporal_address}"
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        if docker_cmd run --rm --network database "$temporal_admin_tools_image" \
+            temporal --address "$temporal_address" --namespace "$temporal_namespace" \
+            operator search-attribute list >/dev/null 2>"$err_file"; then
+            msg_ok "TEMPORAL API READY"
+            detail_line "Temporal address" "$temporal_address"
+            detail_line "Temporal namespace" "$temporal_namespace"
+            rm -f "$err_file"
+            return 0
+        fi
+
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
+            tty_println "${BFR}${YW}Temporal API not ready yet (${attempt}/${max_attempts}). Waiting before Postiz Temporal Guard...${CL}"
+        fi
+
+        sleep 2
+    done
+
+    echo ""
+    msg_warn "Temporal API did not become ready before Postiz Temporal Guard."
+    echo -e "${RD}Last Temporal CLI error:${CL}"
+    cat "$err_file" 2>/dev/null || true
+
+    show_temporal_diagnostics
+
+    echo ""
+    msg_error "Temporal is not reachable on ${temporal_address}. Fix Temporal/PostgreSQL startup before running Postiz Temporal Guard."
 }
 
 
@@ -1546,7 +1621,8 @@ function verify_compose_env_coverage_for_file() {
             echo -e "${RD}Missing variable for ${file}:${CL} ${var}"
             missing="yes"
         fi
-    done < <(printf '%s\n' "$scan_content" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}' | sort -u || true)
+    done < <(printf '%s
+' "$scan_content" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}' | sort -u || true)
 
     [ "$missing" == "no" ] || msg_error "Compose variable coverage failed for ${file}. Run fixed Script 6 first."
 }
@@ -1658,6 +1734,10 @@ function deploy_selected_stacks() {
             else
                 msg_warn "Container ${service} not confirmed yet. It may still be starting; check docker logs if needed."
             fi
+        fi
+
+        if [ "$file" == "$TEMPORAL_STACK_FILE" ]; then
+            wait_for_temporal_ready
         fi
     done
 }
