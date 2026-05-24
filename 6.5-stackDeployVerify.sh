@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.6"
+SCRIPT_VERSION="v1.3.7"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="postgres-readiness-before-temporal"
+SCRIPT_BUILD="postgres-readiness-client-check-no-exec-noise"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -847,22 +847,56 @@ function wait_for_postgres_ready() {
     local attempt=""
     local max_attempts="150"
     local err_file=""
+    local pg_user=""
+    local pg_db=""
+    local pg_password=""
+    local pg_client_image=""
+    local container_status=""
+    local health_status=""
+
+    pg_user="$(env_value POSTGRES_USER)"
+    [ -z "$pg_user" ] && pg_user="postgres"
+
+    pg_db="$(env_value POSTGRES_DB)"
+    [ -z "$pg_db" ] && pg_db="$pg_user"
+
+    pg_password="$(env_value POSTGRES_PASSWORD)"
+
+    pg_client_image="$(env_value POSTGRES_CLIENT_IMAGE)"
+    [ -z "$pg_client_image" ] && pg_client_image="$(env_value POSTGRES_IMAGE)"
+    [ -z "$pg_client_image" ] && pg_client_image="postgres:16-alpine"
 
     err_file="$(mktemp)"
     TEMP_FILES+=("$err_file")
 
-    msg_info "Waiting for PostgreSQL to accept local connections"
+    msg_info "Waiting for PostgreSQL to accept network connections"
 
     for attempt in $(seq 1 "$max_attempts"); do
-        if docker_cmd exec postgres sh -c 'pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1 || pg_isready >/dev/null 2>&1' 2>"$err_file"; then
+        container_status="$(docker_cmd inspect postgres --format '{{.State.Status}}' 2>/dev/null || true)"
+        health_status="$(docker_cmd inspect postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
+
+        if [ "$container_status" != "running" ]; then
+            printf 'postgres container status: %s\n' "${container_status:-missing}" > "$err_file"
+        elif [ "$health_status" == "healthy" ]; then
             msg_ok "POSTGRESQL READY"
             detail_line "PostgreSQL container" "postgres"
+            detail_line "Readiness source" "container healthcheck"
+            rm -f "$err_file"
+            return 0
+        elif docker_cmd run --rm --network database -e "PGPASSWORD=${pg_password}" "$pg_client_image" \
+            pg_isready -h postgres -p 5432 -U "$pg_user" -d "$pg_db" >/dev/null 2>"$err_file"; then
+            msg_ok "POSTGRESQL READY"
+            detail_line "PostgreSQL container" "postgres"
+            detail_line "Readiness source" "network pg_isready"
             rm -f "$err_file"
             return 0
         fi
 
         if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
             tty_println "${BFR}${YW}PostgreSQL not ready yet (${attempt}/${max_attempts}). Waiting before Temporal/AuthentiK/Postiz dependencies...${CL}"
+            if [ -s "$err_file" ]; then
+                tty_println "${YW}Latest PostgreSQL readiness detail:${CL} $(tail -n 1 "$err_file" 2>/dev/null || true)"
+            fi
         fi
 
         sleep 2
@@ -870,13 +904,13 @@ function wait_for_postgres_ready() {
 
     echo ""
     msg_warn "PostgreSQL did not become ready before dependent stacks."
-    echo -e "${RD}Last PostgreSQL readiness error:${CL}"
+    echo -e "${RD}Last PostgreSQL readiness detail:${CL}"
     cat "$err_file" 2>/dev/null || true
 
     show_postgres_diagnostics
 
     echo ""
-    msg_error "PostgreSQL is not accepting connections. Fix PostgreSQL startup/permissions before deploying Temporal."
+    msg_error "PostgreSQL is not accepting network connections. Fix PostgreSQL startup/permissions before deploying Temporal."
 }
 
 
