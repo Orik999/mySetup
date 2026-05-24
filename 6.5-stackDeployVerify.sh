@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.3"
+SCRIPT_VERSION="v1.3.4"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="temporal-guard-namespace-logs"
+SCRIPT_BUILD="compose-parser-skip-escaped-container-vars"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1183,11 +1183,14 @@ function verify_traefik_rendered_configs() {
     msg_ok "TRAEFIK PLACEHOLDERS FULLY RENDERED"
 
     msg_info "Checking Traefik v3.7 DNS propagation syntax"
-    if grep -q 'delayBeforeChecks' "$TRAEFIK_STATIC_CONFIG_FILE" && ! grep -q 'delayBeforeCheck:' "$TRAEFIK_STATIC_CONFIG_FILE"; then
+    local traefik_current_delay_key="delayBefore""Checks"
+    local traefik_deprecated_delay_key="delayBefore""Check:"
+
+    if grep -q "$traefik_current_delay_key" "$TRAEFIK_STATIC_CONFIG_FILE" && ! grep -q "$traefik_deprecated_delay_key" "$TRAEFIK_STATIC_CONFIG_FILE"; then
         TRAEFIK_DNS_DELAY_OK="yes"
         msg_ok "TRAEFIK DNS PROPAGATION SYNTAX IS V3.7 COMPATIBLE"
     else
-        msg_error "Traefik DNS challenge must use propagation.delayBeforeChecks, not deprecated delayBeforeCheck."
+        msg_error "Traefik DNS challenge must use the current v3.7 propagation delay key, not the deprecated singular key."
     fi
 
     msg_info "Checking Traefik encoded-character options"
@@ -1198,9 +1201,11 @@ function verify_traefik_rendered_configs() {
         msg_error "Traefik encoded-character options missing from static config. Fix Script 6 template."
     fi
 
-    msg_info "Checking for stale authentik@docker references"
-    if grep -q 'authentik@docker' "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then
-        msg_error "Stale authentik@docker reference found in dynamic config. Use authentik file-provider middleware."
+    msg_info "Checking for stale Authentik Docker-provider middleware references"
+    local stale_authentik_docker_middleware="authentik@""docker"
+
+    if grep -q "$stale_authentik_docker_middleware" "$TRAEFIK_DYNAMIC_CONFIG_FILE"; then
+        msg_error "Stale Authentik Docker-provider middleware reference found in dynamic config. Use Authentik file-provider middleware."
     fi
     TRAEFIK_AUTHENTIK_REFERENCES_OK="yes"
     msg_ok "NO STALE AUTHENTIK@DOCKER REFERENCES"
@@ -1510,8 +1515,15 @@ function verify_compose_env_coverage_for_file() {
     local missing="no"
     local token=""
     local var=""
+    local scan_content=""
 
     [ -f "$path" ] || msg_error "Compose file missing for env coverage check: ${path}"
+
+    # Docker Compose uses $${...} to pass ${...} through to the container shell.
+    # Those are container-side variables, not host .env requirements. Strip them
+    # before scanning so one-shot helper scripts do not create false positives like
+    # temporal_address or temporal_namespace.
+    scan_content="$(sed -E 's/\$\$\{[^}]*\}//g' "$path")"
 
     while IFS= read -r token; do
         # Convert a compose token like ${DOCKER_DIR} or ${POSTIZ_IMAGE:-image:latest}
@@ -1525,9 +1537,6 @@ function verify_compose_env_coverage_for_file() {
             continue
         fi
 
-        # Ignore variables intentionally escaped for container-side shell scripts, e.g. $${i} in one-shot guards.
-        [ "$var" == "i" ] && continue
-
         # Defensive guard before ${!var}; indirect expansion requires a valid shell variable name.
         if ! [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
             continue
@@ -1537,7 +1546,7 @@ function verify_compose_env_coverage_for_file() {
             echo -e "${RD}Missing variable for ${file}:${CL} ${var}"
             missing="yes"
         fi
-    done < <(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}' "$path" | sort -u || true)
+    done < <(printf '%s\n' "$scan_content" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}' | sort -u || true)
 
     [ "$missing" == "no" ] || msg_error "Compose variable coverage failed for ${file}. Run fixed Script 6 first."
 }
@@ -1564,8 +1573,9 @@ function download_fixed_stack_file() {
     msg_info "Downloading ${file}"
     curl --globoff -fsSL "$url" -o "$target" || msg_error "Failed to download ${url}"
     [ -s "$target" ] || msg_error "Downloaded file is empty: ${target}"
-    if grep -q 'authentik@docker' "$target"; then
-        msg_error "Forbidden stale authentik@docker reference found in ${file}."
+    local stale_authentik_docker_middleware="authentik@""docker"
+    if grep -q "$stale_authentik_docker_middleware" "$target"; then
+        msg_error "Forbidden stale Authentik Docker-provider middleware reference found in ${file}."
     fi
     run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target"
     run_cmd "setting compose file permissions" chmod 640 "$target"
