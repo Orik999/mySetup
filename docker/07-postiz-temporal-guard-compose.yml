@@ -10,6 +10,12 @@ services:
     image: ${TEMPORAL_ADMIN_TOOLS_IMAGE:-temporalio/admin-tools:latest}
     container_name: postiz-temporal-guard
     restart: "no"
+    environment:
+      # Temporal Server v1.20+ with SQL advanced visibility requires namespace-scoped
+      # search-attribute management. Keep this explicit so Postiz starts against
+      # the same namespace it uses at runtime.
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
     networks:
       - database
     entrypoint:
@@ -19,11 +25,14 @@ services:
       - |
         set -eu
 
-        echo "Waiting for Temporal at temporal:7233..."
+        temporal_address="$${TEMPORAL_ADDRESS:-temporal:7233}"
+        temporal_namespace="$${TEMPORAL_NAMESPACE:-default}"
+
+        echo "Waiting for Temporal at $${temporal_address} in namespace $${temporal_namespace}..."
         ready="no"
 
         for i in $$(seq 1 90); do
-          if temporal --address temporal:7233 operator search-attribute list >/tmp/temporal-search-attributes.txt 2>/tmp/temporal-search-attributes.err; then
+          if temporal --address "$${temporal_address}" --namespace "$${temporal_namespace}" operator search-attribute list >/tmp/temporal-search-attributes.txt 2>/tmp/temporal-search-attributes.err; then
             ready="yes"
             break
           fi
@@ -38,14 +47,14 @@ services:
         fi
 
         echo "Temporal is reachable. Current custom attributes:"
-        temporal --address temporal:7233 operator search-attribute list | grep Custom || true
+        temporal --address "$${temporal_address}" --namespace "$${temporal_namespace}" operator search-attribute list | grep Custom || true
 
         echo "Removing Temporal default Text attributes that break Postiz startup if present..."
-        temporal --address temporal:7233 operator search-attribute remove --name CustomTextField --yes || true
-        temporal --address temporal:7233 operator search-attribute remove --name CustomStringField --yes || true
+        temporal --address "$${temporal_address}" --namespace "$${temporal_namespace}" operator search-attribute remove --name CustomTextField --yes || true
+        temporal --address "$${temporal_address}" --namespace "$${temporal_namespace}" operator search-attribute remove --name CustomStringField --yes || true
 
         echo "Post-removal custom attributes:"
-        temporal --address temporal:7233 operator search-attribute list | tee /tmp/temporal-search-attributes-after.txt | grep Custom || true
+        temporal --address "$${temporal_address}" --namespace "$${temporal_namespace}" operator search-attribute list | tee /tmp/temporal-search-attributes-after.txt | grep Custom || true
 
         if grep -qE 'Custom(Text|String)Field[[:space:]]+Text' /tmp/temporal-search-attributes-after.txt; then
           echo "ERROR: Bad Temporal Text search attributes still remain after cleanup."

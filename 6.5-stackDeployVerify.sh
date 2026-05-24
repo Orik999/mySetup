@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.2"
+SCRIPT_VERSION="v1.3.3"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="compose-env-var-parser-fix"
+SCRIPT_BUILD="temporal-guard-namespace-logs"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -723,6 +723,24 @@ function run_docker_cmd() {
     fi
 
     rm -f "$err_file"
+}
+
+# --- 29A. POSTIZ TEMPORAL GUARD RUNNER ---
+# Runs the one-shot Temporal guard without hiding the container output. The guard
+# is intentionally verbose because a failure here decides whether Postiz can start.
+function run_postiz_temporal_guard_stack() {
+    local project="$1"
+    local file="$2"
+
+    if ! docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up --abort-on-container-exit --exit-code-from postiz-temporal-guard; then
+        echo ""
+        echo -e "${RD}Docker command failed during:${CL} running Postiz Temporal Guard"
+        echo -e "${YW}Command:${CL} docker compose --env-file ${ENV_FILE} -p ${project} -f ${COMPOSE_DIR}/${file} up --abort-on-container-exit --exit-code-from postiz-temporal-guard"
+        echo ""
+        echo -e "${YW}Postiz Temporal Guard logs:${CL}"
+        docker_cmd logs postiz-temporal-guard 2>/dev/null || true
+        exit 1
+    fi
 }
 
 
@@ -1615,7 +1633,7 @@ function deploy_selected_stacks() {
         if [ "$file" == "$POSTIZ_TEMPORAL_GUARD_STACK_FILE" ]; then
             section "RUN STACK - POSTIZ TEMPORAL GUARD"
             echo -e "${YW}Temporal Guard runs after Temporal is up and before Postiz starts. Do NOT restart Temporal after this succeeds.${CL}"
-            run_docker_cmd "running Postiz Temporal Guard" compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up --abort-on-container-exit --exit-code-from postiz-temporal-guard
+            run_postiz_temporal_guard_stack "$project" "$file"
             msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
             continue
         fi
