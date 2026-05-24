@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.4.5"
+SCRIPT_VERSION="v1.4.6"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="env-write-domain-alias-and-heredoc-audit"
+SCRIPT_BUILD="service-permission-audit-and-redis-data-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1715,9 +1715,9 @@ function collect_authentik_inputs() {
 
     echo ""
     echo -e "${YW}Choose how Script 6 should set the Authentik bootstrap token.${CL}"
-    echo -e "${YW}Reminder: the bootstrap token is not an Authentik API token.${CL}"
-    echo -e "${BL}1) Auto-generate bootstrap token ${GN}(recommended/default)${CL}"
-    echo -e "${BL}2) Enter custom bootstrap token${CL}"
+    echo -e "${YW}For fresh Authentik startup this becomes the akadmin API Access token.${CL}"
+    echo -e "${BL}1) Auto-generate bootstrap/API token ${GN}(recommended/default)${CL}"
+    echo -e "${BL}2) Enter custom bootstrap/API token${CL}"
     echo ""
 
     while true; do
@@ -1742,33 +1742,38 @@ function collect_authentik_inputs() {
     done
 
     echo ""
-    echo -e "${YW}Optional: Script 7 can automate Authentik provider/application setup if you later paste a real Authentik API token.${CL}"
-    echo -e "${YW}Important: AUTHENTIK_BOOTSTRAP_TOKEN is not an API token.${CL}"
-    echo -e "${BL}1) Skip API token now ${GN}(recommended)${CL}"
+    echo -e "${YW}Script 6.5 will configure Authentik provider/application/outpost setup during deployment.${CL}"
+    echo -e "${YW}Fresh Authentik creates an akadmin API Access token from AUTHENTIK_BOOTSTRAP_TOKEN.${CL}"
+    echo -e "${YW}Default: reuse the bootstrap token automatically. Paste a different API token only for an existing Authentik install.${CL}"
+    echo -e "${BL}1) Use AUTHENTIK_BOOTSTRAP_TOKEN as API token ${GN}(recommended/default)${CL}"
     echo -e "${BL}2) Paste existing Authentik API token${CL}"
-    echo -e "${BL}3) Show guidance later in Script 7${CL}"
+    echo -e "${BL}3) Skip API automation for now${CL}"
     echo ""
 
     api_choice="$(untimed_menu_input "Select Authentik API token option [1-3]" "1")"
     case "$api_choice" in
         2)
             AUTHENTIK_API_TOKEN_VALUE="$(sensitive_line_input "Paste existing Authentik API token")" || AUTHENTIK_API_TOKEN_VALUE=""
-            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '\r\n')"
+            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '
+')"
             if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
                 AUTHENTIK_API_TOKEN_MODE="provided"
                 msg_ok "AUTHENTIK API TOKEN CAPTURED"
             else
-                AUTHENTIK_API_TOKEN_MODE="skip"
-                msg_warn "No API token pasted. Script 7 automation will ask again if needed."
+                AUTHENTIK_API_TOKEN_MODE="bootstrap"
+                AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
+                msg_warn "No API token pasted. Script 6.5 will try AUTHENTIK_BOOTSTRAP_TOKEN."
             fi
             ;;
         3)
-            AUTHENTIK_API_TOKEN_MODE="guide"
-            msg_ok "SCRIPT 7 WILL SHOW API TOKEN GUIDANCE"
+            AUTHENTIK_API_TOKEN_MODE="skip"
+            AUTHENTIK_API_TOKEN_VALUE=""
+            msg_ok "AUTHENTIK API AUTOMATION SKIPPED FOR NOW"
             ;;
         *)
-            AUTHENTIK_API_TOKEN_MODE="skip"
-            msg_ok "AUTHENTIK API TOKEN SETUP SKIPPED FOR NOW"
+            AUTHENTIK_API_TOKEN_MODE="bootstrap"
+            AUTHENTIK_API_TOKEN_VALUE="$AUTHENTIK_BOOTSTRAP_TOKEN_VALUE"
+            msg_ok "AUTHENTIK API TOKEN WILL REUSE BOOTSTRAP TOKEN"
             ;;
     esac
 
@@ -1839,8 +1844,10 @@ function create_docker_directories() {
     # PostgreSQL 18+ / postgres:latest stores data under /var/lib/postgresql,
     # so the host bind mount must be the pgdata parent directory, not the old data subdirectory.
     run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "creating legacy PostgreSQL data directory compatibility path" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "creating Redis data directory" mkdir -p "${DOCKER_DIR}/appdata/redis"
+    run_cmd "creating Redis nested data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/redis/data"
 
     run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
     run_cmd "creating Authentik media directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
@@ -2054,19 +2061,6 @@ function write_env_file() {
 
     msg_info "Creating Docker .env file"
 
-    # Defensive compatibility alias for any legacy/template line that still
-    # references the old DOMAIN variable name. Script 6's collected canonical
-    # value is DOMAIN_VALUE, but set -u turns stale expansion into a hard
-    # failure during heredoc rendering.
-    local DOMAIN="${DOMAIN_VALUE}"
-
-    # Fail with a clear message before the heredoc if any required collected
-    # value is unexpectedly empty/unset. This avoids cryptic set -u messages.
-    : "${DOMAIN_VALUE:?DOMAIN_VALUE is required before writing .env}"
-    : "${DOCKER_DIR:?DOCKER_DIR is required before writing .env}"
-    : "${DOCKER_SECRETS_DIR:?DOCKER_SECRETS_DIR is required before writing .env}"
-    : "${USERDIR:?USERDIR is required before writing .env}"
-
     write_root_file "${DOCKER_DIR}/.env" <<EOF
 # =========================================================
 #  Project: Home-Hosted Social Media SaaS
@@ -2200,15 +2194,25 @@ function apply_permissions() {
     run_cmd "setting secrets directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_SECRETS_DIR"
 
     # Database services: must be owned by the container UID, not by the login user.
+    # PostgreSQL official images use UID/GID 999. PostgreSQL 18+/latest mounts the pgdata parent at /var/lib/postgresql.
+    # The legacy data path is also prepared so a stale/older compose file cannot cause Docker to create it as root:root.
+    run_cmd "setting PostgreSQL root ownership" chown 999:999 "${DOCKER_DIR}/appdata/postgres"
     run_cmd "setting PostgreSQL PG18-compatible data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL legacy data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "setting PostgreSQL PG18-compatible data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL legacy data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "setting PostgreSQL PG18-compatible data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL legacy data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
-    run_cmd "setting Redis data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
-    run_cmd "setting Redis writable permissions" chmod 770 "${DOCKER_DIR}/appdata/redis"
+    # Redis official images use UID/GID 999. Prepare both /appdata/redis and /appdata/redis/data because
+    # compose revisions may bind either path to /data. This prevents Docker from auto-creating a root-owned nested path.
+    run_cmd "setting Redis root data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis root data writable permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis root data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis nested data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis/data"
 
     # Authentik runs non-root and needs write access to media/templates/certs bind mounts.
     run_cmd "setting Authentik ownership" chown -R 1000:1000 "${DOCKER_DIR}/appdata/authentik"
@@ -2221,21 +2225,25 @@ function apply_permissions() {
     run_cmd "setting Filebrowser ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser"
     run_cmd "setting Filebrowser permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/filebrowser"
 
-    run_cmd "setting Postiz uploads ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
-    run_cmd "setting Postiz uploads permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
+    run_cmd "setting Postiz appdata ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
+    run_cmd "setting Postiz appdata permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
 
     case "$ADMIN_UI" in
         dockge)
             run_cmd "setting Dockge ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockge"
+            run_cmd "setting Dockge permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockge"
             ;;
         portainer)
             run_cmd "setting Portainer ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/portainer"
+            run_cmd "setting Portainer permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/portainer"
             ;;
         komodo)
             run_cmd "setting Komodo ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo"
+            run_cmd "setting Komodo permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo"
             ;;
         dockhand)
             run_cmd "setting Dockhand ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockhand"
+            run_cmd "setting Dockhand permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockhand"
             ;;
     esac
 
@@ -2257,6 +2265,94 @@ function apply_permissions() {
     fi
 
     msg_ok "SERVICE-SPECIFIC PERMISSIONS SET"
+}
+
+
+
+# --- 53A. SERVICE PERMISSION AUDIT ---
+# Fails early if Script 6 did not leave service bind mounts in the state required by the compose stacks.
+function assert_owner_mode() {
+    local path="$1"
+    local expected_uid="$2"
+    local expected_gid="$3"
+    local expected_mode="$4"
+    local actual=""
+
+    [ -e "$path" ] || msg_error "Permission audit path missing: ${path}"
+
+    actual="$(stat -c '%u:%g:%a' "$path" 2>/dev/null || true)"
+
+    if [ "$actual" != "${expected_uid}:${expected_gid}:${expected_mode}" ]; then
+        msg_error "Permission audit failed for ${path}. Expected ${expected_uid}:${expected_gid}:${expected_mode}, got ${actual:-unknown}."
+    fi
+
+    msg_ok "PERMISSION OK: ${path}"
+}
+
+function assert_user_writable_dir() {
+    local path="$1"
+    local test_file="${path}/.script6-write-test-$$"
+
+    [ -d "$path" ] || msg_error "Writable audit path missing: ${path}"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" -u "$DOCKER_USER" sh -c "touch '$test_file' && rm -f '$test_file'" >/dev/null 2>&1 || msg_error "Docker user ${DOCKER_USER} cannot write to ${path}"
+    else
+        touch "$test_file" && rm -f "$test_file" >/dev/null 2>&1 || msg_error "Current user cannot write to ${path}"
+    fi
+
+    msg_ok "WRITABLE OK: ${path}"
+}
+
+function verify_service_permissions() {
+    section "SERVICE PERMISSION AUDIT"
+
+    # PostgreSQL latest/18 path and legacy compatibility path.
+    assert_owner_mode "${DOCKER_DIR}/appdata/postgres/pgdata" "999" "999" "700"
+    assert_owner_mode "${DOCKER_DIR}/appdata/postgres/data" "999" "999" "700"
+
+    [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ] || msg_error "PostgreSQL init script is not executable."
+    msg_ok "POSTGRESQL INIT SCRIPT EXECUTABLE"
+
+    # Redis: both possible bind targets must exist and be writable by UID/GID 999.
+    assert_owner_mode "${DOCKER_DIR}/appdata/redis" "999" "999" "770"
+    assert_owner_mode "${DOCKER_DIR}/appdata/redis/data" "999" "999" "770"
+
+    # Authentik bind mounts must be owned by the non-root Authentik UID/GID.
+    assert_owner_mode "${DOCKER_DIR}/appdata/authentik" "1000" "1000" "770"
+    assert_owner_mode "${DOCKER_DIR}/appdata/authentik/media" "1000" "1000" "770"
+    assert_owner_mode "${DOCKER_DIR}/appdata/authentik/custom-templates" "1000" "1000" "770"
+    assert_owner_mode "${DOCKER_DIR}/appdata/authentik/certs" "1000" "1000" "770"
+
+    # User-facing appdata and shared folders should be writable by the selected Docker user.
+    assert_user_writable_dir "${DOCKER_DIR}/compose"
+    assert_user_writable_dir "${DOCKER_DIR}/shared"
+    assert_user_writable_dir "${DOCKER_DIR}/backups"
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/filebrowser/database"
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/filebrowser/config"
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/postiz/uploads"
+
+    case "$ADMIN_UI" in
+        dockge)
+            assert_user_writable_dir "${DOCKER_DIR}/appdata/dockge"
+            ;;
+        portainer)
+            assert_user_writable_dir "${DOCKER_DIR}/appdata/portainer"
+            ;;
+        komodo)
+            assert_user_writable_dir "${DOCKER_DIR}/appdata/komodo"
+            ;;
+        dockhand)
+            assert_user_writable_dir "${DOCKER_DIR}/appdata/dockhand"
+            ;;
+    esac
+
+    # Secrets and Traefik ACME must remain locked down.
+    assert_owner_mode "$DOCKER_SECRETS_DIR" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "700"
+    assert_owner_mode "${DOCKER_DIR}/.env" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "600"
+    assert_owner_mode "${TRAEFIK_ACME_DIR}/acme.json" "$PUID_VALUE" "$PGID_VALUE" "600"
+
+    msg_ok "SERVICE PERMISSION AUDIT PASSED"
 }
 
 
@@ -2488,7 +2584,7 @@ function show_secrets_once_without_logging() {
     else
         echo -e "AUTHENTIK_API_TOKEN=${YW}<empty / skipped>${CL}"
     fi
-    echo -e "${YW}Reminder: AUTHENTIK_BOOTSTRAP_TOKEN is not an Authentik API token.${CL}"
+    echo -e "${YW}Reminder: for fresh Authentik, AUTHENTIK_BOOTSTRAP_TOKEN creates an akadmin API Access token and Script 6.5 can reuse it.${CL}"
 
     echo ""
     echo -e "${BL}SERVICE SECRETS:${CL}"
@@ -2610,6 +2706,7 @@ function main() {
     write_secret_files
     write_env_file
     apply_permissions
+    verify_service_permissions
 
     wait_before_secret_display
     show_secrets_once_without_logging
