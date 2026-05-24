@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.0"
+SCRIPT_VERSION="v1.3.1"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="fixed-structure-dependency-aware-stack-deployer"
+SCRIPT_BUILD="curl-globoff-all-downloads"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -745,7 +745,7 @@ function download_file() {
     local url="$1"
     local dest="$2"
 
-    curl -fsSL "$url" -o "$dest"
+    curl --globoff -fsSL "$url" -o "$dest"
 }
 
 # --- 29AC. TRAEFIK PROXMOX ROUTE BLOCK HELPER ---
@@ -1534,7 +1534,7 @@ function download_fixed_stack_file() {
     local url="${GITHUB_RAW_BASE}/${file}"
 
     msg_info "Downloading ${file}"
-    curl -fsSL "$url" -o "$target" || msg_error "Failed to download ${url}"
+    curl --globoff -fsSL "$url" -o "$target" || msg_error "Failed to download ${url}"
     [ -s "$target" ] || msg_error "Downloaded file is empty: ${target}"
     if grep -q 'authentik@docker' "$target"; then
         msg_error "Forbidden stale authentik@docker reference found in ${file}."
@@ -1709,52 +1709,52 @@ function download_bootstrap_compose_files() {
     section "STACK COMPOSE DOWNLOAD"
 
     msg_info "Downloading Socket Proxy stack compose"
-    curl -fsSL "$SOCKET_PROXY_STACK_URL" -o "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    curl --globoff -fsSL "$SOCKET_PROXY_STACK_URL" -o "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
     SOCKET_PROXY_STACK_DOWNLOADED="yes"
     msg_ok "SOCKET PROXY STACK COMPOSE DOWNLOADED"
 
     case "$ADMIN_UI" in
         portainer)
             msg_info "Downloading Portainer stack compose"
-            curl -fsSL "$PORTAINER_STACK_URL" -o "${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
+            curl --globoff -fsSL "$PORTAINER_STACK_URL" -o "${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
             PORTAINER_STACK_DOWNLOADED="yes"
             msg_ok "ADMIN UI STACK COMPOSE DOWNLOADED"
 
             msg_info "Downloading Admin UI bootstrap override"
-            curl -fsSL "$PORTAINER_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            curl --globoff -fsSL "$PORTAINER_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             PORTAINER_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
             msg_ok "PORTAINER BOOTSTRAP OVERRIDE DOWNLOADED"
             ;;
         dockge)
             msg_info "Downloading Dockge stack compose"
-            curl -fsSL "$DOCKGE_STACK_URL" -o "${COMPOSE_DIR}/${DOCKGE_STACK_FILE}"
+            curl --globoff -fsSL "$DOCKGE_STACK_URL" -o "${COMPOSE_DIR}/${DOCKGE_STACK_FILE}"
             DOCKGE_STACK_DOWNLOADED="yes"
             msg_ok "DOCKGE STACK COMPOSE DOWNLOADED"
 
             msg_info "Downloading Dockge bootstrap override"
-            curl -fsSL "$DOCKGE_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            curl --globoff -fsSL "$DOCKGE_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             DOCKGE_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
             msg_ok "DOCKGE BOOTSTRAP OVERRIDE DOWNLOADED"
             ;;
         komodo)
             msg_info "Downloading Komodo stack compose"
-            curl -fsSL "$KOMODO_STACK_URL" -o "${COMPOSE_DIR}/${KOMODO_STACK_FILE}"
+            curl --globoff -fsSL "$KOMODO_STACK_URL" -o "${COMPOSE_DIR}/${KOMODO_STACK_FILE}"
             KOMODO_STACK_DOWNLOADED="yes"
             msg_ok "KOMODO STACK COMPOSE DOWNLOADED"
 
             msg_info "Downloading Komodo bootstrap override"
-            curl -fsSL "$KOMODO_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            curl --globoff -fsSL "$KOMODO_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             KOMODO_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
             msg_ok "KOMODO BOOTSTRAP OVERRIDE DOWNLOADED"
             ;;
         dockhand)
             msg_info "Downloading Dockhand stack compose"
-            curl -fsSL "$DOCKHAND_STACK_URL" -o "${COMPOSE_DIR}/${DOCKHAND_STACK_FILE}"
+            curl --globoff -fsSL "$DOCKHAND_STACK_URL" -o "${COMPOSE_DIR}/${DOCKHAND_STACK_FILE}"
             DOCKHAND_STACK_DOWNLOADED="yes"
             msg_ok "DOCKHAND STACK COMPOSE DOWNLOADED"
 
             msg_info "Downloading Dockhand bootstrap override"
-            curl -fsSL "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+            curl --globoff -fsSL "$DOCKHAND_BOOTSTRAP_OVERRIDE_URL" -o "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
             DOCKHAND_BOOTSTRAP_OVERRIDE_DOWNLOADED="yes"
             msg_ok "DOCKHAND BOOTSTRAP OVERRIDE DOWNLOADED"
             ;;
