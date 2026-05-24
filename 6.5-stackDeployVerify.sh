@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.9"
+SCRIPT_VERSION="v1.3.10"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="postgres-prereq-repair-restart-diagnostics"
+SCRIPT_BUILD="postgres-preflight-secrets-recursive-perms-partial-backup"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -830,7 +830,17 @@ function show_postgres_diagnostics() {
 
     echo ""
     echo -e "${BL}PostgreSQL health detail:${CL}"
-    docker_cmd inspect postgres --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} error={{.State.Error}}' 2>/dev/null || true
+    docker_cmd inspect postgres --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}} error={{.State.Error}} restart_count={{.RestartCount}} oom={{.State.OOMKilled}}' 2>/dev/null || true
+
+    echo ""
+    echo -e "${BL}PostgreSQL host path detail:${CL}"
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/data" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
+        "$SUDO_CMD" find "${DOCKER_DIR}/appdata/postgres/data" -maxdepth 1 -mindepth 1 -printf '%u:%g %m %f\n' 2>/dev/null | head -20 || true
+    else
+        stat -c 'path=%n owner=%u:%g mode=%a type=%F' "${DOCKER_DIR}/appdata/postgres" "${DOCKER_DIR}/appdata/postgres/data" "${DOCKER_DIR}/appdata/postgres/init" 2>/dev/null || true
+        find "${DOCKER_DIR}/appdata/postgres/data" -maxdepth 1 -mindepth 1 -printf '%u:%g %m %f\n' 2>/dev/null | head -20 || true
+    fi
 
     echo ""
     echo -e "${BL}PostgreSQL logs, last 160 lines:${CL}"
@@ -1438,6 +1448,19 @@ function verify_authentik_folders() {
 # READY TO APPLY and before the PostgreSQL stack is started. This avoids the
 # common restart loop caused by data directory ownership/mode problems while
 # preserving the existing database files.
+function require_nonempty_env_value() {
+    local key="$1"
+    local value=""
+
+    value="$(env_value "$key")"
+
+    if [ -z "$value" ]; then
+        msg_error "Required .env value ${key} is missing or empty. Run fixed Script 6 before deploying PostgreSQL."
+    fi
+
+    msg_ok "REQUIRED SECRET/VALUE PRESENT: ${key}"
+}
+
 function prepare_postgres_runtime_prereqs() {
     if ! [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]]; then
         return 0
@@ -1445,18 +1468,54 @@ function prepare_postgres_runtime_prereqs() {
 
     section "POSTGRESQL RUNTIME PREREQS"
 
-    local pg_data_dir="${DOCKER_DIR}/appdata/postgres/data"
+    local pg_root_dir="${DOCKER_DIR}/appdata/postgres"
+    local pg_data_dir="${pg_root_dir}/data"
+    local pg_init_dir="${pg_root_dir}/init"
     local pg_container_status=""
     local pg_health_status=""
+    local backup_dir=""
 
-    msg_info "Preparing PostgreSQL data directory"
+    require_nonempty_env_value "POSTGRES_PASSWORD"
+    require_nonempty_env_value "AUTHENTIK_POSTGRES_PASSWORD"
+    require_nonempty_env_value "POSTIZ_POSTGRES_PASSWORD"
+    require_nonempty_env_value "TEMPORAL_POSTGRES_PASSWORD"
+
+    msg_info "Preparing PostgreSQL directories"
+    run_cmd "creating PostgreSQL root directory" mkdir -p "$pg_root_dir"
     run_cmd "creating PostgreSQL data directory" mkdir -p "$pg_data_dir"
-    run_cmd "setting PostgreSQL data ownership" chown 999:999 "$pg_data_dir"
-    run_cmd "setting PostgreSQL data permissions" chmod 700 "$pg_data_dir"
+    run_cmd "creating PostgreSQL init directory" mkdir -p "$pg_init_dir"
+    msg_ok "POSTGRESQL DIRECTORIES EXIST"
+
+    if ! root_path_exists "${pg_data_dir}/PG_VERSION"; then
+        if [ -n "$SUDO_CMD" ]; then
+            if "$SUDO_CMD" find "$pg_data_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+                backup_dir="${pg_data_dir}.broken-$(date +%Y%m%d-%H%M%S)"
+                msg_warn "PostgreSQL data directory has files but no PG_VERSION; preserving it as a broken partial init backup."
+                run_cmd "backing up partial PostgreSQL data directory" mv "$pg_data_dir" "$backup_dir"
+                run_cmd "recreating clean PostgreSQL data directory" mkdir -p "$pg_data_dir"
+                detail_line "Partial data backup" "$backup_dir"
+            fi
+        else
+            if find "$pg_data_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+                backup_dir="${pg_data_dir}.broken-$(date +%Y%m%d-%H%M%S)"
+                msg_warn "PostgreSQL data directory has files but no PG_VERSION; preserving it as a broken partial init backup."
+                run_cmd "backing up partial PostgreSQL data directory" mv "$pg_data_dir" "$backup_dir"
+                run_cmd "recreating clean PostgreSQL data directory" mkdir -p "$pg_data_dir"
+                detail_line "Partial data backup" "$backup_dir"
+            fi
+        fi
+    fi
+
+    msg_info "Applying PostgreSQL-specific ownership and permissions"
+    run_cmd "setting PostgreSQL data ownership recursively" chown -R 999:999 "$pg_data_dir"
+    run_cmd "setting PostgreSQL data permissions recursively" chmod -R u+rwX,go-rwx "$pg_data_dir"
+    run_cmd "setting PostgreSQL data directory mode" chmod 700 "$pg_data_dir"
+    run_cmd "setting PostgreSQL init directory readability" chmod 755 "$pg_init_dir"
     msg_ok "POSTGRESQL DATA DIRECTORY READY"
-    detail_line "Path" "$pg_data_dir"
-    detail_line "Owner" "999:999"
-    detail_line "Mode" "700"
+    detail_line "Data path" "$pg_data_dir"
+    detail_line "Data owner" "999:999 recursive"
+    detail_line "Data mode" "u+rwX,go-rwx / root 700"
+    detail_line "Init path" "$pg_init_dir"
 
     pg_container_status="$(docker_cmd inspect postgres --format '{{.State.Status}}' 2>/dev/null || true)"
     pg_health_status="$(docker_cmd inspect postgres --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
