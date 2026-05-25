@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.20"
+SCRIPT_VERSION="v1.3.21"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="pg18-redis-authentik-outpost-host-fix"
+SCRIPT_BUILD="dynamic-postgres-redis-runtime-owner-detection"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1566,60 +1566,57 @@ function selected_stack_contains() {
     return 1
 }
 
+function service_compose_uses_puid_pgid() {
+    local file="$1"
+    local compose_path=""
 
-function repair_postgres_pgdata_permissions() {
-    local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
+    compose_path="$(compose_path_for_stack_file "$file")"
 
-    run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "$pg_data_dir"
-    run_cmd "setting PostgreSQL pgdata ownership recursively" chown -R 999:999 "$pg_data_dir"
-    run_cmd "setting PostgreSQL pgdata directory modes recursively" find "$pg_data_dir" -type d -exec chmod 700 {} \;
-    run_cmd "setting PostgreSQL pgdata file modes recursively" find "$pg_data_dir" -type f -exec chmod 600 {} \;
-    run_cmd "setting PostgreSQL pgdata root mode" chmod 700 "$pg_data_dir"
+    [ -f "$compose_path" ] || return 1
+
+    if grep -Eq 'PUID|PGID|\$\{PUID\}|\$\{PGID\}' "$compose_path"; then
+        return 0
+    fi
+
+    return 1
 }
 
-function verify_postgres_pgdata_permissions() {
-    local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
-    local bad=""
+function default_docker_user_uid() {
+    id -u "$DOCKER_USER" 2>/dev/null || echo "1000"
+}
 
-    if [ -n "$SUDO_CMD" ]; then
-        bad="$($SUDO_CMD find "$pg_data_dir" \( ! -user 999 -o ! -group 999 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+function default_docker_user_gid() {
+    id -g "$DOCKER_USER" 2>/dev/null || echo "1000"
+}
+
+function service_data_owner() {
+    local file="$1"
+    local default_uid="$2"
+    local default_gid="$3"
+    local uid=""
+    local gid=""
+
+    if service_compose_uses_puid_pgid "$file"; then
+        uid="$(env_value PUID)"
+        gid="$(env_value PGID)"
+        [ -z "$uid" ] && uid="$(default_docker_user_uid)"
+        [ -z "$gid" ] && gid="$(default_docker_user_gid)"
     else
-        bad="$(find "$pg_data_dir" \( ! -user 999 -o ! -group 999 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+        uid="$default_uid"
+        gid="$default_gid"
     fi
 
-    if [ -n "$bad" ]; then
-        echo -e "${YW}PostgreSQL permission offenders:${CL}"
-        printf '%s\n' "$bad"
-        msg_error "PostgreSQL pgdata still contains files not owned by 999:999. Refusing to deploy dependants."
-    fi
+    printf '%s:%s' "$uid" "$gid"
 }
 
-function repair_redis_data_permissions() {
-    local redis_data_dir="${DOCKER_DIR}/appdata/redis"
-
-    run_cmd "creating Redis data directory" mkdir -p "$redis_data_dir"
-    run_cmd "setting Redis data ownership recursively" chown -R 999:999 "$redis_data_dir"
-    run_cmd "setting Redis data directory modes recursively" find "$redis_data_dir" -type d -exec chmod 770 {} \;
-    run_cmd "setting Redis data file modes recursively" find "$redis_data_dir" -type f -exec chmod 660 {} \;
-    run_cmd "setting Redis data root mode" chmod 770 "$redis_data_dir"
+function postgres_data_owner() {
+    service_data_owner "$POSTGRES_STACK_FILE" "999" "999"
 }
 
-function verify_redis_data_permissions() {
-    local redis_data_dir="${DOCKER_DIR}/appdata/redis"
-    local bad=""
-
-    if [ -n "$SUDO_CMD" ]; then
-        bad="$($SUDO_CMD find "$redis_data_dir" \( ! -user 999 -o ! -group 999 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
-    else
-        bad="$(find "$redis_data_dir" \( ! -user 999 -o ! -group 999 \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
-    fi
-
-    if [ -n "$bad" ]; then
-        echo -e "${YW}Redis permission offenders:${CL}"
-        printf '%s\n' "$bad"
-        msg_error "Redis data path still contains files not owned by 999:999. Refusing to continue."
-    fi
+function redis_data_owner() {
+    service_data_owner "$REDIS_STACK_FILE" "999" "999"
 }
+
 function prepare_postgres_runtime_prereqs() {
     if ! selected_stack_contains "$POSTGRES_STACK_FILE"; then
         return 0
@@ -1630,21 +1627,25 @@ function prepare_postgres_runtime_prereqs() {
     local pg_root_dir="${DOCKER_DIR}/appdata/postgres"
     local pg_data_dir="${pg_root_dir}/pgdata"
     local pg_init_dir="${pg_root_dir}/init"
+    local pg_owner=""
 
     require_nonempty_env_value "POSTGRES_PASSWORD"
     require_nonempty_env_value "AUTHENTIK_POSTGRES_PASSWORD"
     require_nonempty_env_value "POSTIZ_POSTGRES_PASSWORD"
     require_nonempty_env_value "TEMPORAL_POSTGRES_PASSWORD"
 
+    pg_owner="$(postgres_data_owner)"
+
     run_cmd "creating PostgreSQL data directory" mkdir -p "$pg_data_dir"
     run_cmd "creating PostgreSQL init directory" mkdir -p "$pg_init_dir"
-    repair_postgres_pgdata_permissions
-    verify_postgres_pgdata_permissions
+    run_cmd "setting PostgreSQL data ownership recursively" chown -R "$pg_owner" "$pg_data_dir"
+    run_cmd "setting PostgreSQL data permissions recursively" chmod -R u+rwX,go-rwx "$pg_data_dir"
+    run_cmd "setting PostgreSQL data directory mode" chmod 700 "$pg_data_dir"
     run_cmd "setting PostgreSQL init directory readability" chmod 755 "$pg_init_dir"
 
     msg_ok "POSTGRESQL DATA DIRECTORY READY"
     detail_line "Data path" "$pg_data_dir"
-    detail_line "Data owner" "999:999 recursive"
+    detail_line "Data owner" "${pg_owner} recursive"
     detail_line "Data mode" "700 root, u+rwX,go-rwx recursive"
 
     if docker_cmd inspect postgres --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null | grep -Eq 'restarting|unhealthy|exited|dead'; then
@@ -1662,14 +1663,17 @@ function prepare_redis_runtime_prereqs() {
     section "REDIS RUNTIME PREREQS"
 
     local redis_data_dir="${DOCKER_DIR}/appdata/redis"
+    local redis_owner=""
+
+    redis_owner="$(redis_data_owner)"
 
     run_cmd "creating Redis data directory" mkdir -p "$redis_data_dir"
-    repair_redis_data_permissions
-    verify_redis_data_permissions
+    run_cmd "setting Redis data ownership" chown -R "$redis_owner" "$redis_data_dir"
+    run_cmd "setting Redis writable permissions" chmod 770 "$redis_data_dir"
 
     msg_ok "REDIS DATA DIRECTORY READY"
     detail_line "Path" "$redis_data_dir"
-    detail_line "Owner" "999:999"
+    detail_line "Owner" "$redis_owner"
     detail_line "Mode" "770"
 }
 
@@ -1752,6 +1756,7 @@ function verify_redis_persistence_ready() {
     local info=""
     local bgsave_status=""
     local bgsave_in_progress=""
+    local redis_owner=""
 
     for attempt in $(seq 1 "$max_attempts"); do
         state="$(docker_cmd inspect redis --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
@@ -1764,8 +1769,10 @@ function verify_redis_persistence_ready() {
     clear_transient_line
 
     # Re-apply the proven host path fix immediately before the write test.
-    repair_redis_data_permissions
-    verify_redis_data_permissions
+    redis_owner="$(redis_data_owner)"
+    run_cmd "repairing Redis data ownership" chown -R "$redis_owner" "${DOCKER_DIR}/appdata/redis"
+    run_cmd "repairing Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
+    run_cmd "repairing Redis data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
 
     if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1; then
         docker_cmd logs --tail=120 redis 2>/dev/null || true
@@ -2350,6 +2357,8 @@ function verify_authentik_dependencies_for_deploy() {
 
     local required="no"
     local check_output=""
+    local pg_owner=""
+    local redis_owner=""
 
     if [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]] || [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]] || [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
         required="yes"
@@ -2375,10 +2384,14 @@ function verify_authentik_dependencies_for_deploy() {
         msg_error "Redis container is not running. Fix Redis before Authentik automation."
     fi
 
-    repair_postgres_pgdata_permissions
-    verify_postgres_pgdata_permissions
-    repair_redis_data_permissions
-    verify_redis_data_permissions
+    pg_owner="$(postgres_data_owner)"
+    redis_owner="$(redis_data_owner)"
+
+    run_cmd "repairing PostgreSQL pgdata ownership" chown -R "$pg_owner" "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "repairing PostgreSQL pgdata permissions" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "repairing PostgreSQL pgdata mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "repairing Redis data ownership" chown -R "$redis_owner" "${DOCKER_DIR}/appdata/redis"
+    run_cmd "repairing Redis data permissions" chmod 770 "${DOCKER_DIR}/appdata/redis"
 
     if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1 || docker_cmd logs --tail=120 redis 2>/dev/null | grep -Eiq 'MISCONF|Permission denied|Background saving error'; then
         docker_cmd logs --tail=120 redis 2>/dev/null || true
@@ -2573,82 +2586,6 @@ function authentik_find_embedded_outpost_pk() {
     printf '%s' "$pk"
 }
 
-
-function authentik_build_outpost_patch_payload() {
-    local outpost_file="$1"
-    local provider_pk="$2"
-    local auth_host="$3"
-    local auth_host_browser="$4"
-
-    python3 - "$outpost_file" "$provider_pk" "$auth_host" "$auth_host_browser" <<'AK_OUTPOST_JSON'
-import json, sys
-path, provider_pk, auth_host, auth_host_browser = sys.argv[1:5]
-with open(path, "r", encoding="utf-8") as fh:
-    outpost = json.load(fh)
-providers = list(outpost.get("providers") or [])
-provider_value = int(provider_pk) if provider_pk.isdigit() else provider_pk
-if provider_value not in providers:
-    providers.append(provider_value)
-config = dict(outpost.get("config") or {})
-config["authentik_host"] = auth_host
-config["authentik_host_browser"] = auth_host_browser or auth_host
-payload = {"name": outpost.get("name", "authentik Embedded Outpost"), "type": outpost.get("type", "proxy"), "providers": providers, "config": config}
-print(json.dumps(payload))
-AK_OUTPOST_JSON
-}
-
-function authentik_verify_outpost_patch() {
-    local outpost_pk="$1"
-    local provider_pk="$2"
-    local expected_auth_host="$3"
-    local expected_browser_host="$4"
-    local response_file=""
-
-    response_file="$(mktemp)"
-    TEMP_FILES+=("$response_file")
-
-    if ! ak_api GET "/outposts/instances/${outpost_pk}/" > "$response_file" 2>/dev/null; then
-        msg_warn "Could not re-read embedded outpost after patch."
-        return 1
-    fi
-
-    python3 - "$response_file" "$provider_pk" "$expected_auth_host" "$expected_browser_host" <<'AK_VERIFY_OUTPOST'
-import json, sys
-path, provider_pk, expected_auth_host, expected_browser_host = sys.argv[1:5]
-with open(path, "r", encoding="utf-8") as fh:
-    outpost = json.load(fh)
-providers = outpost.get("providers") or []
-provider_value = int(provider_pk) if provider_pk.isdigit() else provider_pk
-config = outpost.get("config") or {}
-errors = []
-if provider_value not in providers:
-    errors.append(f"provider {provider_pk} not attached")
-if config.get("authentik_host") != expected_auth_host:
-    errors.append("authentik_host mismatch or blank")
-if config.get("authentik_host_browser") != (expected_browser_host or expected_auth_host):
-    errors.append("authentik_host_browser mismatch or blank")
-if errors:
-    print("; ".join(errors))
-    sys.exit(1)
-print("outpost config verified")
-AK_VERIFY_OUTPOST
-}
-
-function restart_authentik_after_outpost_update() {
-    if [ "$AUTHENTIK_OUTPOST_ATTACH_OK" != "yes" ]; then
-        return 0
-    fi
-
-    msg_info "Restarting Authentik to reload embedded outpost config"
-    docker_cmd restart authentik-server authentik-worker >/dev/null
-    clear_transient_line
-    msg_ok "AUTHENTIK RESTARTED AFTER OUTPOST CONFIG UPDATE"
-
-    msg_info "Waiting for Authentik API and embedded outpost to reload"
-    sleep 45
-    clear_transient_line
-    msg_ok "AUTHENTIK OUTPOST RELOAD WAIT COMPLETE"
-}
 function create_or_update_authentik_forward_auth_for_deploy() {
     section "AUTHENTIK FORWARD-AUTH SETUP"
 
@@ -2668,10 +2605,7 @@ function create_or_update_authentik_forward_auth_for_deploy() {
     local payload=""
     local response_file=""
     local auth_host_json=""
-    local auth_host_value=""
-    local auth_host_browser_value=""
     local domain_json=""
-    local outpost_response_file=""
 
     response_file="$(mktemp)"
     TEMP_FILES+=("$response_file")
@@ -2688,9 +2622,7 @@ function create_or_update_authentik_forward_auth_for_deploy() {
         return 0
     fi
 
-    auth_host_value="${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}"
-    auth_host_browser_value="${AUTHENTIK_HOST_BROWSER:-$auth_host_value}"
-    auth_host_json="$(printf '%s' "$auth_host_value" | json_escape)"
+    auth_host_json="$(printf '%s' "${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}" | json_escape)"
     domain_json="$(printf '%s' ".${DOMAIN_VALUE}" | json_escape)"
 
     provider_pk="$(authentik_find_proxy_provider_pk)"
@@ -2729,7 +2661,7 @@ JSON
   "name": "Traefik Forward Auth",
   "slug": "traefik-forward-auth",
   "provider": "${provider_pk}",
-  "meta_launch_url": "${auth_host_value}"
+  "meta_launch_url": "${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}"
 }
 JSON
 )"
@@ -2756,31 +2688,19 @@ JSON
         return 0
     fi
 
-    outpost_response_file="$(mktemp)"
-    TEMP_FILES+=("$outpost_response_file")
-
-    if ! ak_api GET "/outposts/instances/${outpost_pk}/" > "$outpost_response_file" 2>/dev/null; then
-        AUTHENTIK_OUTPOST_ATTACH_OK="failed-read"
-        msg_warn "Could not read embedded outpost before patching."
-        return 0
-    fi
-
-    payload="$(authentik_build_outpost_patch_payload "$outpost_response_file" "$provider_pk" "$auth_host_value" "$auth_host_browser_value")"
+    payload="$(cat <<JSON
+{
+  "providers": [${provider_pk}]
+}
+JSON
+)"
 
     if ak_api PATCH "/outposts/instances/${outpost_pk}/" "$payload" >/dev/null 2>&1; then
-        if authentik_verify_outpost_patch "$outpost_pk" "$provider_pk" "$auth_host_value" "$auth_host_browser_value" >/dev/null 2>&1; then
-            AUTHENTIK_OUTPOST_ATTACH_OK="yes"
-            msg_ok "PROVIDER AND AUTHENTIK HOST CONFIG ATTACHED TO EXISTING EMBEDDED OUTPOST"
-            detail_line "Outpost" "$outpost_pk"
-            detail_line "authentik_host" "$auth_host_value"
-            detail_line "authentik_host_browser" "$auth_host_browser_value"
-        else
-            AUTHENTIK_OUTPOST_ATTACH_OK="verify-failed"
-            msg_warn "Outpost patch completed but verification failed. Re-check embedded outpost config in Authentik."
-        fi
+        AUTHENTIK_OUTPOST_ATTACH_OK="yes"
+        msg_ok "PROVIDER ATTACHED TO EXISTING EMBEDDED OUTPOST"
     else
         AUTHENTIK_OUTPOST_ATTACH_OK="failed"
-        msg_warn "Outpost attach/config patch failed. Attach the provider and Authentik host manually in Authentik."
+        msg_warn "Outpost attach failed. Attach the provider manually in Authentik."
     fi
 }
 
@@ -2864,7 +2784,6 @@ function configure_authentik_and_verify_routes() {
     collect_authentik_api_token_for_deploy
     verify_authentik_api_for_deploy
     create_or_update_authentik_forward_auth_for_deploy
-    restart_authentik_after_outpost_update
     verify_authentik_outpost_route_for_deploy
     verify_selected_protected_routes
 }
