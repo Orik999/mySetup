@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.5.5"
-SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="root-aware-service-permission-audit"
+SCRIPT_VERSION="v1.5.6"
+SCRIPT_UPDATED="2026-05-25"
+SCRIPT_BUILD="pg18-redis-recursive-permission-hardening"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -475,16 +475,25 @@ function chmod_required_service_directories() {
     run_cmd "setting shared directory permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/shared"
 
     # PostgreSQL data must be private to UID/GID 999.
+    # PostgreSQL 18 stores the real cluster below pgdata/18/docker when
+    # ${DOCKER_DIR}/appdata/postgres/pgdata is mounted to /var/lib/postgresql.
+    # Use find-based modes so every nested PG18 directory/file is corrected,
+    # not only the top-level bind mount.
     run_cmd "setting PostgreSQL root directory mode" chmod 755 "${DOCKER_DIR}/appdata/postgres"
-    run_cmd "setting PostgreSQL PG18-compatible data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "setting PostgreSQL legacy data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "setting PostgreSQL PG18-compatible data directory modes recursively" find "${DOCKER_DIR}/appdata/postgres/pgdata" -type d -exec chmod 700 {} \;
+    run_cmd "setting PostgreSQL PG18-compatible data file modes recursively" find "${DOCKER_DIR}/appdata/postgres/pgdata" -type f -exec chmod 600 {} \;
+    run_cmd "setting PostgreSQL legacy data directory modes recursively" find "${DOCKER_DIR}/appdata/postgres/data" -type d -exec chmod 700 {} \;
+    run_cmd "setting PostgreSQL legacy data file modes recursively" find "${DOCKER_DIR}/appdata/postgres/data" -type f -exec chmod 600 {} \;
     run_cmd "setting PostgreSQL PG18-compatible data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
     run_cmd "setting PostgreSQL legacy data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "setting PostgreSQL init directory mode" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
     run_cmd "setting PostgreSQL init script mode" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
     # Redis data must be writable by UID/GID 999.
-    run_cmd "setting Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
+    # Use recursive directory/file modes so Redis can create temp RDB/AOF files
+    # below /data after fresh deployment and after reruns.
+    run_cmd "setting Redis data directory modes recursively" find "${DOCKER_DIR}/appdata/redis" -type d -exec chmod 770 {} \;
+    run_cmd "setting Redis data file modes recursively" find "${DOCKER_DIR}/appdata/redis" -type f -exec chmod 660 {} \;
     run_cmd "setting Redis data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
     run_cmd "setting Redis nested data compatibility directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis/data"
 

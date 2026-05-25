@@ -23,9 +23,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="7-hardeningSSO.sh"
-SCRIPT_VERSION="v1.4.1"
-SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="hardening-only-authentik-moved-to-6-5"
+SCRIPT_VERSION="v1.4.2"
+SCRIPT_UPDATED="2026-05-25"
+SCRIPT_BUILD="hardening-preserve-authentik-outpost-host"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -871,6 +871,28 @@ function authentik_find_embedded_outpost_pk() {
     printf '%s' "$pk"
 }
 
+
+function authentik_build_outpost_patch_payload() {
+    local outpost_file="$1"
+    local provider_pk="$2"
+    local auth_host="$3"
+
+    python3 - "$outpost_file" "$provider_pk" "$auth_host" <<'AK_OUTPOST_JSON'
+import json, sys
+path, provider_pk, auth_host = sys.argv[1:4]
+with open(path, "r", encoding="utf-8") as fh:
+    outpost = json.load(fh)
+providers = list(outpost.get("providers") or [])
+provider_value = int(provider_pk) if provider_pk.isdigit() else provider_pk
+if provider_value not in providers:
+    providers.append(provider_value)
+config = dict(outpost.get("config") or {})
+config["authentik_host"] = auth_host
+config["authentik_host_browser"] = auth_host
+payload = {"name": outpost.get("name", "authentik Embedded Outpost"), "type": outpost.get("type", "proxy"), "providers": providers, "config": config}
+print(json.dumps(payload))
+AK_OUTPOST_JSON
+}
 function create_or_update_authentik_forward_auth() {
     section "AUTHENTIK FORWARD-AUTH AUTOMATION"
 
@@ -896,6 +918,7 @@ function create_or_update_authentik_forward_auth() {
     local response_file=""
     local auth_host_json=""
     local domain_json=""
+    local outpost_response_file=""
 
     authorization_flow="$(authentik_get_flow_pk "default-provider-authorization-implicit-consent")"
     [ -z "$authorization_flow" ] && authorization_flow="$(authentik_get_flow_pk "default-provider-authorization-explicit-consent")"
@@ -1007,21 +1030,26 @@ JSON
         return 0
     fi
 
-    msg_info "Attaching provider to existing embedded outpost"
-    payload="$(cat <<JSON
-{
-  "providers": [${provider_pk}]
-}
-JSON
-)"
+    msg_info "Attaching provider and Authentik host config to existing embedded outpost"
+    outpost_response_file="$(mktemp)"
+    TEMP_FILES+=("$outpost_response_file")
+
+    if ! ak_api GET "/outposts/instances/${outpost_pk}/" > "$outpost_response_file" 2>/dev/null; then
+        AUTHENTIK_OUTPOST_ATTACH_OK="failed-read"
+        msg_warn "Could not read embedded outpost before patching."
+        return 0
+    fi
+
+    payload="$(authentik_build_outpost_patch_payload "$outpost_response_file" "$provider_pk" "$AUTHENTIK_HOST")"
 
     if ak_api PATCH "/outposts/instances/${outpost_pk}/" "$payload" >/dev/null 2>&1; then
         AUTHENTIK_OUTPOST_ATTACH_OK="yes"
-        msg_ok "PROVIDER ATTACHED TO EXISTING EMBEDDED OUTPOST"
+        msg_ok "PROVIDER AND AUTHENTIK HOST CONFIG ATTACHED TO EXISTING EMBEDDED OUTPOST"
         detail_line "Outpost" "$outpost_pk"
+        detail_line "authentik_host" "$AUTHENTIK_HOST"
     else
         AUTHENTIK_OUTPOST_ATTACH_OK="failed"
-        msg_warn "Outpost attach failed. Attach the application/provider to authentik Embedded Outpost manually."
+        msg_warn "Outpost attach/config patch failed. Attach the application/provider and Authentik host to authentik Embedded Outpost manually."
     fi
 }
 
