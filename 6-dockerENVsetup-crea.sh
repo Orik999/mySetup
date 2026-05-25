@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.4.9"
+SCRIPT_VERSION="v1.5.0"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="redis-mkdir-chown-chmod-final-fix"
+SCRIPT_BUILD="full-service-permission-order-audit"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -367,18 +367,178 @@ function root_stat_mode() {
     fi
 }
 
-# --- 16A. OWNED DIRECTORY HELPER ---
-# Creates a directory, then sets owner and mode using mkdir + chown + chmod.
-# Numeric UID/GID values must be passed to chown as UID:GID, not as usernames.
-function ensure_dir_owner_mode() {
-    local path="$1"
-    local uid="$2"
-    local gid="$3"
-    local mode="$4"
+# --- 16A. SERVICE DIRECTORY CREATION HELPER ---
+# Creates all service bind-mount directories first.
+# Permission changes are intentionally done later in a separate chown stage and chmod stage.
+function ensure_required_service_directories() {
+    # Core project paths.
+    run_cmd "creating Docker root directory" mkdir -p "$DOCKER_DIR"
+    run_cmd "creating Docker appdata directory" mkdir -p "${DOCKER_DIR}/appdata"
+    run_cmd "creating Docker compose directory" mkdir -p "${DOCKER_DIR}/compose"
+    run_cmd "creating Docker backups directory" mkdir -p "${DOCKER_DIR}/backups"
+    run_cmd "creating Docker shared directory" mkdir -p "${DOCKER_DIR}/shared"
+    run_cmd "creating Docker secrets directory" mkdir -p "$DOCKER_SECRETS_DIR"
 
-    run_cmd "creating directory ${path}" mkdir -p "$path"
-    run_cmd "setting directory owner ${path}" chown "${uid}:${gid}" "$path"
-    run_cmd "setting directory mode ${path}" chmod "$mode" "$path"
+    # PostgreSQL paths.
+    run_cmd "creating PostgreSQL root directory" mkdir -p "${DOCKER_DIR}/appdata/postgres"
+    run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "creating PostgreSQL legacy data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
+
+    # Redis paths. Active compose mounts ${DOCKER_DIR}/appdata/redis to /data.
+    # The nested data path is kept as a compatibility guard for future/alternate compose files.
+    run_cmd "creating Redis data directory" mkdir -p "${DOCKER_DIR}/appdata/redis"
+    run_cmd "creating Redis nested data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/redis/data"
+
+    # Authentik paths.
+    run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
+    run_cmd "creating Authentik media directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
+    run_cmd "creating Authentik custom templates directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/custom-templates"
+    run_cmd "creating Authentik certs directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/certs"
+
+    # App and utility paths.
+    run_cmd "creating Filebrowser database directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
+    run_cmd "creating Filebrowser config directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
+    run_cmd "creating Postiz uploads directory" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
+    run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
+
+    case "$ADMIN_UI" in
+        dockge)
+            run_cmd "creating Dockge appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockge"
+            ;;
+        portainer)
+            run_cmd "creating Portainer appdata directory" mkdir -p "${DOCKER_DIR}/appdata/portainer"
+            ;;
+        komodo)
+            run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
+            ;;
+        dockhand)
+            run_cmd "creating Dockhand appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand"
+            run_cmd "creating Dockhand stacks directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand/stacks"
+            ;;
+    esac
+
+    # Traefik paths.
+    run_cmd "creating Traefik config directory" mkdir -p "$TRAEFIK_DIR"
+    run_cmd "creating Traefik ACME directory" mkdir -p "$TRAEFIK_ACME_DIR"
+    run_cmd "creating Traefik ACME storage" touch "${TRAEFIK_ACME_DIR}/acme.json"
+}
+
+# --- 16B. SERVICE OWNERSHIP HELPER ---
+# Applies ownership after all required folders exist.
+function chown_required_service_directories() {
+    # Base project paths.
+    run_cmd "setting Docker root directory ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
+    run_cmd "setting Docker appdata directory ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata"
+    run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/compose"
+    run_cmd "setting backups directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/backups"
+    run_cmd "setting shared directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/shared"
+    run_cmd "setting secrets directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_SECRETS_DIR"
+
+    # PostgreSQL official image data paths use UID/GID 999.
+    run_cmd "setting PostgreSQL root ownership" chown 999:999 "${DOCKER_DIR}/appdata/postgres"
+    run_cmd "setting PostgreSQL PG18-compatible data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL legacy data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
+
+    # Redis official image data path uses UID/GID 999.
+    run_cmd "setting Redis data ownership recursively" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
+
+    # Authentik non-root bind mounts use UID/GID 1000.
+    run_cmd "setting Authentik ownership recursively" chown -R 1000:1000 "${DOCKER_DIR}/appdata/authentik"
+
+    # User-facing application/storage folders.
+    run_cmd "setting Filebrowser ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser"
+    run_cmd "setting Postiz ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
+    run_cmd "setting Komodo ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo"
+
+    case "$ADMIN_UI" in
+        dockge)
+            run_cmd "setting Dockge ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockge"
+            ;;
+        portainer)
+            run_cmd "setting Portainer ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/portainer"
+            ;;
+        komodo)
+            run_cmd "setting Komodo ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo"
+            ;;
+        dockhand)
+            run_cmd "setting Dockhand ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockhand"
+            ;;
+    esac
+
+    # Traefik config and ACME files.
+    run_cmd "setting Traefik ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "$TRAEFIK_DIR"
+
+    # .env is written before permissions are applied and must be owned by the Docker user.
+    run_cmd "setting .env ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/.env"
+}
+
+# --- 16C. SERVICE MODE HELPER ---
+# Applies permissions only after folder creation and ownership are complete.
+function chmod_required_service_directories() {
+    # Base project paths.
+    run_cmd "setting Docker root directory mode" chmod 755 "$DOCKER_DIR"
+    run_cmd "setting Docker appdata directory mode" chmod 755 "${DOCKER_DIR}/appdata"
+    run_cmd "setting compose directory permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/compose"
+    run_cmd "setting backups directory permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/backups"
+    run_cmd "setting shared directory permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/shared"
+
+    # PostgreSQL data must be private to UID/GID 999.
+    run_cmd "setting PostgreSQL root directory mode" chmod 755 "${DOCKER_DIR}/appdata/postgres"
+    run_cmd "setting PostgreSQL PG18-compatible data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL legacy data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "setting PostgreSQL PG18-compatible data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "setting PostgreSQL legacy data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "setting PostgreSQL init directory mode" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
+    run_cmd "setting PostgreSQL init script mode" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
+
+    # Redis data must be writable by UID/GID 999.
+    run_cmd "setting Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis nested data compatibility directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis/data"
+
+    # Authentik bind mounts must be writable by UID/GID 1000.
+    run_cmd "setting Authentik permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/authentik"
+    run_cmd "setting Authentik appdata directory mode" chmod 770 "${DOCKER_DIR}/appdata/authentik"
+    run_cmd "setting Authentik media directory mode" chmod 770 "${DOCKER_DIR}/appdata/authentik/media"
+    run_cmd "setting Authentik custom templates directory mode" chmod 770 "${DOCKER_DIR}/appdata/authentik/custom-templates"
+    run_cmd "setting Authentik certs directory mode" chmod 770 "${DOCKER_DIR}/appdata/authentik/certs"
+
+    # User-facing application/storage folders.
+    run_cmd "setting Filebrowser permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/filebrowser"
+    run_cmd "setting Postiz permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
+    run_cmd "setting Komodo permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo"
+
+    case "$ADMIN_UI" in
+        dockge)
+            run_cmd "setting Dockge permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockge"
+            ;;
+        portainer)
+            run_cmd "setting Portainer permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/portainer"
+            ;;
+        komodo)
+            run_cmd "setting Komodo permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo"
+            ;;
+        dockhand)
+            run_cmd "setting Dockhand permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockhand"
+            ;;
+    esac
+
+    # Traefik config and ACME.
+    run_cmd "setting Traefik config directory mode" chmod 750 "$TRAEFIK_DIR"
+    run_cmd "setting Traefik ACME directory mode" chmod 700 "$TRAEFIK_ACME_DIR"
+    run_cmd "setting Traefik static config mode" chmod 644 "$TRAEFIK_STATIC_CONFIG_FILE"
+    run_cmd "setting Traefik dynamic config mode" chmod 644 "$TRAEFIK_DYNAMIC_CONFIG_FILE"
+    run_cmd "setting Traefik ACME storage mode" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
+
+    # Secrets and .env.
+    run_cmd "setting .env mode" chmod 600 "${DOCKER_DIR}/.env"
+    run_cmd "setting secrets directory mode" chmod 700 "$DOCKER_SECRETS_DIR"
+
+    if compgen -G "${DOCKER_SECRETS_DIR}/*" > /dev/null; then
+        run_cmd "setting secret file modes" chmod 600 "${DOCKER_SECRETS_DIR}"/*
+    fi
 }
 
 # =========================================================
@@ -1729,7 +1889,7 @@ function collect_authentik_inputs() {
 
     echo ""
     echo -e "${YW}Choose how Script 6 should set the Authentik bootstrap token.${CL}"
-    echo -e "${YW}Reminder: the bootstrap token is not an Authentik API token.${CL}"
+    echo -e "${YW}Fresh Authentik creates an akadmin API Access token from AUTHENTIK_BOOTSTRAP_TOKEN.${CL}"
     echo -e "${BL}1) Auto-generate bootstrap token ${GN}(recommended/default)${CL}"
     echo -e "${BL}2) Enter custom bootstrap token${CL}"
     echo ""
@@ -1847,51 +2007,7 @@ function create_docker_directories() {
     section "DOCKER FOLDER STRUCTURE"
 
     msg_info "Creating Docker folder structure"
-
-    run_cmd "creating Docker appdata directory" mkdir -p "${DOCKER_DIR}/appdata"
-    run_cmd "creating Docker compose directory" mkdir -p "${DOCKER_DIR}/compose"
-    run_cmd "creating Docker backups directory" mkdir -p "${DOCKER_DIR}/backups"
-    run_cmd "creating Docker shared directory" mkdir -p "${DOCKER_DIR}/shared"
-    run_cmd "creating Docker secrets directory" mkdir -p "${DOCKER_SECRETS_DIR}"
-
-    # PostgreSQL 18+ / postgres:latest stores data under /var/lib/postgresql,
-    # so the host bind mount must be the pgdata parent directory, not the old data subdirectory.
-    run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "creating legacy PostgreSQL data directory compatibility path" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
-    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
-    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
-
-    run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "creating Authentik media directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
-    run_cmd "creating Authentik custom templates directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/custom-templates"
-    run_cmd "creating Authentik certs directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/certs"
-
-    run_cmd "creating Filebrowser database directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
-    run_cmd "creating Filebrowser config directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
-    run_cmd "creating Postiz uploads directory" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
-    run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
-
-    case "$ADMIN_UI" in
-        dockge)
-            run_cmd "creating Dockge appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockge"
-            ;;
-        portainer)
-            run_cmd "creating Portainer appdata directory" mkdir -p "${DOCKER_DIR}/appdata/portainer"
-            ;;
-        komodo)
-            run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
-            ;;
-        dockhand)
-            run_cmd "creating Dockhand appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand"
-            run_cmd "creating Dockhand stacks directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand/stacks"
-            ;;
-    esac
-
-    run_cmd "creating Traefik config directory" mkdir -p "${TRAEFIK_DIR}"
-    run_cmd "creating Traefik ACME directory" mkdir -p "${TRAEFIK_ACME_DIR}"
-    run_cmd "creating Traefik ACME storage" touch "${TRAEFIK_ACME_DIR}/acme.json"
-
+    ensure_required_service_directories
     msg_ok "DOCKER FOLDERS CREATED"
 }
 
@@ -2209,55 +2325,7 @@ EOF
 # This makes Script 6 rerun-safe and prevents optional compatibility paths from failing the audit
 # if an older file set or future compose revision did not create them earlier.
 function ensure_service_permission_directories() {
-    # Core project paths.
-    run_cmd "ensuring Docker appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata"
-    run_cmd "ensuring Docker compose directory exists" mkdir -p "${DOCKER_DIR}/compose"
-    run_cmd "ensuring Docker backups directory exists" mkdir -p "${DOCKER_DIR}/backups"
-    run_cmd "ensuring Docker shared directory exists" mkdir -p "${DOCKER_DIR}/shared"
-    run_cmd "ensuring Docker secrets directory exists" mkdir -p "${DOCKER_SECRETS_DIR}"
-
-    # PostgreSQL paths.
-    run_cmd "ensuring PostgreSQL PG18-compatible data directory exists" mkdir -p "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "ensuring PostgreSQL legacy data compatibility directory exists" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "ensuring PostgreSQL init directory exists" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
-
-    # Redis paths. Active compose normally mounts appdata/redis directly to /data.
-    # The nested data path is prepared as a compatibility guard for future/alternate compose files.
-    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
-    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
-
-    # Authentik paths.
-    run_cmd "ensuring Authentik appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "ensuring Authentik media directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
-    run_cmd "ensuring Authentik custom templates directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik/custom-templates"
-    run_cmd "ensuring Authentik certs directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik/certs"
-
-    # Utility/app paths.
-    run_cmd "ensuring Filebrowser database directory exists" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
-    run_cmd "ensuring Filebrowser config directory exists" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
-    run_cmd "ensuring Postiz uploads directory exists" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
-    run_cmd "ensuring Komodo appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/komodo"
-
-    case "$ADMIN_UI" in
-        dockge)
-            run_cmd "ensuring Dockge appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/dockge"
-            ;;
-        portainer)
-            run_cmd "ensuring Portainer appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/portainer"
-            ;;
-        komodo)
-            run_cmd "ensuring Komodo appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/komodo"
-            ;;
-        dockhand)
-            run_cmd "ensuring Dockhand appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/dockhand"
-            run_cmd "ensuring Dockhand stacks directory exists" mkdir -p "${DOCKER_DIR}/appdata/dockhand/stacks"
-            ;;
-    esac
-
-    # Traefik paths.
-    run_cmd "ensuring Traefik config directory exists" mkdir -p "${TRAEFIK_DIR}"
-    run_cmd "ensuring Traefik ACME directory exists" mkdir -p "${TRAEFIK_ACME_DIR}"
-    run_cmd "ensuring Traefik ACME storage exists" touch "${TRAEFIK_ACME_DIR}/acme.json"
+    ensure_required_service_directories
 }
 
 
@@ -2267,92 +2335,17 @@ function ensure_service_permission_directories() {
 function apply_permissions() {
     section "PERMISSIONS"
 
-    ensure_service_permission_directories
-    msg_info "Applying service-specific ownership and permissions"
+    msg_info "Ensuring all required service folders exist"
+    ensure_required_service_directories
+    msg_ok "SERVICE FOLDERS CONFIRMED"
 
-    # Base project ownership: keep only top-level project folders user-owned.
-    # Do not recursively chown all appdata because database containers use service UIDs.
-    run_cmd "setting Docker root directory ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_DIR"
-    run_cmd "setting compose directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/compose"
-    run_cmd "setting backups directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/backups"
-    run_cmd "setting shared directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/shared"
-    run_cmd "setting secrets directory ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$DOCKER_SECRETS_DIR"
+    msg_info "Applying service ownership"
+    chown_required_service_directories
+    msg_ok "SERVICE OWNERSHIP SET"
 
-    # Database services: must be owned by the container UID, not by the login user.
-    # PostgreSQL official images use UID/GID 999. PostgreSQL 18+/latest mounts the pgdata parent at /var/lib/postgresql.
-    # The legacy data path is also prepared so a stale/older compose file cannot cause Docker to create it as root:root.
-    run_cmd "setting PostgreSQL root ownership" chown 999:999 "${DOCKER_DIR}/appdata/postgres"
-    run_cmd "setting PostgreSQL PG18-compatible data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "setting PostgreSQL legacy data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL PG18-compatible data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "setting PostgreSQL legacy data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL PG18-compatible data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "setting PostgreSQL legacy data directory mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/data"
-    run_cmd "setting PostgreSQL init ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/appdata/postgres/init"
-    run_cmd "setting PostgreSQL init permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init"
-    run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
-
-    # Redis official images use UID/GID 999. Prepare both /appdata/redis and /appdata/redis/data because
-    # compose revisions may bind either path to /data. Create paths first, then chown/chmod explicitly,
-    # then recursively repair any files created by a previous failed container start.
-    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
-    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
-    run_cmd "repairing Redis data ownership recursively" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
-    run_cmd "repairing Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
-    run_cmd "setting Redis root data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
-    run_cmd "setting Redis nested data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis/data"
-
-    # Authentik runs non-root and needs write access to media/templates/certs bind mounts.
-    run_cmd "setting Authentik ownership" chown -R 1000:1000 "${DOCKER_DIR}/appdata/authentik"
-    run_cmd "setting Authentik permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/authentik"
-
-    # User-facing safe folders.
-    run_cmd "setting compose/shared/backups ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/compose" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups"
-    run_cmd "setting compose/shared/backups permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/compose" "${DOCKER_DIR}/shared" "${DOCKER_DIR}/backups"
-
-    run_cmd "setting Filebrowser ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser"
-    run_cmd "setting Filebrowser permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/filebrowser"
-
-    run_cmd "setting Postiz uploads ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
-    run_cmd "setting Postiz uploads permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
-
-    case "$ADMIN_UI" in
-        dockge)
-            run_cmd "setting Dockge ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockge"
-            run_cmd "setting Dockge permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockge"
-            ;;
-        portainer)
-            run_cmd "setting Portainer ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/portainer"
-            run_cmd "setting Portainer permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/portainer"
-            ;;
-        komodo)
-            run_cmd "setting Komodo ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo"
-            run_cmd "setting Komodo permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo"
-            ;;
-        dockhand)
-            run_cmd "setting Dockhand ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockhand"
-            run_cmd "setting Dockhand permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockhand"
-            ;;
-    esac
-
-    # Traefik config and ACME.
-    run_cmd "setting Traefik ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${TRAEFIK_DIR}"
-    run_cmd "setting Traefik config directory permissions" chmod 750 "${TRAEFIK_DIR}"
-    run_cmd "setting Traefik ACME directory permissions" chmod 700 "${TRAEFIK_ACME_DIR}"
-    run_cmd "setting Traefik static config permissions" chmod 644 "${TRAEFIK_STATIC_CONFIG_FILE}"
-    run_cmd "setting Traefik dynamic config permissions" chmod 644 "${TRAEFIK_DYNAMIC_CONFIG_FILE}"
-    run_cmd "setting Traefik ACME storage permissions" chmod 600 "${TRAEFIK_ACME_DIR}/acme.json"
-
-    # Secrets and .env.
-    run_cmd "setting .env ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/.env"
-    run_cmd "setting .env permissions" chmod 600 "${DOCKER_DIR}/.env"
-    run_cmd "setting secrets directory permissions" chmod 700 "$DOCKER_SECRETS_DIR"
-
-    if compgen -G "${DOCKER_SECRETS_DIR}/*" > /dev/null; then
-        run_cmd "setting secret file permissions" chmod 600 "${DOCKER_SECRETS_DIR}"/*
-    fi
-
-    msg_ok "SERVICE-SPECIFIC PERMISSIONS SET"
+    msg_info "Applying service permissions"
+    chmod_required_service_directories
+    msg_ok "SERVICE PERMISSIONS SET"
 }
 
 
@@ -2395,11 +2388,15 @@ function assert_user_writable_dir() {
 function verify_service_permissions() {
     section "SERVICE PERMISSION AUDIT"
 
-    # Recreate expected directories here as well, so the audit verifies the final desired state,
-    # not whether an optional compatibility folder happened to exist earlier.
-    ensure_service_permission_directories
+    # This audit deliberately does not create or repair paths.
+    # It verifies that Script 6's create -> chown -> chmod stages already left the expected final state.
+
+    # Core project paths.
+    assert_owner_mode "$DOCKER_DIR" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "755"
+    assert_owner_mode "${DOCKER_DIR}/appdata" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "755"
 
     # PostgreSQL latest/18 path and legacy compatibility path.
+    assert_owner_mode "${DOCKER_DIR}/appdata/postgres" "999" "999" "755"
     assert_owner_mode "${DOCKER_DIR}/appdata/postgres/pgdata" "999" "999" "700"
     assert_owner_mode "${DOCKER_DIR}/appdata/postgres/data" "999" "999" "700"
 
@@ -2407,9 +2404,6 @@ function verify_service_permissions() {
     msg_ok "POSTGRESQL INIT SCRIPT EXECUTABLE"
 
     # Redis: both possible bind targets must exist and be writable by UID/GID 999.
-    # Re-install these immediately before asserting so the audit cannot fail because an optional compatibility path is absent.
-    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
-    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
     assert_owner_mode "${DOCKER_DIR}/appdata/redis" "999" "999" "770"
     assert_owner_mode "${DOCKER_DIR}/appdata/redis/data" "999" "999" "770"
 
