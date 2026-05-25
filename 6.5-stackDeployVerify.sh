@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.23"
+SCRIPT_VERSION="v1.3.24"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="fresh-authentik-api-readiness-retry"
+SCRIPT_BUILD="fresh-authentik-api-readiness-redis-runtime-owner"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1616,6 +1616,21 @@ function postgres_data_owner() {
 }
 
 function redis_data_owner() {
+    local runtime_uid=""
+    local runtime_gid=""
+
+    # After Redis is running, trust the actual container runtime UID/GID.
+    # This prevents false failures when Redis writes persistence files as the
+    # configured container user instead of the default redis image UID 999.
+    if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'redis'; then
+        runtime_uid="$(docker_cmd exec redis sh -lc 'id -u' 2>/dev/null || true)"
+        runtime_gid="$(docker_cmd exec redis sh -lc 'id -g' 2>/dev/null || true)"
+        if [[ "$runtime_uid" =~ ^[0-9]+$ ]] && [[ "$runtime_gid" =~ ^[0-9]+$ ]]; then
+            printf '%s:%s' "$runtime_uid" "$runtime_gid"
+            return 0
+        fi
+    fi
+
     service_data_owner "$REDIS_STACK_FILE" "999" "999"
 }
 
