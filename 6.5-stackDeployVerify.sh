@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.26"
+SCRIPT_VERSION="v1.3.27"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="acme-wildcard-auth-host-verification-ui-clear"
+SCRIPT_BUILD="postgres-redis-process-owner-acme-wildcard-final"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1578,7 +1578,6 @@ function selected_stack_contains() {
 }
 
 
-
 function service_compose_uses_puid_pgid() {
     local file="$1"
     local compose_path=""
@@ -1622,7 +1621,35 @@ function service_data_owner() {
     printf '%s:%s' "$uid" "$gid"
 }
 
+function postgres_process_owner() {
+    local runtime_uid=""
+    local runtime_gid=""
+
+    # PostgreSQL can create/write the mounted cluster tree as the actual
+    # running postgres server process user. Fresh testing proved this may differ
+    # from the fallback 999:999, so runtime repairs must follow the live process
+    # owner once the container exists.
+    if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'postgres'; then
+        runtime_uid="$(docker_cmd exec postgres sh -lc "awk '/^Uid:/ {print \\$2; exit}' /proc/1/status" 2>/dev/null || true)"
+        runtime_gid="$(docker_cmd exec postgres sh -lc "awk '/^Gid:/ {print \\$2; exit}' /proc/1/status" 2>/dev/null || true)"
+
+        if [[ "$runtime_uid" =~ ^[0-9]+$ ]] && [[ "$runtime_gid" =~ ^[0-9]+$ ]]; then
+            printf '%s:%s' "$runtime_uid" "$runtime_gid"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 function postgres_data_owner() {
+    local process_owner=""
+
+    if process_owner="$(postgres_process_owner 2>/dev/null)" && [ -n "$process_owner" ]; then
+        printf '%s' "$process_owner"
+        return 0
+    fi
+
     service_data_owner "$POSTGRES_STACK_FILE" "999" "999"
 }
 
@@ -2262,7 +2289,6 @@ function verify_selected_compose_env_coverage() {
     msg_ok "SELECTED COMPOSE VARIABLE COVERAGE PASSED"
 }
 
-
 function normalize_compose_for_wildcard_tls() {
     local target="$1"
     local file="$2"
@@ -2535,64 +2561,6 @@ PY
     echo "$check_output"
     AUTHENTIK_DEPENDENCIES_OK="yes"
     msg_ok "AUTHENTIK DEPENDENCIES VERIFIED"
-}
-
-
-function wait_for_authentik_internal_api_ready() {
-    section "AUTHENTIK INTERNAL API READINESS"
-
-    local attempt=""
-    local max_attempts="120"
-    local status_output=""
-    local http_code=""
-
-    if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'authentik-server'; then
-        msg_warn "authentik-server is not running; internal API readiness check skipped."
-        return 1
-    fi
-
-    for attempt in $(seq 1 "$max_attempts"); do
-        status_output="$(docker_cmd exec authentik-server sh -lc '
-python - <<AK_READY_PY
-import urllib.request, urllib.error
-url="http://127.0.0.1:9000/api/v3/core/users/me/"
-try:
-    r=urllib.request.urlopen(url, timeout=5)
-    print(r.status)
-except urllib.error.HTTPError as e:
-    print(e.code)
-except Exception as e:
-    print("ERR", repr(e))
-AK_READY_PY
-' 2>/dev/null || true)"
-        http_code="$(printf '%s\n' "$status_output" | tail -n 1 | awk '{print $1}')"
-
-        # 401/403 means the API is alive and only requires authentication.
-        # 200 can happen if the endpoint is accessible in a future Authentik version.
-        if [[ "$http_code" =~ ^(200|401|403)$ ]]; then
-            clear_transient_line
-            msg_ok "AUTHENTIK INTERNAL API READY"
-            detail_line "Internal API unauthenticated status" "$http_code"
-            return 0
-        fi
-
-        if [ "$attempt" -eq 1 ] || [ $((attempt % 10)) -eq 0 ]; then
-            tty_print "${BFR}${YW}Authentik internal API not ready yet (${attempt}/${max_attempts}) | status=${http_code:-unknown}${CL}"
-        fi
-
-        sleep 3
-    done
-
-    clear_transient_line
-    echo -e "${YW}Authentik server logs:${CL}"
-    docker_cmd logs --tail=160 authentik-server 2>/dev/null || true
-    echo -e "${YW}Authentik worker logs:${CL}"
-    docker_cmd logs --tail=120 authentik-worker 2>/dev/null || true
-    echo -e "${YW}PostgreSQL logs:${CL}"
-    docker_cmd logs --tail=100 postgres 2>/dev/null || true
-    echo -e "${YW}Redis logs:${CL}"
-    docker_cmd logs --tail=80 redis 2>/dev/null || true
-    msg_error "Authentik internal API stayed unavailable/HTTP 500 after waiting. Fix Authentik logs before route automation."
 }
 
 function collect_authentik_api_token_for_deploy() {
