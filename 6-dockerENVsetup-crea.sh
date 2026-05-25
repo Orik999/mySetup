@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.5.2"
+SCRIPT_VERSION="v1.5.4"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="optional-redis-data-chmod-fix"
+SCRIPT_BUILD="complete-service-bind-mount-permissions"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -385,9 +385,12 @@ function ensure_required_service_directories() {
     run_cmd "creating PostgreSQL legacy data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
-    # Redis path. The current Redis compose bind-mounts this directory directly to container /data.
-    # Do not require a nested redis/data folder for the active stack.
+    # Redis paths.
+    # The active Redis compose bind-mounts ${DOCKER_DIR}/appdata/redis to container /data.
+    # The nested ${DOCKER_DIR}/appdata/redis/data path is also created and permissioned as a
+    # compatibility guard so future/rerun checks and alternate compose revisions cannot fail later.
     run_cmd "creating Redis data directory" mkdir -p "${DOCKER_DIR}/appdata/redis"
+    run_cmd "creating Redis nested data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/redis/data"
 
     # Authentik paths.
     run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
@@ -399,23 +402,18 @@ function ensure_required_service_directories() {
     run_cmd "creating Filebrowser database directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
     run_cmd "creating Filebrowser config directory" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
     run_cmd "creating Postiz uploads directory" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
-    run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
 
-    case "$ADMIN_UI" in
-        dockge)
-            run_cmd "creating Dockge appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockge"
-            ;;
-        portainer)
-            run_cmd "creating Portainer appdata directory" mkdir -p "${DOCKER_DIR}/appdata/portainer"
-            ;;
-        komodo)
-            run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
-            ;;
-        dockhand)
-            run_cmd "creating Dockhand appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand"
-            run_cmd "creating Dockhand stacks directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand/stacks"
-            ;;
-    esac
+    # Admin UI bind-mount paths.
+    # Create every supported admin UI path up front so Script 6.5 can switch options
+    # without Docker later creating missing bind-mount directories as root.
+    run_cmd "creating Dockge appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockge"
+    run_cmd "creating Portainer appdata directory" mkdir -p "${DOCKER_DIR}/appdata/portainer"
+    run_cmd "creating Dockhand appdata directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand"
+    run_cmd "creating Dockhand stacks directory" mkdir -p "${DOCKER_DIR}/appdata/dockhand/stacks"
+    run_cmd "creating Komodo appdata directory" mkdir -p "${DOCKER_DIR}/appdata/komodo"
+    run_cmd "creating Komodo PostgreSQL data directory" mkdir -p "${DOCKER_DIR}/appdata/komodo/postgres"
+    run_cmd "creating Komodo core config directory" mkdir -p "${DOCKER_DIR}/appdata/komodo/core"
+    run_cmd "creating Komodo periphery config directory" mkdir -p "${DOCKER_DIR}/appdata/komodo/periphery"
 
     # Traefik paths.
     run_cmd "creating Traefik config directory" mkdir -p "$TRAEFIK_DIR"
@@ -449,22 +447,15 @@ function chown_required_service_directories() {
     # User-facing application/storage folders.
     run_cmd "setting Filebrowser ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser"
     run_cmd "setting Postiz ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
-    run_cmd "setting Komodo ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo"
 
-    case "$ADMIN_UI" in
-        dockge)
-            run_cmd "setting Dockge ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockge"
-            ;;
-        portainer)
-            run_cmd "setting Portainer ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/portainer"
-            ;;
-        komodo)
-            run_cmd "setting Komodo ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo"
-            ;;
-        dockhand)
-            run_cmd "setting Dockhand ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockhand"
-            ;;
-    esac
+    # Admin UI bind-mount ownership.
+    run_cmd "setting Dockge ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockge"
+    run_cmd "setting Portainer ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/portainer"
+    run_cmd "setting Dockhand ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/dockhand"
+    run_cmd "setting Komodo root ownership" chown "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo"
+    run_cmd "setting Komodo core ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo/core"
+    run_cmd "setting Komodo periphery ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/komodo/periphery"
+    run_cmd "setting Komodo PostgreSQL data ownership recursively" chown -R 999:999 "${DOCKER_DIR}/appdata/komodo/postgres"
 
     # Traefik config and ACME files.
     run_cmd "setting Traefik ownership recursively" chown -R "${PUID_VALUE}:${PGID_VALUE}" "$TRAEFIK_DIR"
@@ -493,10 +484,9 @@ function chmod_required_service_directories() {
     run_cmd "setting PostgreSQL init script mode" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
     # Redis data must be writable by UID/GID 999.
-    # Active compose mounts ${DOCKER_DIR}/appdata/redis directly to container /data.
-    # Do not chmod a nested redis/data path here because it is optional and may not exist.
     run_cmd "setting Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
     run_cmd "setting Redis data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis nested data compatibility directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis/data"
 
     # Authentik bind mounts must be writable by UID/GID 1000.
     run_cmd "setting Authentik permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/authentik"
@@ -508,22 +498,16 @@ function chmod_required_service_directories() {
     # User-facing application/storage folders.
     run_cmd "setting Filebrowser permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/filebrowser"
     run_cmd "setting Postiz permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
-    run_cmd "setting Komodo permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo"
 
-    case "$ADMIN_UI" in
-        dockge)
-            run_cmd "setting Dockge permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockge"
-            ;;
-        portainer)
-            run_cmd "setting Portainer permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/portainer"
-            ;;
-        komodo)
-            run_cmd "setting Komodo permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo"
-            ;;
-        dockhand)
-            run_cmd "setting Dockhand permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockhand"
-            ;;
-    esac
+    # Admin UI bind-mount permissions.
+    run_cmd "setting Dockge permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockge"
+    run_cmd "setting Portainer permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/portainer"
+    run_cmd "setting Dockhand permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/dockhand"
+    run_cmd "setting Komodo root directory mode" chmod 755 "${DOCKER_DIR}/appdata/komodo"
+    run_cmd "setting Komodo core permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo/core"
+    run_cmd "setting Komodo periphery permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/komodo/periphery"
+    run_cmd "setting Komodo PostgreSQL data permissions recursively" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/komodo/postgres"
+    run_cmd "setting Komodo PostgreSQL data directory mode" chmod 700 "${DOCKER_DIR}/appdata/komodo/postgres"
 
     # Traefik config and ACME.
     run_cmd "setting Traefik config directory mode" chmod 750 "$TRAEFIK_DIR"
@@ -2320,15 +2304,6 @@ EOF
 
 
 
-# --- 52A. SERVICE DIRECTORY SELF-HEAL ---
-# Recreates critical service bind-mount directories immediately before permissioning/auditing.
-# This makes Script 6 rerun-safe and prevents optional compatibility paths from failing the audit
-# if an older file set or future compose revision did not create them earlier.
-function ensure_service_permission_directories() {
-    ensure_required_service_directories
-}
-
-
 # --- 53. PERMISSIONS ---
 # Applies secure permissions without breaking PostgreSQL init script readability.
 # .env and secret files are treated as high-value secret material.
@@ -2371,27 +2346,6 @@ function assert_owner_mode() {
 }
 
 
-function assert_optional_owner_mode() {
-    local path="$1"
-    local expected_uid="$2"
-    local expected_gid="$3"
-    local expected_mode="$4"
-    local actual=""
-
-    if [ ! -e "$path" ]; then
-        msg_skip "OPTIONAL PATH NOT PRESENT: ${path}"
-        return 0
-    fi
-
-    actual="$(stat -c '%u:%g:%a' "$path" 2>/dev/null || true)"
-
-    if [ "$actual" != "${expected_uid}:${expected_gid}:${expected_mode}" ]; then
-        msg_error "Optional permission audit failed for ${path}. Expected ${expected_uid}:${expected_gid}:${expected_mode}, got ${actual:-unknown}."
-    fi
-
-    msg_ok "OPTIONAL PERMISSION OK: ${path}"
-}
-
 function assert_user_writable_dir() {
     local path="$1"
     local test_file="${path}/.script6-write-test-$$"
@@ -2425,10 +2379,10 @@ function verify_service_permissions() {
     [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ] || msg_error "PostgreSQL init script is not executable."
     msg_ok "POSTGRESQL INIT SCRIPT EXECUTABLE"
 
-    # Redis: the active Redis compose mount is ${DOCKER_DIR}/appdata/redis:/data.
-    # redis/data is optional compatibility only; do not fail a fresh setup because an unused nested folder is absent.
+    # Redis: both the active bind target and nested compatibility path must exist
+    # and be writable by UID/GID 999 before Script 6.5 deploys Redis.
     assert_owner_mode "${DOCKER_DIR}/appdata/redis" "999" "999" "770"
-    assert_optional_owner_mode "${DOCKER_DIR}/appdata/redis/data" "999" "999" "770"
+    assert_owner_mode "${DOCKER_DIR}/appdata/redis/data" "999" "999" "770"
 
     # Authentik bind mounts must be owned by the non-root Authentik UID/GID.
     assert_owner_mode "${DOCKER_DIR}/appdata/authentik" "1000" "1000" "770"
@@ -2444,20 +2398,16 @@ function verify_service_permissions() {
     assert_user_writable_dir "${DOCKER_DIR}/appdata/filebrowser/config"
     assert_user_writable_dir "${DOCKER_DIR}/appdata/postiz/uploads"
 
-    case "$ADMIN_UI" in
-        dockge)
-            assert_user_writable_dir "${DOCKER_DIR}/appdata/dockge"
-            ;;
-        portainer)
-            assert_user_writable_dir "${DOCKER_DIR}/appdata/portainer"
-            ;;
-        komodo)
-            assert_user_writable_dir "${DOCKER_DIR}/appdata/komodo"
-            ;;
-        dockhand)
-            assert_user_writable_dir "${DOCKER_DIR}/appdata/dockhand"
-            ;;
-    esac
+    # Admin UI bind-mount paths. These are all created by Script 6 so Docker never
+    # has to create them later as root during Script 6.5 deployment.
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/dockge"
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/portainer"
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/dockhand"
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/dockhand/stacks"
+    assert_owner_mode "${DOCKER_DIR}/appdata/komodo" "$PUID_VALUE" "$PGID_VALUE" "755"
+    assert_owner_mode "${DOCKER_DIR}/appdata/komodo/postgres" "999" "999" "700"
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/komodo/core"
+    assert_user_writable_dir "${DOCKER_DIR}/appdata/komodo/periphery"
 
     # Secrets and Traefik ACME must remain locked down.
     assert_owner_mode "$DOCKER_SECRETS_DIR" "$(id -u "$DOCKER_USER")" "$(id -g "$DOCKER_USER")" "700"

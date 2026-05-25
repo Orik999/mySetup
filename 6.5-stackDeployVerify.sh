@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.16"
-SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="clean-ui-redis-persistence-fix"
+SCRIPT_VERSION="v1.3.17"
+SCRIPT_UPDATED="2026-05-25"
+SCRIPT_BUILD="admin-ui-route-verification-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1409,9 +1409,9 @@ function verify_admin_ui_selection() {
             ;;
         portainer|portainer-ce)
             ADMIN_UI="portainer"
-            ADMIN_UI_PROJECT_NAME="dockge"
-            ADMIN_UI_SERVICE_NAME="dockge"
-            ADMIN_UI_DISPLAY_NAME="Dockge"
+            ADMIN_UI_PROJECT_NAME="portainer"
+            ADMIN_UI_SERVICE_NAME="portainer"
+            ADMIN_UI_DISPLAY_NAME="Portainer"
             ADMIN_UI_COMPOSE_FILE="${COMPOSE_DIR}/${PORTAINER_STACK_FILE}"
             ADMIN_UI_BOOTSTRAP_OVERRIDE_NAME="$PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME"
             ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE="${COMPOSE_DIR}/${PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME}"
@@ -2434,13 +2434,15 @@ function verify_authentik_outpost_route_for_deploy() {
     local test_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
     local http_code=""
 
-    http_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$test_url" || true)"
-    if [ "$http_code" == "302" ]; then
+    # Use GET instead of HEAD because some Authentik/Traefik protected routes handle HEAD
+    # differently and can produce misleading Authentik-powered 404 results.
+    http_code="$(curl -ksS -o /dev/null -w '%{http_code}' "$test_url" || true)"
+    if [[ "$http_code" =~ ^(302|303|307)$ ]]; then
         AUTHENTIK_OUTPOST_302_OK="yes"
-        msg_ok "AUTHENTIK OUTPOST ROUTE RETURNED HTTP 302"
+        msg_ok "AUTHENTIK OUTPOST ROUTE REDIRECTED AS EXPECTED"
     else
         AUTHENTIK_OUTPOST_302_OK="no"
-        msg_warn "Authentik outpost route returned HTTP ${http_code:-none}; protected routes may still need UI confirmation."
+        msg_warn "Authentik outpost GET route returned HTTP ${http_code:-none}; protected routes may still need UI confirmation."
     fi
 
     detail_line "Outpost test URL" "$test_url"
@@ -2452,18 +2454,35 @@ function verify_selected_protected_routes() {
 
     local host=""
     local code=""
+    local headers_file=""
+    local powered_by=""
     local failures="0"
     local hosts=()
+
+    headers_file="$(mktemp)"
+    TEMP_FILES+=("$headers_file")
 
     hosts+=("${ADMIN_UI_HOST:-dockge.${DOMAIN_VALUE}}")
     if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then hosts+=("code.${DOMAIN_VALUE}"); fi
     if [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then hosts+=("fb.${DOMAIN_VALUE}"); fi
 
     for host in "${hosts[@]}"; do
-        code="$(curl -ksS -o /dev/null -w '%{http_code}' "https://${host}/" || true)"
+        : > "$headers_file"
+        # Use GET and capture headers so Authentik-powered 404s are treated as a protected-route
+        # setup failure instead of a healthy app response.
+        code="$(curl -ksS -D "$headers_file" -o /dev/null -w '%{http_code}' "https://${host}/" || true)"
+        powered_by="$(awk 'BEGIN{IGNORECASE=1} /^x-powered-by:/ {print $0}' "$headers_file" | tr -d '\r' || true)"
         case "$code" in
-            200|302|307|401|403)
+            200|302|303|307|401|403)
                 msg_ok "ROUTE RESPONDED: ${host} HTTP ${code}"
+                ;;
+            404)
+                failures=$((failures + 1))
+                if printf '%s' "$powered_by" | grep -qi 'authentik'; then
+                    msg_warn "ROUTE CHECK FAILED: ${host} HTTP 404 from Authentik. Verify provider/application/outpost attachment and Traefik forward-auth."
+                else
+                    msg_warn "ROUTE CHECK FAILED: ${host} HTTP 404"
+                fi
                 ;;
             *)
                 failures=$((failures + 1))
