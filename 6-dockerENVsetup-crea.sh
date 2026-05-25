@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.4.8"
+SCRIPT_VERSION="v1.4.9"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="redis-install-dir-audit-fix"
+SCRIPT_BUILD="redis-mkdir-chown-chmod-final-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -367,16 +367,18 @@ function root_stat_mode() {
     fi
 }
 
-# --- 16A. ROOT DIRECTORY INSTALL HELPER ---
-# Creates a directory and sets owner/mode in one atomic command.
-# This is safer than mkdir + chown + chmod when a later audit depends on the path existing.
-function install_dir_owner_mode() {
+# --- 16A. OWNED DIRECTORY HELPER ---
+# Creates a directory, then sets owner and mode using mkdir + chown + chmod.
+# Numeric UID/GID values must be passed to chown as UID:GID, not as usernames.
+function ensure_dir_owner_mode() {
     local path="$1"
     local uid="$2"
     local gid="$3"
     local mode="$4"
 
-    run_cmd "installing directory ${path}" install -d -o "$uid" -g "$gid" -m "$mode" "$path"
+    run_cmd "creating directory ${path}" mkdir -p "$path"
+    run_cmd "setting directory owner ${path}" chown "${uid}:${gid}" "$path"
+    run_cmd "setting directory mode ${path}" chmod "$mode" "$path"
 }
 
 # =========================================================
@@ -858,7 +860,6 @@ function validate_dependencies() {
         date
         grep
         id
-        install
         mkdir
         mktemp
         openssl
@@ -1858,8 +1859,8 @@ function create_docker_directories() {
     run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/pgdata"
     run_cmd "creating legacy PostgreSQL data directory compatibility path" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
-    install_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
-    install_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
+    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
+    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
 
     run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
     run_cmd "creating Authentik media directory" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
@@ -2222,8 +2223,8 @@ function ensure_service_permission_directories() {
 
     # Redis paths. Active compose normally mounts appdata/redis directly to /data.
     # The nested data path is prepared as a compatibility guard for future/alternate compose files.
-    install_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
-    install_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
+    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
+    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
 
     # Authentik paths.
     run_cmd "ensuring Authentik appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik"
@@ -2292,10 +2293,10 @@ function apply_permissions() {
     run_cmd "setting PostgreSQL init script permissions" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
     # Redis official images use UID/GID 999. Prepare both /appdata/redis and /appdata/redis/data because
-    # compose revisions may bind either path to /data. install -d creates the paths and sets owner/mode atomically,
-    # then recursive repair fixes any files created by a previous failed container start.
-    install_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
-    install_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
+    # compose revisions may bind either path to /data. Create paths first, then chown/chmod explicitly,
+    # then recursively repair any files created by a previous failed container start.
+    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
+    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
     run_cmd "repairing Redis data ownership recursively" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
     run_cmd "repairing Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
     run_cmd "setting Redis root data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
@@ -2407,8 +2408,8 @@ function verify_service_permissions() {
 
     # Redis: both possible bind targets must exist and be writable by UID/GID 999.
     # Re-install these immediately before asserting so the audit cannot fail because an optional compatibility path is absent.
-    install_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
-    install_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
+    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis" 999 999 770
+    ensure_dir_owner_mode "${DOCKER_DIR}/appdata/redis/data" 999 999 770
     assert_owner_mode "${DOCKER_DIR}/appdata/redis" "999" "999" "770"
     assert_owner_mode "${DOCKER_DIR}/appdata/redis/data" "999" "999" "770"
 
