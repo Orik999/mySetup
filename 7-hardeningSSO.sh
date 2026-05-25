@@ -23,9 +23,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="7-hardeningSSO.sh"
-SCRIPT_VERSION="v1.4.2"
+SCRIPT_VERSION="v1.4.4"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="hardening-preserve-authentik-outpost-host"
+SCRIPT_BUILD="hardening-only-os-password-sudo-closure"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -63,6 +63,8 @@ AUTHENTIK_PROVIDER_OK="no"
 AUTHENTIK_APPLICATION_OK="no"
 AUTHENTIK_OUTPOST_ATTACH_OK="no"
 AUTHENTIK_OUTPOST_302_OK="no"
+AUTHENTIK_PUBLIC_HOST_OK="not-run"
+ADMIN_UI_PROTECTED_ROUTE_OK="not-run"
 PORTAINER_OIDC_STATUS="not-applicable"
 KOMODO_OIDC_STATUS="not-applicable"
 PORTAINER_BOOTSTRAP_CLOSED="not-applicable"
@@ -71,6 +73,8 @@ ADMIN_UI_BOOTSTRAP_CLOSED="not-applicable"
 UFW_ADMIN_UI_RULE_REMOVED="not-applicable"
 AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT="unknown"
 NOPASSWD_HARDENED="no"
+OS_USER_PASSWORD_STATUS="not-run"
+SSH_KEY_ONLY_POLICY_OK="not-run"
 DOCKER_USER_RULES_REVIEWED="no"
 POSTIZ_HEALTH_OK="no"
 POSTIZ_BACKEND_PORT_OK="no"
@@ -102,6 +106,7 @@ function msg_ok() { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
 function msg_warn() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_skip() { echo -e "${BFR} ${WARN} ${YW}$1${CL}"; }
 function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; exit 1; }
+function clear_transient_line() { tty_print "${BFR}"; }
 
 # --- SCRIPT VERSION DISPLAY ---
 # Prints the currently running script version immediately under the ASCII banner.
@@ -510,6 +515,7 @@ function validate_dependencies() {
         id
         mkdir
         mktemp
+        python3
         rm
         sed
         tee
@@ -1058,6 +1064,48 @@ JSON
 # =========================================================
 
 # --- 15. TRUE 302 TEST ---
+function admin_ui_public_host() {
+    case "$ADMIN_UI" in
+        portainer) echo "portainer.${DOMAIN}" ;;
+        dockge) echo "dockge.${DOMAIN}" ;;
+        komodo) echo "komodo.${DOMAIN}" ;;
+        dockhand) echo "dockhand.${DOMAIN}" ;;
+        *) echo "traefik.${DOMAIN}" ;;
+    esac
+}
+
+function http_code_for_url() {
+    local url="$1"
+    curl -ksS -o /dev/null -w '%{http_code}' "$url" || true
+}
+
+function http_code_is_route_ok() {
+    local code="$1"
+    [[ "$code" =~ ^(200|301|302|303|307|308|401|403)$ ]]
+}
+
+function verify_authentik_public_host() {
+    section "AUTHENTIK PUBLIC HOST VERIFICATION"
+
+    local auth_url="${AUTHENTIK_HOST%/}/"
+    local http_code=""
+
+    msg_info "Checking Authentik public host before bootstrap closure"
+    http_code="$(http_code_for_url "$auth_url")"
+
+    if http_code_is_route_ok "$http_code"; then
+        AUTHENTIK_PUBLIC_HOST_OK="yes"
+        msg_ok "AUTHENTIK PUBLIC HOST RESPONDED WITH HTTP ${http_code}"
+    else
+        AUTHENTIK_PUBLIC_HOST_OK="no"
+        msg_warn "AUTHENTIK PUBLIC HOST RETURNED HTTP ${http_code:-none}; bootstrap closure will be blocked"
+    fi
+
+    detail_line "Authentik public URL" "$auth_url"
+    detail_line "HTTP result" "${http_code:-none}"
+}
+
+# --- 15. TRUE REDIRECT TEST ---
 function verify_authentik_outpost_302() {
     section "AUTHENTIK OUTPOST VERIFICATION"
 
@@ -1065,38 +1113,61 @@ function verify_authentik_outpost_302() {
     local test_url=""
     local http_code=""
 
-    if [ "$PORTAINER_SELECTED" == "yes" ]; then
-        test_host="portainer.${DOMAIN}"
-    elif [ "$DOCKGE_SELECTED" == "yes" ]; then
-        test_host="dockge.${DOMAIN}"
-    elif [ "$KOMODO_SELECTED" == "yes" ]; then
-        test_host="komodo.${DOMAIN}"
-    else
-        test_host="traefik.${DOMAIN}"
-    fi
-
+    test_host="$(admin_ui_public_host)"
     test_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
 
     msg_info "Testing Authentik outpost route without following redirects"
-    http_code="$(curl -ksS -o /dev/null -w '%{http_code}' -I "$test_url" || true)"
+    # Use GET, not HEAD. Earlier deployment testing showed HEAD can produce misleading
+    # Authentik-powered 404s while GET correctly returns the outpost redirect.
+    http_code="$(http_code_for_url "$test_url")"
 
-    if [ "$http_code" == "302" ]; then
+    if [[ "$http_code" =~ ^(302|303|307)$ ]]; then
         AUTHENTIK_OUTPOST_302_OK="yes"
-        msg_ok "AUTHENTIK OUTPOST ROUTE RETURNED TRUE HTTP 302"
+        msg_ok "AUTHENTIK OUTPOST ROUTE REDIRECTED AS EXPECTED"
     else
         AUTHENTIK_OUTPOST_302_OK="no"
-        msg_warn "Authentik outpost test returned HTTP ${http_code:-none}; expected 302"
+        msg_warn "Authentik outpost route returned HTTP ${http_code:-none}; bootstrap closure will be blocked"
         echo ""
         echo -e "${YW}Manual Authentik check required:${CL}"
         echo -e "${YW}Applications → Outposts → authentik Embedded Outpost → Edit${CL}"
-        echo -e "${YW}Ensure Traefik Forward Auth is in Selected Applications, then Update.${CL}"
-        echo ""
-        echo -e "${YW}Retest:${CL}"
-        echo -e "${GN}curl -Ik \"${test_url}\"${CL}"
+        echo -e "${YW}Ensure Traefik Forward Auth is in Selected Applications and authentik_host values are set, then Update.${CL}"
     fi
 
     detail_line "Outpost test URL" "$test_url"
     detail_line "HTTP result" "${http_code:-none}"
+}
+
+function verify_admin_ui_protected_route() {
+    section "ADMIN UI PROTECTED ROUTE VERIFICATION"
+
+    local test_host=""
+    local test_url=""
+    local http_code=""
+
+    test_host="$(admin_ui_public_host)"
+    test_url="https://${test_host}/"
+
+    msg_info "Checking protected admin UI route before bootstrap closure"
+    http_code="$(http_code_for_url "$test_url")"
+
+    if http_code_is_route_ok "$http_code" && [ "$AUTHENTIK_PUBLIC_HOST_OK" == "yes" ] && [ "$AUTHENTIK_OUTPOST_302_OK" == "yes" ]; then
+        ADMIN_UI_PROTECTED_ROUTE_OK="yes"
+        msg_ok "ADMIN UI PROTECTED ROUTE VERIFIED"
+    else
+        ADMIN_UI_PROTECTED_ROUTE_OK="no"
+        msg_warn "ADMIN UI PROTECTED ROUTE NOT FULLY VERIFIED; bootstrap closure will be blocked"
+    fi
+
+    detail_line "Admin UI public URL" "$test_url"
+    detail_line "HTTP result" "${http_code:-none}"
+    detail_line "Authentik public host" "$AUTHENTIK_PUBLIC_HOST_OK"
+    detail_line "Authentik outpost redirect" "$AUTHENTIK_OUTPOST_302_OK"
+}
+
+function verify_protected_access_before_bootstrap_closure() {
+    verify_authentik_public_host
+    verify_authentik_outpost_302
+    verify_admin_ui_protected_route
 }
 
 # =========================================================
@@ -1181,6 +1252,16 @@ function close_portainer_bootstrap_exposure() {
         return 0
     fi
 
+    if [ "$ADMIN_UI_PROTECTED_ROUTE_OK" != "yes" ]; then
+        ADMIN_UI_BOOTSTRAP_CLOSED="blocked-protected-route-not-verified"
+        PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
+        msg_warn "Protected ${ADMIN_UI} domain access is not fully verified; direct bootstrap port will be kept open."
+        detail_line "Admin UI protected route" "$ADMIN_UI_PROTECTED_ROUTE_OK"
+        detail_line "Authentik public host" "$AUTHENTIK_PUBLIC_HOST_OK"
+        detail_line "Authentik outpost redirect" "$AUTHENTIK_OUTPOST_302_OK"
+        return 0
+    fi
+
     echo -e "${YW}This redeploys ${ADMIN_UI} without its bootstrap override so direct bootstrap port exposure closes.${CL}"
     echo -e "${YW}Traefik/AuthentiK domain access should remain available.${CL}"
     echo ""
@@ -1205,6 +1286,19 @@ function close_portainer_bootstrap_exposure() {
     else
         ADMIN_UI_BOOTSTRAP_CLOSED="yes"
         msg_ok "ADMIN UI DIRECT BOOTSTRAP PORT CLOSED"
+    fi
+
+    if [ "$ADMIN_UI_BOOTSTRAP_CLOSED" == "yes" ]; then
+        msg_info "Rechecking protected ${ADMIN_UI} domain after bootstrap closure"
+        local post_close_code=""
+        post_close_code="$(http_code_for_url "https://$(admin_ui_public_host)/")"
+        if http_code_is_route_ok "$post_close_code"; then
+            msg_ok "PROTECTED ADMIN UI ROUTE STILL RESPONDS AFTER CLOSURE"
+            detail_line "Post-close HTTP result" "$post_close_code"
+        else
+            ADMIN_UI_BOOTSTRAP_CLOSED="closed-but-route-needs-review"
+            msg_warn "Bootstrap port closed, but protected admin UI route returned HTTP ${post_close_code:-none}. Review Traefik/AuthentiK before logging out."
+        fi
     fi
 
     PORTAINER_BOOTSTRAP_CLOSED="$ADMIN_UI_BOOTSTRAP_CLOSED"
@@ -1373,23 +1467,131 @@ function stop_postiz_temporal_guard_if_safe() {
 #  SYSTEM HARDENING
 # =========================================================
 
-# --- 19. SUDO HARDENING SAFETY CHECK ---
-function verify_real_sudo_password_before_hardening() {
-    if [ -z "$SUDO_CMD" ]; then
-        echo -e "${YW}Running as root; cannot verify the target user's sudo password interactively from this session.${CL}"
-        echo -e "${YW}Skip this unless you have already set and tested a real sudo password for ${DOCKER_USER}.${CL}"
-        return 1
+# --- 19. OS LOGIN / SSH POLICY FINAL CHECK ---
+# Script 3.5 and Script 4 already create/reuse the user, install SSH keys,
+# lock password login, and enforce key-only SSH. Script 7 does not repeat SSH
+# key discovery/copying. It only verifies the final policy and optionally sets
+# a real local password so sudo can require a password while SSH remains key-only.
+function passwd_status_code_for_user() {
+    local user="$1"
+    passwd -S "$user" 2>/dev/null | awk '{print $2}' || true
+}
+
+function verify_ssh_key_only_policy() {
+    section "SSH KEY-ONLY POLICY CHECK"
+
+    local effective_config=""
+    local password_auth=""
+    local pubkey_auth=""
+    local root_login=""
+    local kbd_auth=""
+    local challenge_auth=""
+
+    msg_info "Checking effective sshd policy"
+    effective_config="$(sshd -T -C user="${DOCKER_USER}",host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+
+    if [ -z "$effective_config" ]; then
+        SSH_KEY_ONLY_POLICY_OK="failed-sshd-t"
+        msg_error "Could not read effective sshd config. Fix SSH before final sudo hardening."
     fi
 
-    echo -e "${YW}For safety, the script will ask sudo to require a real password before disabling NOPASSWD.${CL}"
-    echo -e "${YW}If this fails, NOPASSWD hardening will be skipped to avoid locking you out.${CL}"
-    echo ""
+    password_auth="$(awk '$1=="passwordauthentication" {print $2; exit}' <<< "$effective_config")"
+    pubkey_auth="$(awk '$1=="pubkeyauthentication" {print $2; exit}' <<< "$effective_config")"
+    root_login="$(awk '$1=="permitrootlogin" {print $2; exit}' <<< "$effective_config")"
+    kbd_auth="$(awk '$1=="kbdinteractiveauthentication" {print $2; exit}' <<< "$effective_config")"
+    challenge_auth="$(awk '$1=="challengeresponseauthentication" {print $2; exit}' <<< "$effective_config")"
 
-    if "$SUDO_CMD" -k && "$SUDO_CMD" -v; then
+    detail_line "PubkeyAuthentication" "${pubkey_auth:-unknown}"
+    detail_line "PasswordAuthentication" "${password_auth:-unknown}"
+    detail_line "KbdInteractiveAuthentication" "${kbd_auth:-unknown}"
+    [ -n "$challenge_auth" ] && detail_line "ChallengeResponseAuthentication" "$challenge_auth"
+    detail_line "PermitRootLogin" "${root_login:-unknown}"
+
+    if [ "${pubkey_auth:-unknown}" != "yes" ]; then
+        SSH_KEY_ONLY_POLICY_OK="failed-pubkey"
+        msg_error "SSH public key authentication is not confirmed enabled. Refusing final sudo hardening."
+    fi
+
+    if [ "${password_auth:-unknown}" != "no" ]; then
+        SSH_KEY_ONLY_POLICY_OK="failed-password-auth"
+        msg_error "SSH password authentication is not disabled. Refusing final sudo hardening. Run Script 4 SSH hardening first."
+    fi
+
+    if [ -n "$kbd_auth" ] && [ "$kbd_auth" != "no" ]; then
+        SSH_KEY_ONLY_POLICY_OK="failed-kbd"
+        msg_error "SSH keyboard-interactive authentication is not disabled. Refusing final sudo hardening."
+    fi
+
+    case "${root_login:-unknown}" in
+        no|prohibit-password|without-password) ;;
+        *)
+            SSH_KEY_ONLY_POLICY_OK="failed-root-login"
+            msg_error "Root SSH login is not locked down enough. Refusing final sudo hardening."
+            ;;
+    esac
+
+    SSH_KEY_ONLY_POLICY_OK="yes"
+    clear_transient_line 2>/dev/null || true
+    msg_ok "SSH KEY-ONLY POLICY VERIFIED"
+}
+
+function set_or_verify_local_user_password() {
+    section "LOCAL USER PASSWORD FOR SUDO"
+
+    local current_state=""
+    local set_yn=""
+    local verify_state=""
+
+    current_state="$(passwd_status_code_for_user "$DOCKER_USER")"
+    detail_line "Current password state" "${current_state:-unknown}"
+
+    case "$current_state" in
+        P)
+            OS_USER_PASSWORD_STATUS="already-set"
+            msg_ok "LOCAL PASSWORD ALREADY SET FOR ${DOCKER_USER}"
+            return 0
+            ;;
+        L|NP|LK|"")
+            echo -e "${YW}${DOCKER_USER} does not currently have a usable local password for sudo.${CL}"
+            echo -e "${YW}SSH password login will remain disabled; this password is for local/sudo authentication only.${CL}"
+            ;;
+        *)
+            echo -e "${YW}Password state is ${current_state}; you may replace/set it now for sudo hardening.${CL}"
+            ;;
+    esac
+
+    set_yn="$(timed_yes_no "Set or replace local password for ${DOCKER_USER} now?" "y")"
+    if [[ "$set_yn" =~ ^[Nn] ]]; then
+        OS_USER_PASSWORD_STATUS="user-skipped"
+        msg_warn "LOCAL PASSWORD SETUP SKIPPED; NOPASSWD SUDO CANNOT BE SAFELY DISABLED"
         return 0
     fi
 
-    return 1
+    echo -e "${YW}Password entry will use the system passwd prompt and will not be logged.${CL}"
+    disable_logging
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" passwd "$DOCKER_USER"
+    else
+        passwd "$DOCKER_USER"
+    fi
+    enable_logging
+
+    verify_state="$(passwd_status_code_for_user "$DOCKER_USER")"
+    detail_line "Verified password state" "${verify_state:-unknown}"
+
+    if [ "$verify_state" == "P" ]; then
+        OS_USER_PASSWORD_STATUS="yes"
+        msg_ok "LOCAL PASSWORD IS SET FOR ${DOCKER_USER}"
+    else
+        OS_USER_PASSWORD_STATUS="verify-failed"
+        msg_error "Password state for ${DOCKER_USER} is ${verify_state:-unknown}; expected P before removing NOPASSWD sudo."
+    fi
+}
+
+function local_password_ready_for_sudo_hardening() {
+    local state=""
+    state="$(passwd_status_code_for_user "$DOCKER_USER")"
+    [ "$state" == "P" ]
 }
 
 # --- 20. SUDO HARDENING ---
@@ -1399,33 +1601,49 @@ function harden_sudo_nopasswd() {
     local harden_yn=""
     local sudoers_files=(
         "/etc/sudoers.d/90-cloud-init-users"
+        "/etc/sudoers.d/90-${DOCKER_USER}-nopasswd"
         "/etc/sudoers.d/99-${DOCKER_USER}-nopasswd"
         "/etc/sudoers.d/${DOCKER_USER}"
     )
 
     local file=""
+    local found="no"
 
-    echo -e "${YW}This step looks for broad NOPASSWD sudo entries for ${DOCKER_USER}.${CL}"
-    echo -e "${YW}Default is NO. Only enable after you have confirmed a real sudo password works.${CL}"
+    echo -e "${YW}This step removes broad passwordless sudo for ${DOCKER_USER} only after:${CL}"
+    echo -e "${YW}  1. SSH is confirmed key-only, and${CL}"
+    echo -e "${YW}  2. ${DOCKER_USER} has a usable local password for sudo.${CL}"
     echo ""
 
     for file in "${sudoers_files[@]}"; do
         if [ -f "$file" ] || { [ -n "$SUDO_CMD" ] && "$SUDO_CMD" test -f "$file" 2>/dev/null; }; then
+            found="yes"
             detail_line "Detected sudoers candidate" "$file"
         fi
     done
 
-    harden_yn="$(timed_yes_no "Disable broad NOPASSWD sudo entries if found?" "n")"
+    if [ "$found" != "yes" ]; then
+        NOPASSWD_HARDENED="no-nopasswd-file-found"
+        msg_ok "NO PROJECT NOPASSWD SUDOERS FILE FOUND"
+        return 0
+    fi
+
+    if [ "$SSH_KEY_ONLY_POLICY_OK" != "yes" ]; then
+        NOPASSWD_HARDENED="blocked-ssh-policy-not-verified"
+        msg_warn "NOPASSWD SUDO REMOVAL BLOCKED BECAUSE SSH KEY-ONLY POLICY WAS NOT VERIFIED"
+        return 0
+    fi
+
+    if ! local_password_ready_for_sudo_hardening; then
+        NOPASSWD_HARDENED="blocked-no-local-password"
+        msg_warn "NOPASSWD SUDO REMOVAL BLOCKED BECAUSE ${DOCKER_USER} DOES NOT HAVE A USABLE LOCAL PASSWORD"
+        return 0
+    fi
+
+    harden_yn="$(timed_yes_no "Disable broad NOPASSWD sudo entries now?" "y")"
 
     if [[ "$harden_yn" =~ ^[Nn] ]]; then
         NOPASSWD_HARDENED="user-skipped"
         msg_skip "SUDO NOPASSWD HARDENING SKIPPED"
-        return 0
-    fi
-
-    if ! verify_real_sudo_password_before_hardening; then
-        NOPASSWD_HARDENED="skipped-password-not-verified"
-        msg_warn "REAL SUDO PASSWORD WAS NOT VERIFIED; NOPASSWD HARDENING SKIPPED"
         return 0
     fi
 
@@ -1446,6 +1664,7 @@ function harden_sudo_nopasswd() {
     done
 
     NOPASSWD_HARDENED="yes"
+    msg_ok "PASSWORDLESS SUDO HARDENING COMPLETE"
 }
 
 # --- 21. DOCKER-USER FIREWALL REVIEW ---
@@ -1543,6 +1762,8 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik public host OK: $AUTHENTIK_PUBLIC_HOST_OK
+Admin UI protected route OK: $ADMIN_UI_PROTECTED_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Admin UI bootstrap closed: $ADMIN_UI_BOOTSTRAP_CLOSED
@@ -1550,6 +1771,8 @@ Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
 UFW admin UI rule removed: $UFW_ADMIN_UI_RULE_REMOVED
 UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
+Local user password status: $OS_USER_PASSWORD_STATUS
+SSH key-only policy OK: $SSH_KEY_ONLY_POLICY_OK
 Postiz health OK: $POSTIZ_HEALTH_OK
 Postiz backend port OK: $POSTIZ_BACKEND_PORT_OK
 Postiz web route OK: $POSTIZ_WEB_ROUTE_OK
@@ -1577,11 +1800,15 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik public host OK: $AUTHENTIK_PUBLIC_HOST_OK
+Admin UI protected route OK: $ADMIN_UI_PROTECTED_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
 UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
+Local user password status: $OS_USER_PASSWORD_STATUS
+SSH key-only policy OK: $SSH_KEY_ONLY_POLICY_OK
 Postiz health OK: $POSTIZ_HEALTH_OK
 Postiz backend port OK: $POSTIZ_BACKEND_PORT_OK
 Postiz web route OK: $POSTIZ_WEB_ROUTE_OK
@@ -1625,11 +1852,15 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik public host OK: $AUTHENTIK_PUBLIC_HOST_OK
+Admin UI protected route OK: $ADMIN_UI_PROTECTED_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
 UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
+Local user password status: $OS_USER_PASSWORD_STATUS
+SSH key-only policy OK: $SSH_KEY_ONLY_POLICY_OK
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 Verify log: $VERIFY_LOG
 EOF2
@@ -1648,11 +1879,15 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik public host OK: $AUTHENTIK_PUBLIC_HOST_OK
+Admin UI protected route OK: $ADMIN_UI_PROTECTED_ROUTE_OK
 Portainer OIDC status: $PORTAINER_OIDC_STATUS
 Komodo OIDC status: $KOMODO_OIDC_STATUS
 Portainer bootstrap closed: $PORTAINER_BOOTSTRAP_CLOSED
 UFW Portainer rule removed: $UFW_PORTAINER_RULE_REMOVED
 NOPASSWD hardened: $NOPASSWD_HARDENED
+Local user password status: $OS_USER_PASSWORD_STATUS
+SSH key-only policy OK: $SSH_KEY_ONLY_POLICY_OK
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 Verify log: $VERIFY_LOG
 EOF2
@@ -1674,12 +1909,16 @@ function show_final_summary() {
     detail_line "AUTHENTIK APPLICATION" "$AUTHENTIK_APPLICATION_OK"
     detail_line "AUTHENTIK OUTPOST ATTACH" "$AUTHENTIK_OUTPOST_ATTACH_OK"
     detail_line "AUTHENTIK OUTPOST 302" "$AUTHENTIK_OUTPOST_302_OK"
+    detail_line "AUTHENTIK PUBLIC HOST" "$AUTHENTIK_PUBLIC_HOST_OK"
+    detail_line "ADMIN UI PROTECTED ROUTE" "$ADMIN_UI_PROTECTED_ROUTE_OK"
     detail_line "PORTAINER OIDC" "$PORTAINER_OIDC_STATUS"
     detail_line "KOMODO OIDC" "$KOMODO_OIDC_STATUS"
     detail_line "ADMIN UI BOOTSTRAP CLOSED" "$ADMIN_UI_BOOTSTRAP_CLOSED"
     detail_line "PORTAINER BOOTSTRAP CLOSED" "$PORTAINER_BOOTSTRAP_CLOSED"
     detail_line "UFW ADMIN UI RULE REMOVED" "$UFW_ADMIN_UI_RULE_REMOVED"
     detail_line "UFW PORTAINER RULE REMOVED" "$UFW_PORTAINER_RULE_REMOVED"
+    detail_line "LOCAL USER PASSWORD" "$OS_USER_PASSWORD_STATUS"
+    detail_line "SSH KEY-ONLY POLICY" "$SSH_KEY_ONLY_POLICY_OK"
     detail_line "NOPASSWD HARDENED" "$NOPASSWD_HARDENED"
     detail_line "POSTIZ HEALTH" "$POSTIZ_HEALTH_OK"
     detail_line "POSTIZ BACKEND 3000" "$POSTIZ_BACKEND_PORT_OK"
@@ -1717,7 +1956,7 @@ function show_ready_to_apply() {
 
     section "READY TO APPLY"
 
-    echo -e "${YW}Preflight checks and token collection are complete. No Authentik/provider/admin UI/firewall cleanup changes have been applied yet.${CL}"
+    echo -e "${YW}Preflight and protected-route checks are complete. No Authentik/provider/admin UI/firewall cleanup changes have been applied yet.${CL}"
     echo ""
     detail_line "Docker user" "$DOCKER_USER"
     detail_line "Docker directory" "$DOCKER_DIR"
@@ -1727,6 +1966,8 @@ function show_ready_to_apply() {
     detail_line "Authentik token source" "$AUTHENTIK_TOKEN_SOURCE"
     detail_line "Authentik bootstrap token present" "$AUTHENTIK_BOOTSTRAP_TOKEN_PRESENT"
     detail_line "Admin UI" "$ADMIN_UI"
+    detail_line "Authentik public host" "$AUTHENTIK_PUBLIC_HOST_OK"
+    detail_line "Admin UI protected route" "$ADMIN_UI_PROTECTED_ROUTE_OK"
     echo ""
 
     apply_yn="$(timed_yes_no "Apply final hardening and SSO plan now?" "y")"
@@ -1758,7 +1999,7 @@ function main() {
     AUTHENTIK_PROVIDER_OK="handled-by-script-6.5"
     AUTHENTIK_APPLICATION_OK="handled-by-script-6.5"
     AUTHENTIK_OUTPOST_ATTACH_OK="handled-by-script-6.5"
-    AUTHENTIK_OUTPOST_302_OK="handled-by-script-6.5"
+    verify_protected_access_before_bootstrap_closure
     show_ready_to_apply
 
     configure_admin_ui_sso
@@ -1768,6 +2009,8 @@ function main() {
     verify_postiz_health
     stop_postiz_temporal_guard_if_safe
 
+    verify_ssh_key_only_policy
+    set_or_verify_local_user_password
     harden_sudo_nopasswd
     docker_user_firewall_review
 
