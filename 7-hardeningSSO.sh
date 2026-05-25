@@ -23,9 +23,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="7-hardeningSSO.sh"
-SCRIPT_VERSION="v1.4.4"
+SCRIPT_VERSION="v1.4.5"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="hardening-only-os-password-sudo-closure"
+SCRIPT_BUILD="hardening-only-release-snapshot-image-lock"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -84,6 +84,11 @@ POSTIZ_TEMPORAL_GUARD_STOPPED="not-applicable"
 
 TEMP_FILES=()
 IMAGE_LOCK_REPORT=""
+RELEASE_SNAPSHOT_DIR=""
+PINNED_COMPOSE_SNAPSHOT_DIR=""
+PINNED_COMPOSE_SNAPSHOT_CREATED="not-run"
+PINNED_COMPOSE_LIVE_APPLIED="not-run"
+ACME_BACKUP_FILE=""
 
 # =========================================================
 #  OUTPUT HELPERS
@@ -508,6 +513,7 @@ function validate_dependencies() {
         awk
         cat
         chmod
+        cp
         curl
         date
         docker
@@ -1711,17 +1717,25 @@ function generate_image_lock_report() {
         echo "Date: $(date)"
         echo "Docker dir: ${DOCKER_DIR}"
         echo ""
-        echo "Purpose: deploy with latest during active testing, then review this report before pinning known-good tags/digests."
-        echo "No compose YAML was modified by Script 7."
+        echo "Purpose: record the exact images/digests from the verified working deployment."
+        echo "Main compose files remain readable/tag-based unless live pinning is explicitly confirmed."
         echo ""
         docker_cmd ps --format '{{.Names}}' | while IFS= read -r container; do
             [ -n "$container" ] || continue
             image="$(docker_cmd inspect --format '{{.Config.Image}}' "$container" 2>/dev/null || true)"
             digest="$(docker_cmd inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$container" 2>/dev/null || true)"
+            compose_project="$(docker_cmd inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container" 2>/dev/null || true)"
+            compose_service="$(docker_cmd inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$container" 2>/dev/null || true)"
             echo "Container: ${container}"
+            echo "Compose project: ${compose_project:-unknown}"
+            echo "Compose service: ${compose_service:-unknown}"
             echo "Current image: ${image:-unknown}"
             echo "Resolved digest: ${digest:-not available locally}"
-            echo "Recommendation: pin after this deployment is verified stable."
+            if [ -n "$digest" ]; then
+                echo "Pinned form: ${digest}"
+            else
+                echo "Pinned form: unavailable; image may need docker pull/inspect before digest pinning"
+            fi
             echo ""
         done
     } > "$tmp_report"
@@ -1735,6 +1749,249 @@ function generate_image_lock_report() {
     IMAGE_LOCK_REPORT="$report"
     msg_ok "IMAGE LOCK REPORT CREATED"
     detail_line "Image lock report" "$IMAGE_LOCK_REPORT"
+}
+
+# --- 22B. RELEASE SNAPSHOT HELPERS ---
+# Creates a rollback-friendly release folder after the stack is verified working.
+# Main compose files stay readable/tag-based by default; pinned digest copies are
+# generated into a snapshot folder and only applied live after explicit consent.
+function release_timestamp() {
+    date +%Y%m%d-%H%M%S
+}
+
+function copy_path_if_exists() {
+    local src_path="$1"
+    local dst_path="$2"
+
+    if [ -e "$src_path" ]; then
+        run_cmd "copying release snapshot path ${src_path}" cp -a "$src_path" "$dst_path"
+    fi
+}
+
+function create_release_snapshot_base() {
+    local ts=""
+
+    ts="$(release_timestamp)"
+    RELEASE_SNAPSHOT_DIR="${DOCKER_DIR}/releases/${ts}"
+    PINNED_COMPOSE_SNAPSHOT_DIR="${RELEASE_SNAPSHOT_DIR}/compose-pinned"
+
+    run_cmd "creating release snapshot directory" mkdir -p "$RELEASE_SNAPSHOT_DIR"
+    run_cmd "creating pinned compose snapshot directory" mkdir -p "$PINNED_COMPOSE_SNAPSHOT_DIR"
+    run_cmd "setting release snapshot ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "${DOCKER_DIR}/releases"
+
+    msg_ok "RELEASE SNAPSHOT DIRECTORY CREATED"
+    detail_line "Release snapshot" "$RELEASE_SNAPSHOT_DIR"
+}
+
+function snapshot_current_project_files() {
+    section "RELEASE SNAPSHOT"
+
+    local snapshot_yn=""
+    local traefik_dir="${DOCKER_DIR}/appdata/traefik"
+
+    snapshot_yn="$(timed_yes_no "Create known-good release snapshot and pinned compose copies?" "y")"
+    if [[ "$snapshot_yn" =~ ^[Nn] ]]; then
+        PINNED_COMPOSE_SNAPSHOT_CREATED="user-skipped"
+        msg_skip "RELEASE SNAPSHOT SKIPPED"
+        return 0
+    fi
+
+    create_release_snapshot_base
+
+    copy_path_if_exists "$COMPOSE_DIR" "${RELEASE_SNAPSHOT_DIR}/compose-current"
+    copy_path_if_exists "${traefik_dir}/traefik.yml" "${RELEASE_SNAPSHOT_DIR}/traefik.yml"
+    copy_path_if_exists "${traefik_dir}/dynamic-config.yml" "${RELEASE_SNAPSHOT_DIR}/dynamic-config.yml"
+
+    if [ -f "${traefik_dir}/acme/acme.json" ]; then
+        ACME_BACKUP_FILE="${RELEASE_SNAPSHOT_DIR}/acme.json"
+        run_cmd "backing up Traefik acme.json" cp -a "${traefik_dir}/acme/acme.json" "$ACME_BACKUP_FILE"
+        run_cmd "setting acme backup permissions" chmod 600 "$ACME_BACKUP_FILE"
+    fi
+
+    if [ -f "$IMAGE_LOCK_REPORT" ]; then
+        copy_path_if_exists "$IMAGE_LOCK_REPORT" "${RELEASE_SNAPSHOT_DIR}/docker-image-lock-report.txt"
+    fi
+
+    msg_ok "CURRENT PROJECT SNAPSHOT CREATED"
+    [ -n "$ACME_BACKUP_FILE" ] && detail_line "ACME backup" "$ACME_BACKUP_FILE"
+}
+
+function build_container_image_digest_map_file() {
+    local map_file="$1"
+
+    : > "$map_file"
+    docker_cmd ps --format '{{.Names}}' | while IFS= read -r container; do
+        [ -n "$container" ] || continue
+        image="$(docker_cmd inspect --format '{{.Config.Image}}' "$container" 2>/dev/null || true)"
+        digest="$(docker_cmd inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$container" 2>/dev/null || true)"
+        if [ -n "$image" ] && [ -n "$digest" ]; then
+            printf '%s\t%s\n' "$image" "$digest" >> "$map_file"
+        fi
+    done
+}
+
+function create_pinned_compose_snapshot() {
+    local map_file=""
+    local source_dir="${RELEASE_SNAPSHOT_DIR}/compose-current"
+    local target_dir="$PINNED_COMPOSE_SNAPSHOT_DIR"
+
+    [ -n "$RELEASE_SNAPSHOT_DIR" ] || return 0
+    [ -d "$source_dir" ] || {
+        PINNED_COMPOSE_SNAPSHOT_CREATED="missing-compose-snapshot"
+        msg_warn "Compose snapshot source missing; pinned compose snapshot skipped."
+        return 0
+    }
+
+    map_file="$(mktemp)"
+    TEMP_FILES+=("$map_file")
+    build_container_image_digest_map_file "$map_file"
+
+    run_cmd "copying compose files into pinned snapshot" cp -a "${source_dir}/." "$target_dir/"
+
+    python3 - "$map_file" "$target_dir" <<'PY_PIN_COMPOSE'
+import os, re, sys
+from pathlib import Path
+
+map_path = Path(sys.argv[1])
+root = Path(sys.argv[2])
+image_map = {}
+for line in map_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+    if '\t' not in line:
+        continue
+    image, digest = line.split('\t', 1)
+    image = image.strip()
+    digest = digest.strip()
+    if image and digest:
+        image_map[image] = digest
+
+changed = []
+image_line = re.compile(r'^(\s*image\s*:\s*)(["\']?)([^"\'\s#]+)(["\']?)(.*)$')
+for path in root.rglob('*'):
+    if not path.is_file():
+        continue
+    if path.suffix.lower() not in {'.yml', '.yaml'}:
+        continue
+    text = path.read_text(encoding='utf-8', errors='ignore')
+    out = []
+    file_changed = False
+    for line in text.splitlines(keepends=True):
+        newline = '\n' if line.endswith('\n') else ''
+        body = line[:-1] if newline else line
+        m = image_line.match(body)
+        if m:
+            prefix, q1, image, q2, suffix = m.groups()
+            digest = image_map.get(image)
+            if digest:
+                quote = q1 if q1 else ''
+                close = q2 if q1 else ''
+                body = f'{prefix}{quote}{digest}{close}{suffix}'
+                file_changed = True
+        out.append(body + newline)
+    if file_changed:
+        path.write_text(''.join(out), encoding='utf-8')
+        changed.append(str(path.relative_to(root)))
+
+manifest = root / 'PINNED-MANIFEST.txt'
+with manifest.open('w', encoding='utf-8') as fh:
+    fh.write('--- CREA PINNED COMPOSE SNAPSHOT ---\n')
+    fh.write('This folder contains digest-pinned compose copies generated from the verified running deployment.\n')
+    fh.write('Main live compose files were not modified unless Script 7 live pinning was explicitly confirmed.\n\n')
+    fh.write('Files changed:\n')
+    if changed:
+        for item in changed:
+            fh.write(f'- {item}\n')
+    else:
+        fh.write('- none; no exact running image tags matched compose image lines\n')
+PY_PIN_COMPOSE
+
+    run_cmd "setting pinned compose snapshot ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$target_dir"
+    PINNED_COMPOSE_SNAPSHOT_CREATED="yes"
+    msg_ok "PINNED COMPOSE SNAPSHOT CREATED"
+    detail_line "Pinned compose snapshot" "$target_dir"
+}
+
+function write_release_rollback_notes() {
+    local notes=""
+
+    [ -n "$RELEASE_SNAPSHOT_DIR" ] || return 0
+    notes="${RELEASE_SNAPSHOT_DIR}/ROLLBACK-NOTES.txt"
+
+    cat > "${notes}.tmp" <<EOF_NOTES
+--- CREA RELEASE SNAPSHOT / ROLLBACK NOTES ---
+Created: $(date)
+Docker dir: ${DOCKER_DIR}
+Compose dir: ${COMPOSE_DIR}
+Release snapshot: ${RELEASE_SNAPSHOT_DIR}
+Pinned compose snapshot: ${PINNED_COMPOSE_SNAPSHOT_DIR}
+ACME backup: ${ACME_BACKUP_FILE:-not-created}
+
+Default strategy:
+- Live compose files stay readable/tag-based unless live pinning was explicitly confirmed.
+- compose-pinned/ contains digest-pinned copies from the known-good running deployment.
+- acme.json backup can be restored before Traefik starts on a fresh VM to avoid unnecessary ACME issuance.
+
+Restore ACME backup example:
+  sudo mkdir -p ${DOCKER_DIR}/appdata/traefik/acme
+  sudo cp ${ACME_BACKUP_FILE:-/path/to/acme.json} ${DOCKER_DIR}/appdata/traefik/acme/acme.json
+  sudo chown ${DOCKER_USER}:${DOCKER_USER} ${DOCKER_DIR}/appdata/traefik/acme/acme.json
+  sudo chmod 600 ${DOCKER_DIR}/appdata/traefik/acme/acme.json
+
+Restore compose-current example:
+  sudo cp -a ${RELEASE_SNAPSHOT_DIR}/compose-current/. ${COMPOSE_DIR}/
+  sudo chown -R ${DOCKER_USER}:${DOCKER_USER} ${COMPOSE_DIR}
+
+Use pinned compose snapshot only when you want maximum reproducibility over update convenience.
+EOF_NOTES
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" install -m 0640 -o "$DOCKER_USER" -g "$DOCKER_USER" "${notes}.tmp" "$notes"
+        rm -f "${notes}.tmp"
+    else
+        install -m 0640 "${notes}.tmp" "$notes"
+        rm -f "${notes}.tmp"
+    fi
+
+    msg_ok "ROLLBACK NOTES WRITTEN"
+    detail_line "Rollback notes" "$notes"
+}
+
+function optionally_apply_pinned_compose_live() {
+    local apply_yn=""
+    local live_backup=""
+
+    [ "$PINNED_COMPOSE_SNAPSHOT_CREATED" == "yes" ] || {
+        PINNED_COMPOSE_LIVE_APPLIED="not-applicable"
+        return 0
+    }
+
+    echo ""
+    echo -e "${YW}Pinned compose copies are ready, but applying them live makes future updates more manual.${CL}"
+    echo -e "${YW}Recommended default is NO: keep live compose files readable and keep the pinned snapshot for rollback/reproducibility.${CL}"
+    echo ""
+
+    apply_yn="$(timed_yes_no "Replace live compose files with digest-pinned snapshot now?" "n")"
+    if [[ "$apply_yn" =~ ^[Nn] ]]; then
+        PINNED_COMPOSE_LIVE_APPLIED="user-skipped-recommended"
+        msg_ok "LIVE COMPOSE PINNING SKIPPED; PINNED SNAPSHOT KEPT"
+        return 0
+    fi
+
+    live_backup="${RELEASE_SNAPSHOT_DIR}/compose-before-live-pinning"
+    run_cmd "backing up live compose before pinning" cp -a "$COMPOSE_DIR" "$live_backup"
+    run_cmd "applying pinned compose snapshot to live compose directory" cp -a "${PINNED_COMPOSE_SNAPSHOT_DIR}/." "$COMPOSE_DIR/"
+    run_cmd "setting live compose ownership after pinning" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$COMPOSE_DIR"
+
+    PINNED_COMPOSE_LIVE_APPLIED="yes"
+    msg_ok "LIVE COMPOSE FILES REPLACED WITH PINNED DIGEST SNAPSHOT"
+    detail_line "Pre-pinning live backup" "$live_backup"
+}
+
+function create_release_snapshot_and_pinned_compose() {
+    generate_image_lock_report
+    snapshot_current_project_files
+    create_pinned_compose_snapshot
+    write_release_rollback_notes
+    optionally_apply_pinned_compose_live
 }
 
 # --- 23. VERIFICATION REPORT ---
@@ -1780,6 +2037,10 @@ Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
 Postiz Temporal guard stopped: $POSTIZ_TEMPORAL_GUARD_STOPPED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 Image lock report: $IMAGE_LOCK_REPORT
+Release snapshot: $RELEASE_SNAPSHOT_DIR
+Pinned compose snapshot: $PINNED_COMPOSE_SNAPSHOT_DIR
+Pinned compose snapshot created: $PINNED_COMPOSE_SNAPSHOT_CREATED
+Pinned compose live applied: $PINNED_COMPOSE_LIVE_APPLIED
 EOF2
     else
         cat > "$VERIFY_LOG" <<EOF2
@@ -1816,6 +2077,10 @@ Postiz Temporal guard status: $POSTIZ_TEMPORAL_GUARD_STATUS
 Postiz Temporal guard stopped: $POSTIZ_TEMPORAL_GUARD_STOPPED
 DOCKER-USER review: $DOCKER_USER_RULES_REVIEWED
 Image lock report: $IMAGE_LOCK_REPORT
+Release snapshot: $RELEASE_SNAPSHOT_DIR
+Pinned compose snapshot: $PINNED_COMPOSE_SNAPSHOT_DIR
+Pinned compose snapshot created: $PINNED_COMPOSE_SNAPSHOT_CREATED
+Pinned compose live applied: $PINNED_COMPOSE_LIVE_APPLIED
 EOF2
     fi
 
@@ -1927,6 +2192,9 @@ function show_final_summary() {
     detail_line "DOCKER-USER REVIEW" "$DOCKER_USER_RULES_REVIEWED"
     detail_line "VERIFY LOG" "$VERIFY_LOG"
     detail_line "IMAGE LOCK REPORT" "$IMAGE_LOCK_REPORT"
+    detail_line "RELEASE SNAPSHOT" "${RELEASE_SNAPSHOT_DIR:-not-created}"
+    detail_line "PINNED COMPOSE SNAPSHOT" "${PINNED_COMPOSE_SNAPSHOT_CREATED}"
+    detail_line "LIVE COMPOSE PINNING" "${PINNED_COMPOSE_LIVE_APPLIED}"
 
     echo ""
     echo -e "${BL}IMPORTANT:${CL}"
@@ -2015,7 +2283,7 @@ function main() {
     docker_user_firewall_review
 
     show_container_summary
-    generate_image_lock_report
+    create_release_snapshot_and_pinned_compose
     create_verification_report
     write_completion_marker
     show_final_summary
