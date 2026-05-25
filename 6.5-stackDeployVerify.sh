@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.22"
+SCRIPT_VERSION="v1.3.23"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="dynamic-postgres-redis-runtime-owner-authentik-outpost-config"
+SCRIPT_BUILD="fresh-authentik-api-readiness-retry"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1566,6 +1566,8 @@ function selected_stack_contains() {
     return 1
 }
 
+
+
 function service_compose_uses_puid_pgid() {
     local file="$1"
     local compose_path=""
@@ -1617,6 +1619,77 @@ function redis_data_owner() {
     service_data_owner "$REDIS_STACK_FILE" "999" "999"
 }
 
+function repair_postgres_pgdata_permissions() {
+    local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
+    local pg_owner=""
+
+    pg_owner="$(postgres_data_owner)"
+
+    run_cmd "creating PostgreSQL PG18-compatible data directory" mkdir -p "$pg_data_dir"
+    run_cmd "setting PostgreSQL pgdata ownership recursively" chown -R "$pg_owner" "$pg_data_dir"
+    run_cmd "setting PostgreSQL pgdata permissions recursively" chmod -R u+rwX,go-rwx "$pg_data_dir"
+    run_cmd "setting PostgreSQL pgdata root mode" chmod 700 "$pg_data_dir"
+}
+
+function verify_postgres_pgdata_permissions() {
+    local pg_data_dir="${DOCKER_DIR}/appdata/postgres/pgdata"
+    local pg_owner=""
+    local pg_uid=""
+    local pg_gid=""
+    local bad=""
+
+    pg_owner="$(postgres_data_owner)"
+    pg_uid="${pg_owner%%:*}"
+    pg_gid="${pg_owner##*:}"
+
+    if [ -n "$SUDO_CMD" ]; then
+        bad="$($SUDO_CMD find "$pg_data_dir" \( ! -uid "$pg_uid" -o ! -gid "$pg_gid" \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+    else
+        bad="$(find "$pg_data_dir" \( ! -uid "$pg_uid" -o ! -gid "$pg_gid" \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+    fi
+
+    if [ -n "$bad" ]; then
+        echo -e "${YW}PostgreSQL permission offenders:${CL}"
+        printf '%s\n' "$bad"
+        msg_error "PostgreSQL pgdata still contains files not owned by ${pg_owner}. Refusing to deploy dependants."
+    fi
+}
+
+function repair_redis_data_permissions() {
+    local redis_data_dir="${DOCKER_DIR}/appdata/redis"
+    local redis_owner=""
+
+    redis_owner="$(redis_data_owner)"
+
+    run_cmd "creating Redis data directory" mkdir -p "$redis_data_dir"
+    run_cmd "setting Redis data ownership recursively" chown -R "$redis_owner" "$redis_data_dir"
+    run_cmd "setting Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "$redis_data_dir"
+    run_cmd "setting Redis data root mode" chmod 770 "$redis_data_dir"
+}
+
+function verify_redis_data_permissions() {
+    local redis_data_dir="${DOCKER_DIR}/appdata/redis"
+    local redis_owner=""
+    local redis_uid=""
+    local redis_gid=""
+    local bad=""
+
+    redis_owner="$(redis_data_owner)"
+    redis_uid="${redis_owner%%:*}"
+    redis_gid="${redis_owner##*:}"
+
+    if [ -n "$SUDO_CMD" ]; then
+        bad="$($SUDO_CMD find "$redis_data_dir" \( ! -uid "$redis_uid" -o ! -gid "$redis_gid" \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+    else
+        bad="$(find "$redis_data_dir" \( ! -uid "$redis_uid" -o ! -gid "$redis_gid" \) -printf '%u:%g %m %p\n' 2>/dev/null | head -20 || true)"
+    fi
+
+    if [ -n "$bad" ]; then
+        echo -e "${YW}Redis permission offenders:${CL}"
+        printf '%s\n' "$bad"
+        msg_error "Redis data path still contains files not owned by ${redis_owner}. Refusing to continue."
+    fi
+}
 function prepare_postgres_runtime_prereqs() {
     if ! selected_stack_contains "$POSTGRES_STACK_FILE"; then
         return 0
@@ -1627,25 +1700,21 @@ function prepare_postgres_runtime_prereqs() {
     local pg_root_dir="${DOCKER_DIR}/appdata/postgres"
     local pg_data_dir="${pg_root_dir}/pgdata"
     local pg_init_dir="${pg_root_dir}/init"
-    local pg_owner=""
 
     require_nonempty_env_value "POSTGRES_PASSWORD"
     require_nonempty_env_value "AUTHENTIK_POSTGRES_PASSWORD"
     require_nonempty_env_value "POSTIZ_POSTGRES_PASSWORD"
     require_nonempty_env_value "TEMPORAL_POSTGRES_PASSWORD"
 
-    pg_owner="$(postgres_data_owner)"
-
     run_cmd "creating PostgreSQL data directory" mkdir -p "$pg_data_dir"
     run_cmd "creating PostgreSQL init directory" mkdir -p "$pg_init_dir"
-    run_cmd "setting PostgreSQL data ownership recursively" chown -R "$pg_owner" "$pg_data_dir"
-    run_cmd "setting PostgreSQL data permissions recursively" chmod -R u+rwX,go-rwx "$pg_data_dir"
-    run_cmd "setting PostgreSQL data directory mode" chmod 700 "$pg_data_dir"
+    repair_postgres_pgdata_permissions
+    verify_postgres_pgdata_permissions
     run_cmd "setting PostgreSQL init directory readability" chmod 755 "$pg_init_dir"
 
     msg_ok "POSTGRESQL DATA DIRECTORY READY"
     detail_line "Data path" "$pg_data_dir"
-    detail_line "Data owner" "${pg_owner} recursive"
+    detail_line "Data owner" "$(postgres_data_owner) recursive"
     detail_line "Data mode" "700 root, u+rwX,go-rwx recursive"
 
     if docker_cmd inspect postgres --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null | grep -Eq 'restarting|unhealthy|exited|dead'; then
@@ -1663,17 +1732,14 @@ function prepare_redis_runtime_prereqs() {
     section "REDIS RUNTIME PREREQS"
 
     local redis_data_dir="${DOCKER_DIR}/appdata/redis"
-    local redis_owner=""
-
-    redis_owner="$(redis_data_owner)"
 
     run_cmd "creating Redis data directory" mkdir -p "$redis_data_dir"
-    run_cmd "setting Redis data ownership" chown -R "$redis_owner" "$redis_data_dir"
-    run_cmd "setting Redis writable permissions" chmod 770 "$redis_data_dir"
+    repair_redis_data_permissions
+    verify_redis_data_permissions
 
     msg_ok "REDIS DATA DIRECTORY READY"
     detail_line "Path" "$redis_data_dir"
-    detail_line "Owner" "$redis_owner"
+    detail_line "Owner" "$(redis_data_owner)"
     detail_line "Mode" "770"
 }
 
@@ -1756,7 +1822,6 @@ function verify_redis_persistence_ready() {
     local info=""
     local bgsave_status=""
     local bgsave_in_progress=""
-    local redis_owner=""
 
     for attempt in $(seq 1 "$max_attempts"); do
         state="$(docker_cmd inspect redis --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
@@ -1769,10 +1834,8 @@ function verify_redis_persistence_ready() {
     clear_transient_line
 
     # Re-apply the proven host path fix immediately before the write test.
-    redis_owner="$(redis_data_owner)"
-    run_cmd "repairing Redis data ownership" chown -R "$redis_owner" "${DOCKER_DIR}/appdata/redis"
-    run_cmd "repairing Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
-    run_cmd "repairing Redis data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
+    repair_redis_data_permissions
+    verify_redis_data_permissions
 
     if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1; then
         docker_cmd logs --tail=120 redis 2>/dev/null || true
@@ -2357,8 +2420,6 @@ function verify_authentik_dependencies_for_deploy() {
 
     local required="no"
     local check_output=""
-    local pg_owner=""
-    local redis_owner=""
 
     if [[ "$DEPLOY_POSTIZ" =~ ^[Yy] ]] || [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]] || [[ "$DEPLOY_FILEBROWSER" =~ ^[Yy] ]]; then
         required="yes"
@@ -2384,14 +2445,10 @@ function verify_authentik_dependencies_for_deploy() {
         msg_error "Redis container is not running. Fix Redis before Authentik automation."
     fi
 
-    pg_owner="$(postgres_data_owner)"
-    redis_owner="$(redis_data_owner)"
-
-    run_cmd "repairing PostgreSQL pgdata ownership" chown -R "$pg_owner" "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "repairing PostgreSQL pgdata permissions" chmod -R u+rwX,go-rwx "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "repairing PostgreSQL pgdata mode" chmod 700 "${DOCKER_DIR}/appdata/postgres/pgdata"
-    run_cmd "repairing Redis data ownership" chown -R "$redis_owner" "${DOCKER_DIR}/appdata/redis"
-    run_cmd "repairing Redis data permissions" chmod 770 "${DOCKER_DIR}/appdata/redis"
+    repair_postgres_pgdata_permissions
+    verify_postgres_pgdata_permissions
+    repair_redis_data_permissions
+    verify_redis_data_permissions
 
     if ! docker_cmd exec redis redis-cli BGSAVE >/dev/null 2>&1 || docker_cmd logs --tail=120 redis 2>/dev/null | grep -Eiq 'MISCONF|Permission denied|Background saving error'; then
         docker_cmd logs --tail=120 redis 2>/dev/null || true
@@ -2421,6 +2478,64 @@ PY
     echo "$check_output"
     AUTHENTIK_DEPENDENCIES_OK="yes"
     msg_ok "AUTHENTIK DEPENDENCIES VERIFIED"
+}
+
+
+function wait_for_authentik_internal_api_ready() {
+    section "AUTHENTIK INTERNAL API READINESS"
+
+    local attempt=""
+    local max_attempts="120"
+    local status_output=""
+    local http_code=""
+
+    if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'authentik-server'; then
+        msg_warn "authentik-server is not running; internal API readiness check skipped."
+        return 1
+    fi
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        status_output="$(docker_cmd exec authentik-server sh -lc '
+python - <<AK_READY_PY
+import urllib.request, urllib.error
+url="http://127.0.0.1:9000/api/v3/core/users/me/"
+try:
+    r=urllib.request.urlopen(url, timeout=5)
+    print(r.status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception as e:
+    print("ERR", repr(e))
+AK_READY_PY
+' 2>/dev/null || true)"
+        http_code="$(printf '%s\n' "$status_output" | tail -n 1 | awk '{print $1}')"
+
+        # 401/403 means the API is alive and only requires authentication.
+        # 200 can happen if the endpoint is accessible in a future Authentik version.
+        if [[ "$http_code" =~ ^(200|401|403)$ ]]; then
+            clear_transient_line
+            msg_ok "AUTHENTIK INTERNAL API READY"
+            detail_line "Internal API unauthenticated status" "$http_code"
+            return 0
+        fi
+
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 10)) -eq 0 ]; then
+            tty_print "${BFR}${YW}Authentik internal API not ready yet (${attempt}/${max_attempts}) | status=${http_code:-unknown}${CL}"
+        fi
+
+        sleep 3
+    done
+
+    clear_transient_line
+    echo -e "${YW}Authentik server logs:${CL}"
+    docker_cmd logs --tail=160 authentik-server 2>/dev/null || true
+    echo -e "${YW}Authentik worker logs:${CL}"
+    docker_cmd logs --tail=120 authentik-worker 2>/dev/null || true
+    echo -e "${YW}PostgreSQL logs:${CL}"
+    docker_cmd logs --tail=100 postgres 2>/dev/null || true
+    echo -e "${YW}Redis logs:${CL}"
+    docker_cmd logs --tail=80 redis 2>/dev/null || true
+    msg_error "Authentik internal API stayed unavailable/HTTP 500 after waiting. Fix Authentik logs before route automation."
 }
 
 function collect_authentik_api_token_for_deploy() {
@@ -2586,6 +2701,7 @@ function authentik_find_embedded_outpost_pk() {
     printf '%s' "$pk"
 }
 
+
 function authentik_build_outpost_patch_payload() {
     local outpost_file="$1"
     local provider_pk="$2"
@@ -2597,22 +2713,14 @@ import json, sys
 path, provider_pk, auth_host, auth_host_browser = sys.argv[1:5]
 with open(path, "r", encoding="utf-8") as fh:
     outpost = json.load(fh)
-
 providers = list(outpost.get("providers") or [])
-provider_value = int(provider_pk) if str(provider_pk).isdigit() else provider_pk
+provider_value = int(provider_pk) if provider_pk.isdigit() else provider_pk
 if provider_value not in providers:
     providers.append(provider_value)
-
 config = dict(outpost.get("config") or {})
 config["authentik_host"] = auth_host
 config["authentik_host_browser"] = auth_host_browser or auth_host
-
-payload = {
-    "name": outpost.get("name", "authentik Embedded Outpost"),
-    "type": outpost.get("type", "proxy"),
-    "providers": providers,
-    "config": config,
-}
+payload = {"name": outpost.get("name", "authentik Embedded Outpost"), "type": outpost.get("type", "proxy"), "providers": providers, "config": config}
 print(json.dumps(payload))
 AK_OUTPOST_JSON
 }
@@ -2637,23 +2745,19 @@ import json, sys
 path, provider_pk, expected_auth_host, expected_browser_host = sys.argv[1:5]
 with open(path, "r", encoding="utf-8") as fh:
     outpost = json.load(fh)
-
 providers = outpost.get("providers") or []
-provider_value = int(provider_pk) if str(provider_pk).isdigit() else provider_pk
+provider_value = int(provider_pk) if provider_pk.isdigit() else provider_pk
 config = outpost.get("config") or {}
 errors = []
-
 if provider_value not in providers:
     errors.append(f"provider {provider_pk} not attached")
 if config.get("authentik_host") != expected_auth_host:
     errors.append("authentik_host mismatch or blank")
 if config.get("authentik_host_browser") != (expected_browser_host or expected_auth_host):
     errors.append("authentik_host_browser mismatch or blank")
-
 if errors:
     print("; ".join(errors))
     sys.exit(1)
-
 print("outpost config verified")
 AK_VERIFY_OUTPOST
 }
@@ -2673,7 +2777,6 @@ function restart_authentik_after_outpost_update() {
     clear_transient_line
     msg_ok "AUTHENTIK OUTPOST RELOAD WAIT COMPLETE"
 }
-
 function create_or_update_authentik_forward_auth_for_deploy() {
     section "AUTHENTIK FORWARD-AUTH SETUP"
 
@@ -2886,6 +2989,9 @@ function verify_selected_protected_routes() {
 
 function configure_authentik_and_verify_routes() {
     verify_authentik_dependencies_for_deploy
+    if [ "$AUTHENTIK_DEPENDENCIES_OK" == "yes" ]; then
+        wait_for_authentik_internal_api_ready
+    fi
     collect_authentik_api_token_for_deploy
     verify_authentik_api_for_deploy
     create_or_update_authentik_forward_auth_for_deploy
