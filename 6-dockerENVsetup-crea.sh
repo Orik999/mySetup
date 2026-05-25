@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.5.0"
+SCRIPT_VERSION="v1.5.1"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="full-service-permission-order-audit"
+SCRIPT_BUILD="active-mount-permission-audit-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -385,10 +385,9 @@ function ensure_required_service_directories() {
     run_cmd "creating PostgreSQL legacy data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
     run_cmd "creating PostgreSQL init directory" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
 
-    # Redis paths. Active compose mounts ${DOCKER_DIR}/appdata/redis to /data.
-    # The nested data path is kept as a compatibility guard for future/alternate compose files.
+    # Redis path. The current Redis compose bind-mounts this directory directly to container /data.
+    # Do not require a nested redis/data folder for the active stack.
     run_cmd "creating Redis data directory" mkdir -p "${DOCKER_DIR}/appdata/redis"
-    run_cmd "creating Redis nested data compatibility directory" mkdir -p "${DOCKER_DIR}/appdata/redis/data"
 
     # Authentik paths.
     run_cmd "creating Authentik appdata directory" mkdir -p "${DOCKER_DIR}/appdata/authentik"
@@ -2370,6 +2369,28 @@ function assert_owner_mode() {
     msg_ok "PERMISSION OK: ${path}"
 }
 
+
+function assert_optional_owner_mode() {
+    local path="$1"
+    local expected_uid="$2"
+    local expected_gid="$3"
+    local expected_mode="$4"
+    local actual=""
+
+    if [ ! -e "$path" ]; then
+        msg_skip "OPTIONAL PATH NOT PRESENT: ${path}"
+        return 0
+    fi
+
+    actual="$(stat -c '%u:%g:%a' "$path" 2>/dev/null || true)"
+
+    if [ "$actual" != "${expected_uid}:${expected_gid}:${expected_mode}" ]; then
+        msg_error "Optional permission audit failed for ${path}. Expected ${expected_uid}:${expected_gid}:${expected_mode}, got ${actual:-unknown}."
+    fi
+
+    msg_ok "OPTIONAL PERMISSION OK: ${path}"
+}
+
 function assert_user_writable_dir() {
     local path="$1"
     local test_file="${path}/.script6-write-test-$$"
@@ -2403,9 +2424,10 @@ function verify_service_permissions() {
     [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ] || msg_error "PostgreSQL init script is not executable."
     msg_ok "POSTGRESQL INIT SCRIPT EXECUTABLE"
 
-    # Redis: both possible bind targets must exist and be writable by UID/GID 999.
+    # Redis: the active Redis compose mount is ${DOCKER_DIR}/appdata/redis:/data.
+    # redis/data is optional compatibility only; do not fail a fresh setup because an unused nested folder is absent.
     assert_owner_mode "${DOCKER_DIR}/appdata/redis" "999" "999" "770"
-    assert_owner_mode "${DOCKER_DIR}/appdata/redis/data" "999" "999" "770"
+    assert_optional_owner_mode "${DOCKER_DIR}/appdata/redis/data" "999" "999" "770"
 
     # Authentik bind mounts must be owned by the non-root Authentik UID/GID.
     assert_owner_mode "${DOCKER_DIR}/appdata/authentik" "1000" "1000" "770"
