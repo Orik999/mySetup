@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.5.1"
+SCRIPT_VERSION="v1.5.2"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="active-mount-permission-audit-fix"
+SCRIPT_BUILD="optional-redis-data-chmod-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -493,9 +493,10 @@ function chmod_required_service_directories() {
     run_cmd "setting PostgreSQL init script mode" chmod 755 "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
     # Redis data must be writable by UID/GID 999.
+    # Active compose mounts ${DOCKER_DIR}/appdata/redis directly to container /data.
+    # Do not chmod a nested redis/data path here because it is optional and may not exist.
     run_cmd "setting Redis data permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
     run_cmd "setting Redis data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
-    run_cmd "setting Redis nested data compatibility directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis/data"
 
     # Authentik bind mounts must be writable by UID/GID 1000.
     run_cmd "setting Authentik permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/authentik"
