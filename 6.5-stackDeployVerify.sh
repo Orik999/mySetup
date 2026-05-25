@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.24"
+SCRIPT_VERSION="v1.3.25"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="fresh-authentik-api-readiness-redis-runtime-owner"
+SCRIPT_BUILD="redis-process-owner-bgsave-repair"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -1615,20 +1615,32 @@ function postgres_data_owner() {
     service_data_owner "$POSTGRES_STACK_FILE" "999" "999"
 }
 
-function redis_data_owner() {
+function redis_process_owner() {
     local runtime_uid=""
     local runtime_gid=""
 
-    # After Redis is running, trust the actual container runtime UID/GID.
-    # This prevents false failures when Redis writes persistence files as the
-    # configured container user instead of the default redis image UID 999.
+    # docker exec id -u can report the exec/default user, not the actual Redis
+    # server process owner. Use /proc/1/status first because temp RDB files are
+    # created by the running redis-server process.
     if docker_cmd ps --format '{{.Names}}' 2>/dev/null | grep -qx 'redis'; then
-        runtime_uid="$(docker_cmd exec redis sh -lc 'id -u' 2>/dev/null || true)"
-        runtime_gid="$(docker_cmd exec redis sh -lc 'id -g' 2>/dev/null || true)"
+        runtime_uid="$(docker_cmd exec redis sh -lc "awk '/^Uid:/ {print \\$2; exit}' /proc/1/status" 2>/dev/null || true)"
+        runtime_gid="$(docker_cmd exec redis sh -lc "awk '/^Gid:/ {print \\$2; exit}' /proc/1/status" 2>/dev/null || true)"
+
         if [[ "$runtime_uid" =~ ^[0-9]+$ ]] && [[ "$runtime_gid" =~ ^[0-9]+$ ]]; then
             printf '%s:%s' "$runtime_uid" "$runtime_gid"
             return 0
         fi
+    fi
+
+    return 1
+}
+
+function redis_data_owner() {
+    local process_owner=""
+
+    if process_owner="$(redis_process_owner 2>/dev/null)" && [ -n "$process_owner" ]; then
+        printf '%s' "$process_owner"
+        return 0
     fi
 
     service_data_owner "$REDIS_STACK_FILE" "999" "999"
