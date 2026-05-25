@@ -25,7 +25,7 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.28"
+SCRIPT_VERSION="v1.3.29"
 SCRIPT_UPDATED="2026-05-25"
 SCRIPT_BUILD="postgres-redis-process-owner-authentik-wait-function-restored"
 
