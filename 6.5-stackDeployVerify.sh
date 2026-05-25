@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.27"
+SCRIPT_VERSION="v1.3.28"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="postgres-redis-process-owner-acme-wildcard-final"
+SCRIPT_BUILD="postgres-redis-process-owner-authentik-wait-function-restored"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -539,6 +539,28 @@ function timed_text_input() {
     flush_input_buffer 2>/dev/null || true
 
     echo "$answer"
+}
+
+# --- 19A. SENSITIVE LINE INPUT HELPER ---
+# Reads secret/token input without echoing it and without printing the value back to logs.
+function sensitive_line_input() {
+    local prompt="$1"
+    local answer=""
+
+    flush_input_buffer 2>/dev/null || true
+
+    if [ -r /dev/tty ]; then
+        tty_print "${YW}${prompt}: ${CL}"
+        IFS= read -rs answer < /dev/tty || true
+        tty_println ""
+    else
+        echo -ne "${YW}${prompt}: ${CL}" >&2
+        IFS= read -rs answer || true
+        echo "" >&2
+    fi
+
+    flush_input_buffer 2>/dev/null || true
+    printf '%s' "$answer"
 }
 
 # =========================================================
@@ -2561,6 +2583,64 @@ PY
     echo "$check_output"
     AUTHENTIK_DEPENDENCIES_OK="yes"
     msg_ok "AUTHENTIK DEPENDENCIES VERIFIED"
+}
+
+
+function wait_for_authentik_internal_api_ready() {
+    section "AUTHENTIK INTERNAL API READINESS"
+
+    local attempt=""
+    local max_attempts="120"
+    local status_output=""
+    local http_code=""
+
+    if ! docker_cmd ps --format '{{.Names}}' | grep -qx 'authentik-server'; then
+        msg_warn "authentik-server is not running; internal API readiness check skipped."
+        return 1
+    fi
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        status_output="$(docker_cmd exec authentik-server sh -lc '
+python - <<AK_READY_PY
+import urllib.request, urllib.error
+url="http://127.0.0.1:9000/api/v3/core/users/me/"
+try:
+    r=urllib.request.urlopen(url, timeout=5)
+    print(r.status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception as e:
+    print("ERR", repr(e))
+AK_READY_PY
+' 2>/dev/null || true)"
+        http_code="$(printf '%s\n' "$status_output" | tail -n 1 | awk '{print $1}')"
+
+        # 401/403 means the API is alive and only requires authentication.
+        # 200 can happen if the endpoint becomes accessible in a future Authentik version.
+        if [[ "$http_code" =~ ^(200|401|403)$ ]]; then
+            clear_transient_line
+            msg_ok "AUTHENTIK INTERNAL API READY"
+            detail_line "Internal API unauthenticated status" "$http_code"
+            return 0
+        fi
+
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 10)) -eq 0 ]; then
+            tty_print "${BFR}${YW}Authentik internal API not ready yet (${attempt}/${max_attempts}) | status=${http_code:-unknown}${CL}"
+        fi
+
+        sleep 3
+    done
+
+    clear_transient_line
+    echo -e "${YW}Authentik server logs:${CL}"
+    docker_cmd logs --tail=160 authentik-server 2>/dev/null || true
+    echo -e "${YW}Authentik worker logs:${CL}"
+    docker_cmd logs --tail=120 authentik-worker 2>/dev/null || true
+    echo -e "${YW}PostgreSQL logs:${CL}"
+    docker_cmd logs --tail=100 postgres 2>/dev/null || true
+    echo -e "${YW}Redis logs:${CL}"
+    docker_cmd logs --tail=80 redis 2>/dev/null || true
+    msg_error "Authentik internal API stayed unavailable/HTTP 500 after waiting. Fix Authentik logs before route automation."
 }
 
 function collect_authentik_api_token_for_deploy() {
