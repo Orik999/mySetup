@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.17"
+SCRIPT_VERSION="v1.3.18"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="admin-ui-route-verification-fix"
+SCRIPT_BUILD="dockge-layout-progress-extract-error-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -737,6 +737,36 @@ function is_dockerhub_rate_limit_error() {
         "$err_file"
 }
 
+
+# --- 29A.1. DOCKER IMAGE EXTRACTION ERROR DETECTION ---
+# Detects local Docker/containerd snapshot extraction corruption separately from compose/YAML errors.
+function is_docker_layer_extract_error() {
+    local err_file="$1"
+
+    grep -Eiq         'failed to extract layer|failed to extract|containerd\.io\.containerd\.snapshotter|overlayfs|no such file or directory.*snapshot|no such file or directory.*layer'         "$err_file"
+}
+
+# --- 29A.2. DOCKER IMAGE EXTRACTION ERROR EXPLANATION ---
+# Shows a targeted explanation when Docker/containerd fails while extracting pulled image layers.
+function explain_docker_layer_extract_error() {
+    local description="$1"
+    local err_file="$2"
+
+    echo ""
+    echo -e "${RD}Docker image extraction failed during:${CL} ${description}"
+    echo -e "${YW}This is usually a local Docker/containerd snapshot or partially-extracted image problem, not a compose path/YAML problem.${CL}"
+    echo -e "${YW}Common fix: remove the failed image/container, restart Docker, then rerun Script 6.5.${CL}"
+    echo ""
+    echo -e "${BL}Suggested safe checks/fixes:${CL}"
+    echo -e "${YW}docker compose -p postiz down${CL}"
+    echo -e "${YW}docker image rm ghcr.io/gitroomhq/postiz-app:latest 2>/dev/null || true${CL}"
+    echo -e "${YW}sudo systemctl restart docker${CL}"
+    echo -e "${YW}Then rerun Script 6.5.${CL}"
+    echo ""
+    echo -e "${RD}Real error:${CL}"
+    cat "$err_file"
+}
+
 # --- 29A. DOCKER HUB LOGIN / RETRY HELPER ---
 # Uses Docker's own login prompt instead of collecting credentials in this script.
 # This keeps passwords/tokens out of script variables and logs.
@@ -818,6 +848,12 @@ function run_docker_cmd() {
             fi
         fi
 
+        if is_docker_layer_extract_error "$err_file"; then
+            explain_docker_layer_extract_error "$description" "$err_file"
+            rm -f "$err_file"
+            exit 1
+        fi
+
         echo ""
         echo -e "${RD}Docker command failed during:${CL} ${description}"
         echo -e "${YW}Command:${CL} docker $*"
@@ -838,11 +874,15 @@ function compose_up_quiet() {
     local description="$1"
     shift
 
+    msg_info "${description} (pulling/starting containers; this can take a few minutes)"
+
     if docker_cmd compose up --help 2>/dev/null | grep -q -- '--quiet-pull'; then
         run_docker_cmd "$description" compose "$@" up -d --quiet-pull
     else
         run_docker_cmd "$description" compose "$@" up -d
     fi
+
+    clear_transient_line
 }
 
 # --- 29A. POSTIZ TEMPORAL GUARD RUNNER ---
@@ -852,30 +892,38 @@ function run_postiz_temporal_guard_stack() {
     local project="$1"
     local file="$2"
     local guard_log=""
+    local compose_path=""
 
     guard_log="$(mktemp)"
     TEMP_FILES+=("$guard_log")
+    compose_path="$(compose_path_for_stack_file "$file")"
 
-    msg_info "Running Postiz Temporal Guard"
+    msg_info "Running Postiz Temporal Guard from ${compose_path}"
 
-    if docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up --abort-on-container-exit --exit-code-from postiz-temporal-guard > "$guard_log" 2>&1; then
+    if docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "$compose_path" up --abort-on-container-exit --exit-code-from postiz-temporal-guard > "$guard_log" 2>&1; then
         clear_transient_line
         msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
         return 0
     fi
 
     if is_dockerhub_rate_limit_error "$guard_log"; then
-        if offer_dockerhub_login_and_retry "running Postiz Temporal Guard" "$guard_log" compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" up --abort-on-container-exit --exit-code-from postiz-temporal-guard; then
+        if offer_dockerhub_login_and_retry "running Postiz Temporal Guard" "$guard_log" compose --env-file "$ENV_FILE" -p "$project" -f "$compose_path" up --abort-on-container-exit --exit-code-from postiz-temporal-guard; then
             clear_transient_line
             msg_ok "POSTIZ TEMPORAL GUARD COMPLETED"
             return 0
         fi
     fi
 
+    if is_docker_layer_extract_error "$guard_log"; then
+        clear_transient_line
+        explain_docker_layer_extract_error "running Postiz Temporal Guard" "$guard_log"
+        exit 1
+    fi
+
     clear_transient_line
     echo ""
     echo -e "${RD}Docker command failed during:${CL} running Postiz Temporal Guard"
-    echo -e "${YW}Command:${CL} docker compose --env-file ${ENV_FILE} -p ${project} -f ${COMPOSE_DIR}/${file} up --abort-on-container-exit --exit-code-from postiz-temporal-guard"
+    echo -e "${YW}Command:${CL} docker compose --env-file ${ENV_FILE} -p ${project} -f ${compose_path} up --abort-on-container-exit --exit-code-from postiz-temporal-guard"
     echo ""
     echo -e "${YW}Captured Postiz Temporal Guard output:${CL}"
     cat "$guard_log" 2>/dev/null || true
@@ -1806,6 +1854,57 @@ function sync_bootstrap_override_for_dockge() {
 }
 
 
+# --- 33I.1. COMPOSE PATH RESOLUTION HELPERS ---
+# When Dockge is the selected admin UI, Script 6.5 deploys from the same
+# ${DOCKER_DIR}/compose/<stack>/compose.yaml layout that Dockge displays.
+# The flat downloaded filename remains as a fallback and source file.
+function compose_path_for_stack_file() {
+    local file="$1"
+    local stack_dir=""
+    local dockge_path=""
+
+    if [ "$ADMIN_UI" == "dockge" ]; then
+        stack_dir="$(dockge_stack_dir_name_for_file "$file")"
+        dockge_path="${COMPOSE_DIR}/${stack_dir}/compose.yaml"
+        if [ -f "$dockge_path" ]; then
+            printf '%s' "$dockge_path"
+            return 0
+        fi
+    fi
+
+    printf '%s' "${COMPOSE_DIR}/${file}"
+}
+
+function bootstrap_override_path_for_primary_file() {
+    local primary_file="$1"
+    local stack_dir=""
+    local dockge_path=""
+
+    if [ "$ADMIN_UI" == "dockge" ]; then
+        stack_dir="$(dockge_stack_dir_name_for_file "$primary_file")"
+        dockge_path="${COMPOSE_DIR}/${stack_dir}/bootstrap-override.yaml"
+        if [ -f "$dockge_path" ]; then
+            printf '%s' "$dockge_path"
+            return 0
+        fi
+    fi
+
+    printf '%s' "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+}
+
+function primary_stack_for_bootstrap_override() {
+    local file="$1"
+
+    case "$file" in
+        "$DOCKGE_BOOTSTRAP_OVERRIDE_FILE_NAME") echo "$DOCKGE_STACK_FILE" ;;
+        "$PORTAINER_BOOTSTRAP_OVERRIDE_FILE_NAME") echo "$PORTAINER_STACK_FILE" ;;
+        "$KOMODO_BOOTSTRAP_OVERRIDE_FILE_NAME") echo "$KOMODO_STACK_FILE" ;;
+        "$DOCKHAND_BOOTSTRAP_OVERRIDE_FILE_NAME") echo "$DOCKHAND_STACK_FILE" ;;
+        *) echo "" ;;
+    esac
+}
+
+
 # --- 33H. STACK REGISTRY HELPERS ---
 # Uses the fixed uploaded project structure. No GitHub scanning is performed.
 function stack_project_for_file() {
@@ -1949,7 +2048,9 @@ function verify_selected_stack_preflight() {
 # Checks selected compose files for required ${VARIABLE} references without fallbacks.
 function verify_compose_env_coverage_for_file() {
     local file="$1"
-    local path="${COMPOSE_DIR}/${file}"
+    local path=""
+
+    path="$(compose_path_for_stack_file "$file")"
     local missing="no"
     local token=""
     local var=""
@@ -2003,6 +2104,7 @@ function download_fixed_stack_file() {
     local file="$1"
     local target="${COMPOSE_DIR}/${file}"
     local url="${GITHUB_RAW_BASE}/${file}"
+    local primary_for_override=""
 
     msg_info "Downloading ${file}"
     curl --globoff -fsSL "$url" -o "$target" || msg_error "Failed to download ${url}"
@@ -2012,7 +2114,14 @@ function download_fixed_stack_file() {
     fi
     run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target"
     run_cmd "setting compose file permissions" chmod 640 "$target"
-    sync_compose_file_for_dockge "$file" "$target"
+
+    primary_for_override="$(primary_stack_for_bootstrap_override "$file")"
+    if [ -n "$primary_for_override" ]; then
+        sync_bootstrap_override_for_dockge "$primary_for_override" "$target"
+    else
+        sync_compose_file_for_dockge "$file" "$target"
+    fi
+
     msg_ok "DOWNLOADED ${file}"
 }
 
@@ -2041,18 +2150,18 @@ function validate_selected_compose_files() {
     export DOCKER_DIR COMPOSE_DIR ENV_FILE PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
 
     msg_info "Validating Socket Proxy stack compose"
-    run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}" config -q
+    run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")" config -q
     msg_ok "SOCKET PROXY STACK COMPOSE VALID"
 
     msg_info "Validating ${ADMIN_UI_DISPLAY_NAME} stack compose with bootstrap override"
-    run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" config -q
+    run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$(compose_path_for_stack_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")" -f "$(bootstrap_override_path_for_primary_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")" config -q
     msg_ok "${ADMIN_UI_DISPLAY_NAME^^} STACK COMPOSE VALID"
 
     for i in "${!SELECTED_STACK_FILES[@]}"; do
         file="${SELECTED_STACK_FILES[$i]}"
         project="${SELECTED_STACK_PROJECTS[$i]}"
         msg_info "Validating ${file}"
-        run_docker_cmd "validating ${file}" compose --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}" config -q
+        run_docker_cmd "validating ${file}" compose --env-file "$ENV_FILE" -p "$project" -f "$(compose_path_for_stack_file "$file")" config -q
         msg_ok "VALID COMPOSE: ${file}"
     done
 
@@ -2065,6 +2174,16 @@ function deploy_selected_stacks() {
     local file=""
     local project=""
     local service=""
+    local compose_path=""
+
+    detail_line "Bootstrap stacks" "socket-proxy + ${ADMIN_UI_DISPLAY_NAME}"
+    if [ "${#SELECTED_STACK_FILES[@]}" -eq 0 ]; then
+        detail_line "Additional stacks" "none selected"
+    else
+        for i in "${!SELECTED_STACK_FILES[@]}"; do
+            detail_line "Deploy order $((i + 1))" "${SELECTED_STACK_PROJECTS[$i]} from $(compose_path_for_stack_file "${SELECTED_STACK_FILES[$i]}")"
+        done
+    fi
 
     deploy_socket_proxy
     deploy_admin_ui
@@ -2073,6 +2192,7 @@ function deploy_selected_stacks() {
         file="${SELECTED_STACK_FILES[$i]}"
         project="${SELECTED_STACK_PROJECTS[$i]}"
         service="${SELECTED_STACK_SERVICES[$i]}"
+        compose_path="$(compose_path_for_stack_file "$file")"
 
         if [ "$file" == "$POSTIZ_TEMPORAL_GUARD_STACK_FILE" ]; then
             section "RUN STACK - POSTIZ TEMPORAL GUARD"
@@ -2081,7 +2201,8 @@ function deploy_selected_stacks() {
         fi
 
         section "DEPLOY STACK - ${project^^}"
-        compose_up_quiet "deploying ${project}" --env-file "$ENV_FILE" -p "$project" -f "${COMPOSE_DIR}/${file}"
+        detail_line "Compose file" "$compose_path"
+        compose_up_quiet "deploying ${project}" --env-file "$ENV_FILE" -p "$project" -f "$compose_path"
         msg_ok "DEPLOYED ${project^^}"
 
         if [ -n "$service" ]; then
@@ -2663,12 +2784,12 @@ function validate_bootstrap_compose_files() {
     section "STACK COMPOSE VALIDATION"
 
     msg_info "Validating Socket Proxy stack compose"
-    run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}" config -q
+    run_docker_cmd "validating Socket Proxy stack compose" compose --env-file "$ENV_FILE" -p socket-proxy -f "$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")" config -q
     msg_ok "SOCKET PROXY STACK COMPOSE VALID"
 
     msg_info "Validating ${ADMIN_UI_DISPLAY_NAME} stack compose with bootstrap override"
     export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
-    run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE" config -q
+    run_docker_cmd "validating ${ADMIN_UI_DISPLAY_NAME} stack compose" compose --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$(compose_path_for_stack_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")" -f "$(bootstrap_override_path_for_primary_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")" config -q
     msg_ok "${ADMIN_UI_DISPLAY_NAME^^} STACK COMPOSE VALID"
 
     ADMIN_UI_VALIDATED="yes"
@@ -2678,8 +2799,10 @@ function validate_bootstrap_compose_files() {
 function deploy_socket_proxy() {
     section "DEPLOY STACK - SOCKET PROXY"
 
-    msg_info "Deploying socket-proxy"
-    compose_up_quiet "deploying socket-proxy" --env-file "$ENV_FILE" -p socket-proxy -f "${COMPOSE_DIR}/${SOCKET_PROXY_STACK_FILE}"
+    local compose_path=""
+    compose_path="$(compose_path_for_stack_file "$SOCKET_PROXY_STACK_FILE")"
+    detail_line "Compose file" "$compose_path"
+    compose_up_quiet "deploying socket-proxy" --env-file "$ENV_FILE" -p socket-proxy -f "$compose_path"
     SOCKET_PROXY_DEPLOYED="yes"
     msg_ok "SOCKET-PROXY DEPLOYED"
 }
@@ -2689,9 +2812,15 @@ function deploy_socket_proxy() {
 function deploy_admin_ui() {
     section "DEPLOY STACK - ${ADMIN_UI_DISPLAY_NAME}"
 
+    local admin_compose_path=""
+    local admin_override_path=""
+
     export PORTAINER_BOOTSTRAP_PORT DOCKGE_BOOTSTRAP_PORT KOMODO_BOOTSTRAP_PORT DOCKHAND_BOOTSTRAP_PORT ADMIN_UI_BOOTSTRAP_BIND
-    msg_info "Deploying ${ADMIN_UI_DISPLAY_NAME} with bootstrap port"
-    compose_up_quiet "deploying ${ADMIN_UI_DISPLAY_NAME}" --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$ADMIN_UI_COMPOSE_FILE" -f "$ADMIN_UI_BOOTSTRAP_OVERRIDE_FILE"
+    admin_compose_path="$(compose_path_for_stack_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")"
+    admin_override_path="$(bootstrap_override_path_for_primary_file "$(basename "$ADMIN_UI_COMPOSE_FILE")")"
+    detail_line "Compose file" "$admin_compose_path"
+    detail_line "Bootstrap override" "$admin_override_path"
+    compose_up_quiet "deploying ${ADMIN_UI_DISPLAY_NAME}" --env-file "$ENV_FILE" -p "$ADMIN_UI_PROJECT_NAME" -f "$admin_compose_path" -f "$admin_override_path"
     ADMIN_UI_DEPLOYED="yes"
 
     if [ "$ADMIN_UI" == "portainer" ]; then
