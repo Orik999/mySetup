@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.5.4"
+SCRIPT_VERSION="v1.5.5"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="complete-service-bind-mount-permissions"
+SCRIPT_BUILD="root-aware-service-permission-audit"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -2334,9 +2334,17 @@ function assert_owner_mode() {
     local expected_mode="$4"
     local actual=""
 
-    [ -e "$path" ] || msg_error "Permission audit path missing: ${path}"
-
-    actual="$(stat -c '%u:%g:%a' "$path" 2>/dev/null || true)"
+    # Use sudo-aware existence/stat checks because service paths such as
+    # ${DOCKER_DIR}/appdata/redis are intentionally locked to UID/GID 999 with
+    # mode 770. A normal shell user cannot traverse those directories, so plain
+    # [ -e ] and stat can falsely report nested paths like redis/data as missing.
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -e "$path" || msg_error "Permission audit path missing: ${path}"
+        actual="$("$SUDO_CMD" stat -c '%u:%g:%a' "$path" 2>/dev/null || true)"
+    else
+        test -e "$path" || msg_error "Permission audit path missing: ${path}"
+        actual="$(stat -c '%u:%g:%a' "$path" 2>/dev/null || true)"
+    fi
 
     if [ "$actual" != "${expected_uid}:${expected_gid}:${expected_mode}" ]; then
         msg_error "Permission audit failed for ${path}. Expected ${expected_uid}:${expected_gid}:${expected_mode}, got ${actual:-unknown}."
@@ -2346,15 +2354,28 @@ function assert_owner_mode() {
 }
 
 
+function assert_root_executable() {
+    local path="$1"
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -x "$path" || msg_error "Executable audit failed: ${path}"
+    else
+        test -x "$path" || msg_error "Executable audit failed: ${path}"
+    fi
+
+    msg_ok "EXECUTABLE OK: ${path}"
+}
+
+
 function assert_user_writable_dir() {
     local path="$1"
     local test_file="${path}/.script6-write-test-$$"
 
-    [ -d "$path" ] || msg_error "Writable audit path missing: ${path}"
-
     if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" test -d "$path" || msg_error "Writable audit path missing: ${path}"
         "$SUDO_CMD" -u "$DOCKER_USER" sh -c "touch '$test_file' && rm -f '$test_file'" >/dev/null 2>&1 || msg_error "Docker user ${DOCKER_USER} cannot write to ${path}"
     else
+        test -d "$path" || msg_error "Writable audit path missing: ${path}"
         touch "$test_file" && rm -f "$test_file" >/dev/null 2>&1 || msg_error "Current user cannot write to ${path}"
     fi
 
@@ -2376,8 +2397,7 @@ function verify_service_permissions() {
     assert_owner_mode "${DOCKER_DIR}/appdata/postgres/pgdata" "999" "999" "700"
     assert_owner_mode "${DOCKER_DIR}/appdata/postgres/data" "999" "999" "700"
 
-    [ -x "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh" ] || msg_error "PostgreSQL init script is not executable."
-    msg_ok "POSTGRESQL INIT SCRIPT EXECUTABLE"
+    assert_root_executable "${DOCKER_DIR}/appdata/postgres/init/01-create-app-databases.sh"
 
     # Redis: both the active bind target and nested compatibility path must exist
     # and be writable by UID/GID 999 before Script 6.5 deploys Redis.
