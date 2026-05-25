@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.18"
+SCRIPT_VERSION="v1.3.19"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="dockge-layout-progress-extract-error-fix"
+SCRIPT_BUILD="internal-authentik-api-forward-auth-fix"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -2253,11 +2253,40 @@ function verify_cf_companion_runtime_if_selected() {
 # =========================================================
 
 function json_get_first_pk() {
-    python3 -c 'import json,sys; data=json.load(sys.stdin); items=data.get("results", data if isinstance(data, list) else []); print(items[0].get("pk", "") if items else "")'
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("")
+    sys.exit(0)
+items = data.get("results", data if isinstance(data, list) else []) if isinstance(data, (dict, list)) else []
+print(items[0].get("pk", "") if items else "")
+'
 }
 
 function json_get_first_uuid_or_pk() {
-    python3 -c 'import json,sys; data=json.load(sys.stdin); items=data.get("results", data if isinstance(data, list) else []); print((items[0].get("pk") or items[0].get("uuid") or "") if items else "")'
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("")
+    sys.exit(0)
+items = data.get("results", data if isinstance(data, list) else []) if isinstance(data, (dict, list)) else []
+print((items[0].get("pk") or items[0].get("uuid") or "") if items else "")
+'
+}
+
+function json_is_valid_object_or_array() {
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(data, (dict, list)) else 1)
+'
 }
 
 function json_escape() {
@@ -2376,25 +2405,66 @@ function ak_api() {
     local method="$1"
     local endpoint="$2"
     local data="${3:-}"
+    local internal_base="http://127.0.0.1:9000/api/v3"
 
     [ -n "${AUTHENTIK_API_TOKEN:-}" ] || return 1
-    AUTHENTIK_API_BASE="${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}/api/v3"
 
-    if [ -n "$data" ]; then
-        curl -ksS -X "$method" "${AUTHENTIK_API_BASE}${endpoint}" \
-            -H "Authorization: Bearer ${AUTHENTIK_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            --data "$data"
-    else
-        curl -ksS -X "$method" "${AUTHENTIK_API_BASE}${endpoint}" \
-            -H "Authorization: Bearer ${AUTHENTIK_API_TOKEN}" \
-            -H "Accept: application/json"
+    # Important: use the Authentik container's local HTTP API for automation.
+    # Calling https://auth.${DOMAIN_VALUE} goes through Cloudflare/Traefik and can return
+    # HTML errors such as Cloudflare 525 or Authentik Server Error pages. Those are not JSON
+    # API responses and previously caused false API success plus Python JSON tracebacks.
+    if docker_cmd ps --format '{{.Names}}' | grep -qx 'authentik-server'; then
+        if [ -n "$data" ]; then
+            printf '%s' "$data" | docker_cmd exec -i authentik-server python3 -c '
+import sys, urllib.request, urllib.error
+method, url, token = sys.argv[1], sys.argv[2], sys.argv[3]
+body = sys.stdin.read()
+payload = body.encode() if body else None
+headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+if payload is not None:
+    headers["Content-Type"] = "application/json"
+req = urllib.request.Request(url, data=payload, method=method, headers=headers)
+try:
+    with urllib.request.urlopen(req, timeout=30) as response:
+        sys.stdout.write(response.read().decode(errors="replace"))
+except urllib.error.HTTPError as exc:
+    sys.stderr.write(f"HTTP {exc.code} {exc.reason} while calling Authentik internal API\n")
+    sys.stderr.write(exc.read().decode(errors="replace")[:4000])
+    sys.exit(22)
+except Exception as exc:
+    sys.stderr.write(f"Authentik internal API request failed: {exc}\n")
+    sys.exit(1)
+' "$method" "${internal_base}${endpoint}" "$AUTHENTIK_API_TOKEN"
+        else
+            docker_cmd exec -i authentik-server python3 -c '
+import sys, urllib.request, urllib.error
+method, url, token = sys.argv[1], sys.argv[2], sys.argv[3]
+headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+req = urllib.request.Request(url, method=method, headers=headers)
+try:
+    with urllib.request.urlopen(req, timeout=30) as response:
+        sys.stdout.write(response.read().decode(errors="replace"))
+except urllib.error.HTTPError as exc:
+    sys.stderr.write(f"HTTP {exc.code} {exc.reason} while calling Authentik internal API\n")
+    sys.stderr.write(exc.read().decode(errors="replace")[:4000])
+    sys.exit(22)
+except Exception as exc:
+    sys.stderr.write(f"Authentik internal API request failed: {exc}\n")
+    sys.exit(1)
+' "$method" "${internal_base}${endpoint}" "$AUTHENTIK_API_TOKEN"
+        fi
+        return $?
     fi
+
+    msg_warn "authentik-server is not running; cannot call internal Authentik API."
+    return 1
 }
 
 function verify_authentik_api_for_deploy() {
     section "AUTHENTIK API CHECK"
+
+    local api_response=""
+    local api_error=""
 
     if [ -z "${AUTHENTIK_API_TOKEN:-}" ]; then
         AUTHENTIK_API_OK="skipped-no-token"
@@ -2402,33 +2472,53 @@ function verify_authentik_api_for_deploy() {
         return 0
     fi
 
-    if ak_api GET "/core/users/me/" >/dev/null 2>&1; then
+    api_error="$(mktemp)"
+    TEMP_FILES+=("$api_error")
+
+    if api_response="$(ak_api GET "/core/users/me/" 2>"$api_error")" && printf '%s' "$api_response" | json_is_valid_object_or_array >/dev/null 2>&1; then
         AUTHENTIK_API_OK="yes"
-        msg_ok "AUTHENTIK API ACCESS CONFIRMED"
+        msg_ok "AUTHENTIK INTERNAL API ACCESS CONFIRMED"
     else
         AUTHENTIK_API_OK="failed"
         AUTHENTIK_API_TOKEN=""
-        msg_warn "Authentik API token did not authenticate. Protected route automation skipped."
+        msg_warn "Authentik API token/internal API check failed. Protected route automation skipped."
+        if [ -s "$api_error" ]; then
+            echo -e "${YW}Authentik API diagnostic:${CL}"
+            head -n 20 "$api_error" || true
+        fi
     fi
 }
 
 function authentik_get_flow_pk() {
     local slug="$1"
-    ak_api GET "/flows/instances/?slug=${slug}" | json_get_first_pk || true
+    local response=""
+
+    response="$(ak_api GET "/flows/instances/?slug=${slug}" 2>/dev/null || true)"
+    printf '%s' "$response" | json_get_first_pk
 }
 
 function authentik_find_proxy_provider_pk() {
-    ak_api GET "/providers/proxy/?search=Traefik%20Forward%20Auth" | json_get_first_pk || true
+    local response=""
+    response="$(ak_api GET "/providers/proxy/?search=Traefik%20Forward%20Auth" 2>/dev/null || true)"
+    printf '%s' "$response" | json_get_first_pk
 }
 
 function authentik_find_application_pk() {
-    ak_api GET "/core/applications/?slug=traefik-forward-auth" | json_get_first_pk || true
+    local response=""
+    response="$(ak_api GET "/core/applications/?slug=traefik-forward-auth" 2>/dev/null || true)"
+    printf '%s' "$response" | json_get_first_pk
 }
 
 function authentik_find_embedded_outpost_pk() {
     local pk=""
-    pk="$(ak_api GET "/outposts/instances/?search=authentik%20Embedded%20Outpost" | json_get_first_uuid_or_pk || true)"
-    [ -n "$pk" ] || pk="$(ak_api GET "/outposts/instances/?search=Embedded%20Outpost" | json_get_first_uuid_or_pk || true)"
+    local response=""
+
+    response="$(ak_api GET "/outposts/instances/?search=authentik%20Embedded%20Outpost" 2>/dev/null || true)"
+    pk="$(printf '%s' "$response" | json_get_first_uuid_or_pk)"
+    if [ -z "$pk" ]; then
+        response="$(ak_api GET "/outposts/instances/?search=Embedded%20Outpost" 2>/dev/null || true)"
+        pk="$(printf '%s' "$response" | json_get_first_uuid_or_pk)"
+    fi
     printf '%s' "$pk"
 }
 
@@ -2462,7 +2552,9 @@ function create_or_update_authentik_forward_auth_for_deploy() {
 
     if [ -z "$authorization_flow" ] || [ -z "$invalidation_flow" ]; then
         AUTHENTIK_PROVIDER_OK="flow-missing"
-        msg_warn "Required Authentik default provider flows were not found."
+        msg_warn "Required Authentik default provider flows were not found through the internal API."
+        detail_line "Authorization flow" "${authorization_flow:-missing}"
+        detail_line "Invalidation flow" "${invalidation_flow:-missing}"
         return 0
     fi
 
@@ -2604,6 +2696,10 @@ function verify_selected_protected_routes() {
                 else
                     msg_warn "ROUTE CHECK FAILED: ${host} HTTP 404"
                 fi
+                ;;
+            525)
+                failures=$((failures + 1))
+                msg_warn "ROUTE CHECK FAILED: ${host} HTTP 525 from Cloudflare. Origin TLS/Traefik certificate is not compatible with current Cloudflare SSL mode yet."
                 ;;
             *)
                 failures=$((failures + 1))
@@ -3137,8 +3233,8 @@ function show_final_summary() {
     echo -e "${YW}Script 7 will close this direct bootstrap port and leave access through Traefik/AuthentiK.${CL}"
     echo ""
     echo -e "${BL}NEXT STEP:${CL}"
-    echo -e "${YW}Deploy the remaining application stacks in the documented order.${CL}"
-    echo -e "${YW}After all stacks are stable, run Script 7 for SSO and bootstrap-port hardening.${CL}"
+    echo -e "${YW}Review the route verification results above.${CL}"
+    echo -e "${YW}When protected domain access is confirmed, run Script 7 for final hardening, cleanup and bootstrap-port closure.${CL}"
     echo ""
 }
 
