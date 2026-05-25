@@ -2205,10 +2205,10 @@ function collect_stack_deployment_choices() {
         echo -e "${YW}Postiz not selected. You can still deploy optional utility stacks below.${CL}"
     fi
 
-    DEPLOY_CF_DDNS="$(timed_yes_no "Deploy Cloudflare DDNS stack?" "n")"
+    DEPLOY_CF_DDNS="$(timed_yes_no "Deploy Cloudflare DDNS stack?" "y")"
     [[ "$DEPLOY_CF_DDNS" =~ ^[Yy] ]] && add_selected_stack_once "$CF_DDNS_STACK_FILE" "Cloudflare DDNS selected by user."
 
-    DEPLOY_CF_COMPANION="$(timed_yes_no "Deploy Cloudflare Companion DNS automation stack?" "n")"
+    DEPLOY_CF_COMPANION="$(timed_yes_no "Deploy Cloudflare Companion DNS automation stack?" "y")"
     if [[ "$DEPLOY_CF_COMPANION" =~ ^[Yy] ]]; then
         add_traefik_only_dependency "Cloudflare Companion"
         add_selected_stack_once "$CF_COMPANION_STACK_FILE" "Cloudflare Companion selected by user for Traefik label-driven DNS automation."
