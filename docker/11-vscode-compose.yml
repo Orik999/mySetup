@@ -31,7 +31,6 @@ services:
       traefik.http.routers.vscode.rule: Host(`code.${DOMAIN}`)
       traefik.http.routers.vscode.entrypoints: https
       traefik.http.routers.vscode.tls: "true"
-      traefik.http.routers.vscode.tls.certresolver: cloudflare
       traefik.http.routers.vscode.middlewares: chain-authentik@file
       traefik.http.routers.vscode.service: vscode
       traefik.http.services.vscode.loadbalancer.server.port: 8443

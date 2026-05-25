@@ -48,7 +48,6 @@ services:
       traefik.http.routers.dockhand.rule: Host(`dockhand.${DOMAIN}`)
       traefik.http.routers.dockhand.entrypoints: https
       traefik.http.routers.dockhand.tls: "true"
-      traefik.http.routers.dockhand.tls.certresolver: cloudflare
       traefik.http.routers.dockhand.middlewares: chain-authentik@file
       traefik.http.routers.dockhand.service: dockhand
 

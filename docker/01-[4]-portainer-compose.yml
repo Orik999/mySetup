@@ -63,7 +63,6 @@ services:
       traefik.http.routers.portainer.rule: Host(`portainer.${DOMAIN}`)
       traefik.http.routers.portainer.entrypoints: https
       traefik.http.routers.portainer.tls: "true"
-      traefik.http.routers.portainer.tls.certresolver: cloudflare
       traefik.http.routers.portainer.middlewares: chain-authentik@file
       traefik.http.routers.portainer.service: portainer
 

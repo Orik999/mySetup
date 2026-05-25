@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.25"
+SCRIPT_VERSION="v1.3.26"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="redis-process-owner-bgsave-repair"
+SCRIPT_BUILD="acme-wildcard-auth-host-verification-ui-clear"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -158,6 +158,7 @@ AUTHENTIK_APPLICATION_OK="not-run"
 AUTHENTIK_OUTPOST_ATTACH_OK="not-run"
 AUTHENTIK_OUTPOST_302_OK="not-run"
 PROTECTED_ROUTE_VERIFY_OK="not-run"
+AUTHENTIK_HOST_ROUTE_OK="not-run"
 AUTHENTIK_API_TOKEN="${AUTHENTIK_API_TOKEN:-}"
 AUTHENTIK_API_BASE=""
 CF_COMPANION_SECRET_OK="skipped"
@@ -971,8 +972,7 @@ function build_proxmox_route_block() {
       rule: Host(\`${TRAEFIK_DASHBOARD_HOST}\`)
       middlewares:
         - chain-authentik@file
-      tls:
-        certResolver: cloudflare
+      tls: {}
       service: api@internal
 EOF
 
@@ -992,8 +992,7 @@ EOF
       rule: Host(\`${PROXMOX_HOST}\`)
       middlewares:
         - chain-authentik@file
-      tls:
-        certResolver: cloudflare
+      tls: {}
       service: proxmox
 
   # -------------------------------------------------------
@@ -1396,6 +1395,18 @@ function verify_traefik_rendered_configs() {
     TRAEFIK_AUTHENTIK_REFERENCES_OK="yes"
     msg_ok "NO STALE AUTHENTIK@DOCKER REFERENCES"
 
+    msg_info "Checking centralized wildcard certificate strategy"
+    if ! grep -q "main: \"${DOMAIN_VALUE}\"" "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null && ! grep -q "main: ${DOMAIN_VALUE}" "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik static config does not contain the base wildcard certificate domain."
+    fi
+    if ! grep -q "\*.${DOMAIN_VALUE}" "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik static config does not contain wildcard SAN *.${DOMAIN_VALUE}."
+    fi
+    if grep -q 'certResolver: cloudflare' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config still contains per-router certResolver entries. Wildcard issuance must stay centralized in traefik.yml."
+    fi
+    msg_ok "TRAEFIK WILDCARD CERTIFICATE STRATEGY VERIFIED"
+
     msg_info "Checking acme.json permissions"
     local acme_mode=""
     acme_mode="$(stat -c '%a' "$TRAEFIK_ACME_STORAGE" 2>/dev/null || true)"
@@ -1745,9 +1756,10 @@ function prepare_postgres_runtime_prereqs() {
     detail_line "Data mode" "700 root, u+rwX,go-rwx recursive"
 
     if docker_cmd inspect postgres --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null | grep -Eq 'restarting|unhealthy|exited|dead'; then
-        msg_warn "Existing PostgreSQL container is stale/unhealthy; removing container only, keeping data."
+        msg_info "Existing PostgreSQL container is stale/unhealthy; removing container only, keeping data"
         docker_cmd rm -f postgres >/dev/null 2>&1 || true
-        msg_ok "STALE POSTGRESQL CONTAINER REMOVED"
+        clear_transient_line
+        msg_ok "STALE POSTGRESQL CONTAINER REMOVED; DATA KEPT"
     fi
 }
 
@@ -1912,6 +1924,7 @@ function wait_for_temporal_ready() {
         if docker_cmd run --rm --network database "$temporal_admin_tools_image" \
             temporal --address "$temporal_address" --namespace "$temporal_namespace" \
             operator search-attribute list >/dev/null 2>"$err_file"; then
+            clear_transient_line
             msg_ok "TEMPORAL API READY"
             detail_line "Temporal address" "$temporal_address"
             detail_line "Temporal namespace" "$temporal_namespace"
@@ -1919,7 +1932,7 @@ function wait_for_temporal_ready() {
         fi
 
         if [ "$attempt" -eq 1 ] || [ $((attempt % 15)) -eq 0 ]; then
-            tty_println "${BFR}${YW}Temporal API not ready yet (${attempt}/${max_attempts}). Waiting before Postiz Temporal Guard...${CL}"
+            tty_print "${BFR}${YW}Temporal API not ready yet (${attempt}/${max_attempts}). Waiting before Postiz Temporal Guard...${CL}"
         fi
 
         sleep 2
@@ -2249,6 +2262,22 @@ function verify_selected_compose_env_coverage() {
     msg_ok "SELECTED COMPOSE VARIABLE COVERAGE PASSED"
 }
 
+
+function normalize_compose_for_wildcard_tls() {
+    local target="$1"
+    local file="$2"
+
+    [ -f "$target" ] || return 0
+
+    # Router-level certresolver labels create a new ACME order per subdomain during
+    # repeated fresh tests. Keep TLS enabled on each router, but let Traefik's
+    # HTTPS entryPoint use the single wildcard certificate configured in traefik.yml.
+    if grep -q 'traefik\.http\.routers\..*\.tls\.certresolver' "$target" 2>/dev/null; then
+        sed -i '/traefik\.http\.routers\..*\.tls\.certresolver:/d' "$target"
+        msg_ok "NORMALIZED WILDCARD TLS LABELS: ${file}"
+    fi
+}
+
 function download_fixed_stack_file() {
     local file="$1"
     local target="${COMPOSE_DIR}/${file}"
@@ -2261,6 +2290,7 @@ function download_fixed_stack_file() {
     if grep -q "authentik@""docker" "$target"; then
         msg_error "Forbidden stale Authentik Docker-provider middleware reference found in ${file}."
     fi
+    normalize_compose_for_wildcard_tls "$target" "$file"
     run_cmd "setting compose file ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$target"
     run_cmd "setting compose file permissions" chmod 640 "$target"
 
@@ -2961,6 +2991,70 @@ function verify_authentik_outpost_route_for_deploy() {
     detail_line "HTTP result" "${http_code:-none}"
 }
 
+function detect_recent_acme_rate_limit() {
+    local domain_pattern="${DOMAIN_VALUE:-}"
+
+    [ -n "$domain_pattern" ] || return 1
+
+    docker_cmd logs --tail=260 traefik 2>/dev/null | grep -Eiq "rateLimited|too many certificates|acme: error: 429|${domain_pattern}"
+}
+
+function verify_authentik_public_host_route() {
+    section "AUTHENTIK PUBLIC HOST CHECK"
+
+    local auth_host="auth.${DOMAIN_VALUE}"
+    local public_code=""
+    local local_code=""
+    local headers_file=""
+
+    headers_file="$(mktemp)"
+    TEMP_FILES+=("$headers_file")
+
+    # Public check catches Cloudflare 525. Local --resolve check catches missing
+    # Traefik SNI/router/certificate before Cloudflare is involved.
+    public_code="$(curl -ksS -D "$headers_file" -o /dev/null -w '%{http_code}' "https://${auth_host}/" || true)"
+    local_code="$(curl -ksS -o /dev/null -w '%{http_code}' --resolve "${auth_host}:443:127.0.0.1" "https://${auth_host}/" || true)"
+
+    case "$public_code" in
+        200|301|302|303|307|401|403)
+            AUTHENTIK_HOST_ROUTE_OK="yes"
+            msg_ok "AUTHENTIK PUBLIC HOST RESPONDED: ${auth_host} HTTP ${public_code}"
+            detail_line "Local Traefik/SNI check" "HTTP ${local_code:-none}"
+            return 0
+            ;;
+        525)
+            if detect_recent_acme_rate_limit; then
+                AUTHENTIK_HOST_ROUTE_OK="acme-rate-limited"
+                msg_warn "AUTHENTIK PUBLIC HOST FAILED: ${auth_host} HTTP 525 with recent ACME rate-limit evidence."
+                detail_line "Diagnosis" "Let’s Encrypt ACME 429/rate-limit; wait for retry window or use staging/origin-cert test mode"
+            else
+                AUTHENTIK_HOST_ROUTE_OK="auth-host-tls-failed"
+                msg_warn "AUTHENTIK PUBLIC HOST FAILED: ${auth_host} HTTP 525. Origin TLS/Traefik certificate is not ready."
+            fi
+            detail_line "Local Traefik/SNI check" "HTTP ${local_code:-none}"
+            return 1
+            ;;
+        *)
+            if [ "$local_code" == "000" ] || [ -z "$local_code" ]; then
+                if detect_recent_acme_rate_limit; then
+                    AUTHENTIK_HOST_ROUTE_OK="acme-rate-limited"
+                    msg_warn "AUTHENTIK LOCAL SNI CHECK FAILED and Traefik logs show ACME rate-limit evidence."
+                    detail_line "Diagnosis" "Traefik cannot present auth.${DOMAIN_VALUE} certificate yet because ACME is rate-limited"
+                else
+                    AUTHENTIK_HOST_ROUTE_OK="auth-host-tls-failed"
+                    msg_warn "AUTHENTIK LOCAL SNI CHECK FAILED for ${auth_host}; Traefik has no usable TLS route/cert yet."
+                fi
+                detail_line "Public HTTP result" "${public_code:-none}"
+                detail_line "Local Traefik/SNI check" "HTTP ${local_code:-none}"
+                return 1
+            fi
+            AUTHENTIK_HOST_ROUTE_OK="needs-review"
+            msg_warn "AUTHENTIK PUBLIC HOST NEEDS REVIEW: ${auth_host} HTTP ${public_code:-none}, local HTTP ${local_code:-none}"
+            return 1
+            ;;
+    esac
+}
+
 function verify_selected_protected_routes() {
     section "PROTECTED ROUTE CHECKS"
 
@@ -2973,6 +3067,8 @@ function verify_selected_protected_routes() {
 
     headers_file="$(mktemp)"
     TEMP_FILES+=("$headers_file")
+
+    verify_authentik_public_host_route || failures=$((failures + 1))
 
     hosts+=("${ADMIN_UI_HOST:-dockge.${DOMAIN_VALUE}}")
     if [[ "$DEPLOY_VSCODE" =~ ^[Yy] ]]; then hosts+=("code.${DOMAIN_VALUE}"); fi
@@ -3007,8 +3103,12 @@ function verify_selected_protected_routes() {
         esac
     done
 
-    if [ "$failures" -eq 0 ]; then
+    if [ "$failures" -eq 0 ] && [ "$AUTHENTIK_HOST_ROUTE_OK" == "yes" ]; then
         PROTECTED_ROUTE_VERIFY_OK="yes"
+    elif [ "$AUTHENTIK_HOST_ROUTE_OK" == "acme-rate-limited" ]; then
+        PROTECTED_ROUTE_VERIFY_OK="acme-rate-limited"
+    elif [ "$AUTHENTIK_HOST_ROUTE_OK" == "auth-host-tls-failed" ]; then
+        PROTECTED_ROUTE_VERIFY_OK="auth-host-tls-failed"
     else
         PROTECTED_ROUTE_VERIFY_OK="needs-review"
     fi
@@ -3392,6 +3492,7 @@ VERIFY_LOG_EOF
         echo "Authentik application: ${AUTHENTIK_APPLICATION_OK}"
         echo "Authentik outpost attach: ${AUTHENTIK_OUTPOST_ATTACH_OK}"
         echo "Authentik outpost 302: ${AUTHENTIK_OUTPOST_302_OK}"
+        echo "Authentik public host route: ${AUTHENTIK_HOST_ROUTE_OK}"
         echo "Protected routes: ${PROTECTED_ROUTE_VERIFY_OK}"
                 echo ""
         echo "Docker containers:"
@@ -3451,6 +3552,7 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik public host route: $AUTHENTIK_HOST_ROUTE_OK
 Protected routes OK: $PROTECTED_ROUTE_VERIFY_OK
 Verify log: $VERIFY_LOG
 MARKER_EOF
@@ -3497,6 +3599,7 @@ Authentik provider OK: $AUTHENTIK_PROVIDER_OK
 Authentik application OK: $AUTHENTIK_APPLICATION_OK
 Authentik outpost attach OK: $AUTHENTIK_OUTPOST_ATTACH_OK
 Authentik outpost 302 OK: $AUTHENTIK_OUTPOST_302_OK
+Authentik public host route: $AUTHENTIK_HOST_ROUTE_OK
 Protected routes OK: $PROTECTED_ROUTE_VERIFY_OK
 Verify log: $VERIFY_LOG
 MARKER_EOF
@@ -3525,6 +3628,7 @@ function show_final_summary() {
     detail_line "FILEBROWSER FOLDERS" "$FILEBROWSER_FOLDERS_OK"
     detail_line "AUTHENTIK DEPENDENCIES" "$AUTHENTIK_DEPENDENCIES_OK"
     detail_line "AUTHENTIK API" "$AUTHENTIK_API_OK"
+    detail_line "AUTHENTIK PUBLIC HOST" "$AUTHENTIK_HOST_ROUTE_OK"
     detail_line "PROTECTED ROUTES" "$PROTECTED_ROUTE_VERIFY_OK"
     detail_line "Admin UI temporary URL" "$ADMIN_UI_BOOTSTRAP_ACCESS_URL"
     detail_line "Bootstrap port" "$ADMIN_UI_BOOTSTRAP_PORT"

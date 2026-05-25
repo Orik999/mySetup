@@ -21,8 +21,7 @@ http:
       rule: Host(`{{TRAEFIK_DASHBOARD_HOST}}`)
       middlewares:
         - chain-authentik@file
-      tls:
-        certResolver: cloudflare
+      tls: {}
       service: api@internal
 
     # Authentik outpost callback routing for all protected subdomains.
@@ -33,8 +32,7 @@ http:
         - https
       rule: HostRegexp(`^.+\.{{DOMAIN}}$`) && PathPrefix(`/outpost.goauthentik.io/`)
       priority: 100
-      tls:
-        certResolver: cloudflare
+      tls: {}
       service: authentik-outpost
 
 

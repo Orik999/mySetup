@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.5.6"
+SCRIPT_VERSION="v1.5.7"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="pg18-redis-recursive-permission-hardening"
+SCRIPT_BUILD="pg18-redis-recursive-permissions-acme-wildcard-render"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1287,8 +1287,7 @@ function build_proxmox_route_block() {
       rule: Host(\`${TRAEFIK_DASHBOARD_HOST}\`)
       middlewares:
         - chain-authentik@file
-      tls:
-        certResolver: cloudflare
+      tls: {}
       service: api@internal
 EOF
 
@@ -1308,8 +1307,7 @@ EOF
       rule: Host(\`${PROXMOX_HOST}\`)
       middlewares:
         - chain-authentik@file
-      tls:
-        certResolver: cloudflare
+      tls: {}
       service: proxmox
 
   # -------------------------------------------------------
@@ -2131,6 +2129,18 @@ function verify_traefik_config_files_created() {
 
     if grep -R '{{[^}]*}}' "$TRAEFIK_STATIC_CONFIG_FILE" "$TRAEFIK_DYNAMIC_CONFIG_FILE" >/dev/null 2>&1; then
         msg_error "Unrendered {{PLACEHOLDER}} values remain in Traefik config files."
+    fi
+
+    if ! grep -q "main: \"${DOMAIN_VALUE}\"" "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null && ! grep -q "main: ${DOMAIN_VALUE}" "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik static config does not contain the base wildcard certificate domain."
+    fi
+
+    if ! grep -q "\*.${DOMAIN_VALUE}" "$TRAEFIK_STATIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik static config does not contain the wildcard SAN for *.${DOMAIN_VALUE}."
+    fi
+
+    if grep -q 'certResolver: cloudflare' "$TRAEFIK_DYNAMIC_CONFIG_FILE" 2>/dev/null; then
+        msg_error "Traefik dynamic config still contains per-router certResolver entries. Keep wildcard issuance centralized in traefik.yml."
     fi
 
     msg_ok "TRAEFIK CONFIG FILES VERIFIED"

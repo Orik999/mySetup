@@ -55,7 +55,6 @@ services:
       traefik.http.routers.postiz.rule: Host(`postiz.${DOMAIN}`)
       traefik.http.routers.postiz.entrypoints: https
       traefik.http.routers.postiz.tls: "true"
-      traefik.http.routers.postiz.tls.certresolver: cloudflare
       traefik.http.routers.postiz.middlewares: chain-large-upload@file
       traefik.http.routers.postiz.service: postiz
 
