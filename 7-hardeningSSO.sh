@@ -23,9 +23,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="7-hardeningSSO.sh"
-SCRIPT_VERSION="v1.4.5"
+SCRIPT_VERSION="v1.4.6"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="hardening-only-release-snapshot-image-lock"
+SCRIPT_BUILD="hardening-only-route-wait-sshd-path-friendly-names"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -1170,6 +1170,45 @@ function verify_admin_ui_protected_route() {
     detail_line "Authentik outpost redirect" "$AUTHENTIK_OUTPOST_302_OK"
 }
 
+function wait_for_admin_ui_protected_route_after_closure() {
+    local test_host=""
+    local test_url=""
+    local outpost_url=""
+    local http_code=""
+    local outpost_code=""
+    local attempt=""
+    local max_attempts="30"
+
+    test_host="$(admin_ui_public_host)"
+    test_url="https://${test_host}/"
+    outpost_url="https://${test_host}/outpost.goauthentik.io/start?rd=https://${test_host}/"
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        http_code="$(http_code_for_url "$test_url")"
+        outpost_code="$(http_code_for_url "$outpost_url")"
+
+        if http_code_is_route_ok "$http_code" && [[ "$outpost_code" =~ ^(302|303|307)$ ]]; then
+            clear_transient_line
+            msg_ok "PROTECTED ADMIN UI ROUTE STILL RESPONDS AFTER BOOTSTRAP CLOSURE"
+            detail_line "Post-close admin route" "HTTP ${http_code}"
+            detail_line "Post-close outpost route" "HTTP ${outpost_code}"
+            return 0
+        fi
+
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+            tty_print "${BFR}${YW}Waiting for protected ${ADMIN_UI} route after bootstrap closure (${attempt}/${max_attempts}) | app=${http_code:-none} outpost=${outpost_code:-none}${CL}"
+        fi
+
+        sleep 2
+    done
+
+    clear_transient_line
+    msg_warn "Protected ${ADMIN_UI} domain needs review after bootstrap closure."
+    detail_line "Post-close admin route" "HTTP ${http_code:-none}"
+    detail_line "Post-close outpost route" "HTTP ${outpost_code:-none}"
+    return 1
+}
+
 function verify_protected_access_before_bootstrap_closure() {
     verify_authentik_public_host
     verify_authentik_outpost_302
@@ -1282,7 +1321,7 @@ function close_portainer_bootstrap_exposure() {
     fi
 
     msg_info "Redeploying ${ADMIN_UI} without bootstrap override"
-    docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "$compose_file" up -d >/dev/null
+    docker_cmd compose --env-file "$ENV_FILE" -p "$project" -f "$compose_file" up -d >/dev/null 2>&1
     msg_ok "${ADMIN_UI} REDEPLOYED WITHOUT BOOTSTRAP OVERRIDE"
 
     msg_info "Checking direct ${ADMIN_UI} bootstrap mapping"
@@ -1296,14 +1335,11 @@ function close_portainer_bootstrap_exposure() {
 
     if [ "$ADMIN_UI_BOOTSTRAP_CLOSED" == "yes" ]; then
         msg_info "Rechecking protected ${ADMIN_UI} domain after bootstrap closure"
-        local post_close_code=""
-        post_close_code="$(http_code_for_url "https://$(admin_ui_public_host)/")"
-        if http_code_is_route_ok "$post_close_code"; then
-            msg_ok "PROTECTED ADMIN UI ROUTE STILL RESPONDS AFTER CLOSURE"
-            detail_line "Post-close HTTP result" "$post_close_code"
+        if wait_for_admin_ui_protected_route_after_closure; then
+            :
         else
             ADMIN_UI_BOOTSTRAP_CLOSED="closed-but-route-needs-review"
-            msg_warn "Bootstrap port closed, but protected admin UI route returned HTTP ${post_close_code:-none}. Review Traefik/AuthentiK before logging out."
+            msg_warn "Bootstrap port is closed, but protected domain verification needs review. Keep your current SSH session open until Traefik/AuthentiK is confirmed."
         fi
     fi
 
@@ -1355,8 +1391,8 @@ function remove_portainer_ufw_rule() {
 # =========================================================
 
 # --- 19. POSTIZ HEALTH VERIFICATION ---
-# Confirms the real Postiz stack is healthy before stopping the temporary yml 07 guard.
-# The guard exists only to remove Temporal's default Text search attributes before Postiz starts.
+# Confirms the real Postiz stack is healthy before stopping the temporary Postiz Temporal Guard guard.
+# The Postiz Temporal Guard exists only to remove Temporal default Text search attributes before Postiz starts.
 function verify_postiz_health() {
     section "POSTIZ HEALTH CHECK"
 
@@ -1422,7 +1458,7 @@ function verify_postiz_health() {
 }
 
 # --- 20. POSTIZ TEMPORAL GUARD STOPPER ---
-# Stops the temporary yml 07 guard after Postiz is confirmed healthy.
+# Stops the temporary Postiz Temporal Guard guard after Postiz is confirmed healthy.
 # It does not delete Portainer stack definitions or compose files.
 function stop_postiz_temporal_guard_if_safe() {
     section "POSTIZ TEMPORAL GUARD CLEANUP"
@@ -1445,8 +1481,8 @@ function stop_postiz_temporal_guard_if_safe() {
         return 0
     fi
 
-    echo -e "${YW}The temporary yml 07 Postiz Temporal guard is no longer needed because Postiz is healthy.${CL}"
-    echo -e "${YW}This will only stop the guard container. It will not delete Portainer stack data or GitHub backup.${CL}"
+    echo -e "${YW}The temporary Postiz Temporal Guard is no longer needed because Postiz is healthy.${CL}"
+    echo -e "${YW}This will only stop the guard container. It will not delete stack data, compose files, or backups.${CL}"
     echo ""
 
     stop_yn="$(timed_yes_no "Stop temporary Postiz Temporal guard now?" "y")"
@@ -1480,7 +1516,23 @@ function stop_postiz_temporal_guard_if_safe() {
 # a real local password so sudo can require a password while SSH remains key-only.
 function passwd_status_code_for_user() {
     local user="$1"
-    passwd -S "$user" 2>/dev/null | awk '{print $2}' || true
+
+    if [ -n "$SUDO_CMD" ]; then
+        "$SUDO_CMD" passwd -S "$user" 2>/dev/null | awk '{print $2}' || true
+    else
+        passwd -S "$user" 2>/dev/null | awk '{print $2}' || true
+    fi
+}
+
+function sshd_binary_path() {
+    local sshd_bin=""
+
+    sshd_bin="$(command -v sshd 2>/dev/null || true)"
+    if [ -z "$sshd_bin" ] && [ -x /usr/sbin/sshd ]; then
+        sshd_bin="/usr/sbin/sshd"
+    fi
+
+    printf '%s' "$sshd_bin"
 }
 
 function verify_ssh_key_only_policy() {
@@ -1492,13 +1544,25 @@ function verify_ssh_key_only_policy() {
     local root_login=""
     local kbd_auth=""
     local challenge_auth=""
+    local sshd_bin=""
 
     msg_info "Checking effective sshd policy"
-    effective_config="$(sshd -T -C user="${DOCKER_USER}",host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+    sshd_bin="$(sshd_binary_path)"
+
+    if [ -z "$sshd_bin" ]; then
+        SSH_KEY_ONLY_POLICY_OK="failed-sshd-missing"
+        msg_error "Could not find sshd binary. Install/repair OpenSSH server before final sudo hardening."
+    fi
+
+    if [ -n "$SUDO_CMD" ]; then
+        effective_config="$("$SUDO_CMD" "$sshd_bin" -T -C user="${DOCKER_USER}",host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+    else
+        effective_config="$("$sshd_bin" -T -C user="${DOCKER_USER}",host=localhost,addr=127.0.0.1 2>/dev/null || true)"
+    fi
 
     if [ -z "$effective_config" ]; then
         SSH_KEY_ONLY_POLICY_OK="failed-sshd-t"
-        msg_error "Could not read effective sshd config. Fix SSH before final sudo hardening."
+        msg_error "Could not read effective sshd config using ${sshd_bin}. Fix SSH before final sudo hardening."
     fi
 
     password_auth="$(awk '$1=="passwordauthentication" {print $2; exit}' <<< "$effective_config")"
