@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6.5-stackDeployVerify.sh"
-SCRIPT_VERSION="v1.3.21"
+SCRIPT_VERSION="v1.3.22"
 SCRIPT_UPDATED="2026-05-25"
-SCRIPT_BUILD="dynamic-postgres-redis-runtime-owner-detection"
+SCRIPT_BUILD="dynamic-postgres-redis-runtime-owner-authentik-outpost-config"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, paths, GitHub source, Docker state and final bootstrap results.
@@ -2586,6 +2586,94 @@ function authentik_find_embedded_outpost_pk() {
     printf '%s' "$pk"
 }
 
+function authentik_build_outpost_patch_payload() {
+    local outpost_file="$1"
+    local provider_pk="$2"
+    local auth_host="$3"
+    local auth_host_browser="$4"
+
+    python3 - "$outpost_file" "$provider_pk" "$auth_host" "$auth_host_browser" <<'AK_OUTPOST_JSON'
+import json, sys
+path, provider_pk, auth_host, auth_host_browser = sys.argv[1:5]
+with open(path, "r", encoding="utf-8") as fh:
+    outpost = json.load(fh)
+
+providers = list(outpost.get("providers") or [])
+provider_value = int(provider_pk) if str(provider_pk).isdigit() else provider_pk
+if provider_value not in providers:
+    providers.append(provider_value)
+
+config = dict(outpost.get("config") or {})
+config["authentik_host"] = auth_host
+config["authentik_host_browser"] = auth_host_browser or auth_host
+
+payload = {
+    "name": outpost.get("name", "authentik Embedded Outpost"),
+    "type": outpost.get("type", "proxy"),
+    "providers": providers,
+    "config": config,
+}
+print(json.dumps(payload))
+AK_OUTPOST_JSON
+}
+
+function authentik_verify_outpost_patch() {
+    local outpost_pk="$1"
+    local provider_pk="$2"
+    local expected_auth_host="$3"
+    local expected_browser_host="$4"
+    local response_file=""
+
+    response_file="$(mktemp)"
+    TEMP_FILES+=("$response_file")
+
+    if ! ak_api GET "/outposts/instances/${outpost_pk}/" > "$response_file" 2>/dev/null; then
+        msg_warn "Could not re-read embedded outpost after patch."
+        return 1
+    fi
+
+    python3 - "$response_file" "$provider_pk" "$expected_auth_host" "$expected_browser_host" <<'AK_VERIFY_OUTPOST'
+import json, sys
+path, provider_pk, expected_auth_host, expected_browser_host = sys.argv[1:5]
+with open(path, "r", encoding="utf-8") as fh:
+    outpost = json.load(fh)
+
+providers = outpost.get("providers") or []
+provider_value = int(provider_pk) if str(provider_pk).isdigit() else provider_pk
+config = outpost.get("config") or {}
+errors = []
+
+if provider_value not in providers:
+    errors.append(f"provider {provider_pk} not attached")
+if config.get("authentik_host") != expected_auth_host:
+    errors.append("authentik_host mismatch or blank")
+if config.get("authentik_host_browser") != (expected_browser_host or expected_auth_host):
+    errors.append("authentik_host_browser mismatch or blank")
+
+if errors:
+    print("; ".join(errors))
+    sys.exit(1)
+
+print("outpost config verified")
+AK_VERIFY_OUTPOST
+}
+
+function restart_authentik_after_outpost_update() {
+    if [ "$AUTHENTIK_OUTPOST_ATTACH_OK" != "yes" ]; then
+        return 0
+    fi
+
+    msg_info "Restarting Authentik to reload embedded outpost config"
+    docker_cmd restart authentik-server authentik-worker >/dev/null
+    clear_transient_line
+    msg_ok "AUTHENTIK RESTARTED AFTER OUTPOST CONFIG UPDATE"
+
+    msg_info "Waiting for Authentik API and embedded outpost to reload"
+    sleep 45
+    clear_transient_line
+    msg_ok "AUTHENTIK OUTPOST RELOAD WAIT COMPLETE"
+}
+
 function create_or_update_authentik_forward_auth_for_deploy() {
     section "AUTHENTIK FORWARD-AUTH SETUP"
 
@@ -2605,7 +2693,10 @@ function create_or_update_authentik_forward_auth_for_deploy() {
     local payload=""
     local response_file=""
     local auth_host_json=""
+    local auth_host_value=""
+    local auth_host_browser_value=""
     local domain_json=""
+    local outpost_response_file=""
 
     response_file="$(mktemp)"
     TEMP_FILES+=("$response_file")
@@ -2622,7 +2713,9 @@ function create_or_update_authentik_forward_auth_for_deploy() {
         return 0
     fi
 
-    auth_host_json="$(printf '%s' "${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}" | json_escape)"
+    auth_host_value="${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}"
+    auth_host_browser_value="${AUTHENTIK_HOST_BROWSER:-$auth_host_value}"
+    auth_host_json="$(printf '%s' "$auth_host_value" | json_escape)"
     domain_json="$(printf '%s' ".${DOMAIN_VALUE}" | json_escape)"
 
     provider_pk="$(authentik_find_proxy_provider_pk)"
@@ -2661,7 +2754,7 @@ JSON
   "name": "Traefik Forward Auth",
   "slug": "traefik-forward-auth",
   "provider": "${provider_pk}",
-  "meta_launch_url": "${AUTHENTIK_HOST:-https://auth.${DOMAIN_VALUE}}"
+  "meta_launch_url": "${auth_host_value}"
 }
 JSON
 )"
@@ -2688,19 +2781,31 @@ JSON
         return 0
     fi
 
-    payload="$(cat <<JSON
-{
-  "providers": [${provider_pk}]
-}
-JSON
-)"
+    outpost_response_file="$(mktemp)"
+    TEMP_FILES+=("$outpost_response_file")
+
+    if ! ak_api GET "/outposts/instances/${outpost_pk}/" > "$outpost_response_file" 2>/dev/null; then
+        AUTHENTIK_OUTPOST_ATTACH_OK="failed-read"
+        msg_warn "Could not read embedded outpost before patching."
+        return 0
+    fi
+
+    payload="$(authentik_build_outpost_patch_payload "$outpost_response_file" "$provider_pk" "$auth_host_value" "$auth_host_browser_value")"
 
     if ak_api PATCH "/outposts/instances/${outpost_pk}/" "$payload" >/dev/null 2>&1; then
-        AUTHENTIK_OUTPOST_ATTACH_OK="yes"
-        msg_ok "PROVIDER ATTACHED TO EXISTING EMBEDDED OUTPOST"
+        if authentik_verify_outpost_patch "$outpost_pk" "$provider_pk" "$auth_host_value" "$auth_host_browser_value" >/dev/null 2>&1; then
+            AUTHENTIK_OUTPOST_ATTACH_OK="yes"
+            msg_ok "PROVIDER AND AUTHENTIK HOST CONFIG ATTACHED TO EXISTING EMBEDDED OUTPOST"
+            detail_line "Outpost" "$outpost_pk"
+            detail_line "authentik_host" "$auth_host_value"
+            detail_line "authentik_host_browser" "$auth_host_browser_value"
+        else
+            AUTHENTIK_OUTPOST_ATTACH_OK="verify-failed"
+            msg_warn "Outpost patch completed but verification failed. Re-check embedded outpost config in Authentik."
+        fi
     else
         AUTHENTIK_OUTPOST_ATTACH_OK="failed"
-        msg_warn "Outpost attach failed. Attach the provider manually in Authentik."
+        msg_warn "Outpost attach/config patch failed. Attach the provider and Authentik host manually in Authentik."
     fi
 }
 
@@ -2784,6 +2889,7 @@ function configure_authentik_and_verify_routes() {
     collect_authentik_api_token_for_deploy
     verify_authentik_api_for_deploy
     create_or_update_authentik_forward_auth_for_deploy
+    restart_authentik_after_outpost_update
     verify_authentik_outpost_route_for_deploy
     verify_selected_protected_routes
 }
