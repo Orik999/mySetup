@@ -25,9 +25,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="6-dockerENVsetup-crea.sh"
-SCRIPT_VERSION="v1.4.6"
+SCRIPT_VERSION="v1.4.7"
 SCRIPT_UPDATED="2026-05-24"
-SCRIPT_BUILD="service-permission-audit-and-redis-data-fix"
+SCRIPT_BUILD="permission-self-heal-and-audit-final"
 
 # --- 2. GLOBAL VARIABLES ---
 # Stores timers, defaults, paths, secret values, state flags and final result values.
@@ -1715,9 +1715,9 @@ function collect_authentik_inputs() {
 
     echo ""
     echo -e "${YW}Choose how Script 6 should set the Authentik bootstrap token.${CL}"
-    echo -e "${YW}For fresh Authentik startup this becomes the akadmin API Access token.${CL}"
-    echo -e "${BL}1) Auto-generate bootstrap/API token ${GN}(recommended/default)${CL}"
-    echo -e "${BL}2) Enter custom bootstrap/API token${CL}"
+    echo -e "${YW}Reminder: the bootstrap token is not an Authentik API token.${CL}"
+    echo -e "${BL}1) Auto-generate bootstrap token ${GN}(recommended/default)${CL}"
+    echo -e "${BL}2) Enter custom bootstrap token${CL}"
     echo ""
 
     while true; do
@@ -1754,8 +1754,7 @@ function collect_authentik_inputs() {
     case "$api_choice" in
         2)
             AUTHENTIK_API_TOKEN_VALUE="$(sensitive_line_input "Paste existing Authentik API token")" || AUTHENTIK_API_TOKEN_VALUE=""
-            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '
-')"
+            AUTHENTIK_API_TOKEN_VALUE="$(printf '%s' "$AUTHENTIK_API_TOKEN_VALUE" | tr -d '\r\n')"
             if [ -n "$AUTHENTIK_API_TOKEN_VALUE" ]; then
                 AUTHENTIK_API_TOKEN_MODE="provided"
                 msg_ok "AUTHENTIK API TOKEN CAPTURED"
@@ -2061,6 +2060,19 @@ function write_env_file() {
 
     msg_info "Creating Docker .env file"
 
+    # Defensive compatibility alias for any legacy/template line that still
+    # references the old DOMAIN variable name. Script 6's collected canonical
+    # value is DOMAIN_VALUE, but set -u turns stale expansion into a hard failure
+    # during heredoc rendering.
+    local DOMAIN="${DOMAIN_VALUE}"
+
+    # Fail with a clear message before the heredoc if any required collected
+    # value is unexpectedly empty/unset. This avoids cryptic set -u messages.
+    : "${DOMAIN_VALUE:?DOMAIN_VALUE is required before writing .env}"
+    : "${DOCKER_DIR:?DOCKER_DIR is required before writing .env}"
+    : "${DOCKER_SECRETS_DIR:?DOCKER_SECRETS_DIR is required before writing .env}"
+    : "${USERDIR:?USERDIR is required before writing .env}"
+
     write_root_file "${DOCKER_DIR}/.env" <<EOF
 # =========================================================
 #  Project: Home-Hosted Social Media SaaS
@@ -2177,12 +2189,71 @@ EOF
 }
 
 
+
+# --- 52A. SERVICE DIRECTORY SELF-HEAL ---
+# Recreates critical service bind-mount directories immediately before permissioning/auditing.
+# This makes Script 6 rerun-safe and prevents optional compatibility paths from failing the audit
+# if an older file set or future compose revision did not create them earlier.
+function ensure_service_permission_directories() {
+    # Core project paths.
+    run_cmd "ensuring Docker appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata"
+    run_cmd "ensuring Docker compose directory exists" mkdir -p "${DOCKER_DIR}/compose"
+    run_cmd "ensuring Docker backups directory exists" mkdir -p "${DOCKER_DIR}/backups"
+    run_cmd "ensuring Docker shared directory exists" mkdir -p "${DOCKER_DIR}/shared"
+    run_cmd "ensuring Docker secrets directory exists" mkdir -p "${DOCKER_SECRETS_DIR}"
+
+    # PostgreSQL paths.
+    run_cmd "ensuring PostgreSQL PG18-compatible data directory exists" mkdir -p "${DOCKER_DIR}/appdata/postgres/pgdata"
+    run_cmd "ensuring PostgreSQL legacy data compatibility directory exists" mkdir -p "${DOCKER_DIR}/appdata/postgres/data"
+    run_cmd "ensuring PostgreSQL init directory exists" mkdir -p "${DOCKER_DIR}/appdata/postgres/init"
+
+    # Redis paths. Active compose normally mounts appdata/redis directly to /data.
+    # The nested data path is prepared as a compatibility guard for future/alternate compose files.
+    run_cmd "ensuring Redis data directory exists" mkdir -p "${DOCKER_DIR}/appdata/redis"
+    run_cmd "ensuring Redis nested data compatibility directory exists" mkdir -p "${DOCKER_DIR}/appdata/redis/data"
+
+    # Authentik paths.
+    run_cmd "ensuring Authentik appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik"
+    run_cmd "ensuring Authentik media directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik/media"
+    run_cmd "ensuring Authentik custom templates directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik/custom-templates"
+    run_cmd "ensuring Authentik certs directory exists" mkdir -p "${DOCKER_DIR}/appdata/authentik/certs"
+
+    # Utility/app paths.
+    run_cmd "ensuring Filebrowser database directory exists" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/database"
+    run_cmd "ensuring Filebrowser config directory exists" mkdir -p "${DOCKER_DIR}/appdata/filebrowser/config"
+    run_cmd "ensuring Postiz uploads directory exists" mkdir -p "${DOCKER_DIR}/appdata/postiz/uploads"
+    run_cmd "ensuring Komodo appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/komodo"
+
+    case "$ADMIN_UI" in
+        dockge)
+            run_cmd "ensuring Dockge appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/dockge"
+            ;;
+        portainer)
+            run_cmd "ensuring Portainer appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/portainer"
+            ;;
+        komodo)
+            run_cmd "ensuring Komodo appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/komodo"
+            ;;
+        dockhand)
+            run_cmd "ensuring Dockhand appdata directory exists" mkdir -p "${DOCKER_DIR}/appdata/dockhand"
+            run_cmd "ensuring Dockhand stacks directory exists" mkdir -p "${DOCKER_DIR}/appdata/dockhand/stacks"
+            ;;
+    esac
+
+    # Traefik paths.
+    run_cmd "ensuring Traefik config directory exists" mkdir -p "${TRAEFIK_DIR}"
+    run_cmd "ensuring Traefik ACME directory exists" mkdir -p "${TRAEFIK_ACME_DIR}"
+    run_cmd "ensuring Traefik ACME storage exists" touch "${TRAEFIK_ACME_DIR}/acme.json"
+}
+
+
 # --- 53. PERMISSIONS ---
 # Applies secure permissions without breaking PostgreSQL init script readability.
 # .env and secret files are treated as high-value secret material.
 function apply_permissions() {
     section "PERMISSIONS"
 
+    ensure_service_permission_directories
     msg_info "Applying service-specific ownership and permissions"
 
     # Base project ownership: keep only top-level project folders user-owned.
@@ -2212,6 +2283,8 @@ function apply_permissions() {
     run_cmd "setting Redis root data ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis"
     run_cmd "setting Redis root data writable permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis"
     run_cmd "setting Redis root data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis"
+    run_cmd "setting Redis nested data directory ownership" chown -R 999:999 "${DOCKER_DIR}/appdata/redis/data"
+    run_cmd "setting Redis nested data directory permissions recursively" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/redis/data"
     run_cmd "setting Redis nested data directory mode" chmod 770 "${DOCKER_DIR}/appdata/redis/data"
 
     # Authentik runs non-root and needs write access to media/templates/certs bind mounts.
@@ -2225,8 +2298,8 @@ function apply_permissions() {
     run_cmd "setting Filebrowser ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/filebrowser"
     run_cmd "setting Filebrowser permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/filebrowser"
 
-    run_cmd "setting Postiz appdata ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
-    run_cmd "setting Postiz appdata permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
+    run_cmd "setting Postiz uploads ownership" chown -R "${PUID_VALUE}:${PGID_VALUE}" "${DOCKER_DIR}/appdata/postiz"
+    run_cmd "setting Postiz uploads permissions" chmod -R u+rwX,g+rwX,o-rwx "${DOCKER_DIR}/appdata/postiz"
 
     case "$ADMIN_UI" in
         dockge)
@@ -2306,6 +2379,10 @@ function assert_user_writable_dir() {
 
 function verify_service_permissions() {
     section "SERVICE PERMISSION AUDIT"
+
+    # Recreate expected directories here as well, so the audit verifies the final desired state,
+    # not whether an optional compatibility folder happened to exist earlier.
+    ensure_service_permission_directories
 
     # PostgreSQL latest/18 path and legacy compatibility path.
     assert_owner_mode "${DOCKER_DIR}/appdata/postgres/pgdata" "999" "999" "700"
