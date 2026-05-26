@@ -4,7 +4,9 @@
 # Notes:
 # - Runtime-only compose. Database/user initialization is handled by Script 8.
 # - UI/editor route is protected by Authentik forward-auth.
-# - Production webhook route is intentionally public for Stripe/external callbacks.
+# - Production /webhook route is intentionally public for Stripe/external callbacks.
+# - /webhook-test is intentionally NOT public by default; it remains behind the Authentik-protected UI router.
+# - n8n image ownership is handled by Script 8 on ${DOCKER_DIR}/appdata/n8n only; compose does not force a user override.
 # - No direct host ports and no router-level certresolver labels; Traefik wildcard TLS owns ACME.
 
 name: n8n
@@ -74,6 +76,7 @@ services:
 
       # Public production webhooks for Stripe/external callbacks.
       # Security must be enforced inside the workflow using Stripe signature/shared-secret validation.
+      # /webhook-test is deliberately excluded here, so test webhooks stay behind the Authentik UI router.
       traefik.http.routers.n8n-webhook.rule: Host(`n8n.${DOMAIN}`) && (Path(`/webhook`) || PathPrefix(`/webhook/`))
       traefik.http.routers.n8n-webhook.entrypoints: https
       traefik.http.routers.n8n-webhook.tls: "true"

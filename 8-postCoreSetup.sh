@@ -27,9 +27,9 @@ CROSS="${RD}✗${CL}"
 BORDER="${BL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}"
 
 SCRIPT_SOURCE="8-postCoreSetup.sh"
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 SCRIPT_UPDATED="2026-05-26"
-SCRIPT_BUILD="n8n-post-core-service-manager"
+SCRIPT_BUILD="n8n-post-core-baseline-hardening"
 
 # --- 2. GLOBAL VARIABLES ---
 T=15
@@ -45,6 +45,8 @@ DOCKER_DIR="${DOCKER_DIR:-/home/${DOCKER_USER}/docker}"
 COMPOSE_DIR="${COMPOSE_DIR:-${DOCKER_DIR}/compose}"
 ENV_FILE="${ENV_FILE:-${DOCKER_DIR}/.env}"
 GITHUB_RAW_BASE="${GITHUB_RAW_BASE:-https://raw.githubusercontent.com/Orik999/mySetup/main/docker}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 
 DOMAIN=""
 ADMIN_UI="unknown"
@@ -61,6 +63,18 @@ N8N_PROJECT="n8n"
 N8N_COMPOSE_FILE=""
 N8N_FLAT_COMPOSE_FILE=""
 N8N_APPDATA_DIR=""
+N8N_BUNDLED_COMPOSE_FILE=""
+N8N_COMPOSE_SOURCE="unknown"
+N8N_ENV_MAY_EDIT="no"
+N8N_ENV_BACKUP_CREATED="no"
+N8N_ENV_BACKUP_PATH=""
+ENV_BACKED_UP_THIS_RUN="no"
+N8N_DB_IDENTIFIER_STATUS="not-checked"
+N8N_SECRET_STATUS_LINES=()
+N8N_APPDATA_OWNER=""
+N8N_MAIN_HEALTH="unknown"
+N8N_WORKER_HEALTH="unknown"
+N8N_ROUTE_WARNING="not-checked"
 
 # n8n state and results.
 N8N_STATE="unknown"
@@ -182,7 +196,7 @@ function run_cmd() {
         if ! "$SUDO_CMD" "$@" > /dev/null 2> "$err_file"; then
             echo ""
             echo -e "${RD}Command failed during:${CL} ${description}"
-            echo -e "${YW}Command:${CL} sudo $*"
+            echo -e "${YW}Command arguments hidden for secret safety.${CL}"
             echo ""
             echo -e "${RD}Real error:${CL}"
             cat "$err_file"
@@ -193,7 +207,7 @@ function run_cmd() {
         if ! "$@" > /dev/null 2> "$err_file"; then
             echo ""
             echo -e "${RD}Command failed during:${CL} ${description}"
-            echo -e "${YW}Command:${CL} $*"
+            echo -e "${YW}Command arguments hidden for secret safety.${CL}"
             echo ""
             echo -e "${RD}Real error:${CL}"
             cat "$err_file"
@@ -475,7 +489,7 @@ function run_docker_cmd() {
     if ! docker_cmd "$@" >/dev/null 2>"$err_file"; then
         echo ""
         echo -e "${RD}Docker command failed during:${CL} ${description}"
-        echo -e "${YW}Command:${CL} docker $*"
+        echo -e "${YW}Docker command arguments hidden for secret safety.${CL}"
         echo ""
         echo -e "${RD}Real error:${CL}"
         cat "$err_file"
@@ -513,6 +527,7 @@ function load_env_file() {
     ENV_FILE="${ENV_FILE:-${DOCKER_DIR}/.env}"
     N8N_STACK_URL="${N8N_STACK_URL_OVERRIDE:-${GITHUB_RAW_BASE}/${N8N_STACK_FILE}}"
     N8N_FLAT_COMPOSE_FILE="${COMPOSE_DIR}/${N8N_STACK_FILE}"
+    N8N_BUNDLED_COMPOSE_FILE="${SCRIPT_DIR}/docker/${N8N_STACK_FILE}"
     N8N_APPDATA_DIR="${DOCKER_DIR}/appdata/n8n"
 
     export DOCKER_DIR COMPOSE_DIR ENV_FILE DOMAIN
@@ -541,13 +556,18 @@ function env_key_exists() {
 
 function backup_env_once() {
     local backup="${ENV_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-    if [ ! -f "${ENV_FILE}.script8-backup-created" ]; then
-        run_cmd "backing up .env before Script 8 edits" cp -a "$ENV_FILE" "$backup"
-        run_cmd "marking Script 8 env backup" touch "${ENV_FILE}.script8-backup-created"
-        run_cmd "setting env backup ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$backup" "${ENV_FILE}.script8-backup-created"
-        msg_ok ".ENV BACKUP CREATED"
-        detail_line "Backup" "$backup"
+
+    if [ "$ENV_BACKED_UP_THIS_RUN" == "yes" ]; then
+        return 0
     fi
+
+    run_cmd "backing up .env before Script 8 edits" cp -a "$ENV_FILE" "$backup"
+    run_cmd "setting env backup ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$backup"
+    ENV_BACKED_UP_THIS_RUN="yes"
+    N8N_ENV_BACKUP_CREATED="yes"
+    N8N_ENV_BACKUP_PATH="$backup"
+    msg_ok ".ENV BACKUP CREATED"
+    detail_line "Backup" "$backup"
 }
 
 function env_set_or_update() {
@@ -555,6 +575,7 @@ function env_set_or_update() {
     local value="$2"
     local tmp=""
     backup_env_once
+    N8N_ENV_MAY_EDIT="yes"
     tmp="$(mktemp)"
     TEMP_FILES+=("$tmp")
 
@@ -581,6 +602,12 @@ function record_generated_secret() {
     local value="$2"
     local mode="$3"
     GENERATED_SECRET_LINES+=("${key}|${value}|${mode}")
+    N8N_SECRET_STATUS_LINES+=("${key}:${mode}")
+}
+
+function record_secret_reused() {
+    local key="$1"
+    N8N_SECRET_STATUS_LINES+=("${key}:existing-reused")
 }
 
 function generate_secret() {
@@ -614,6 +641,7 @@ function ensure_secret_env_value() {
 
     current="$(env_get "$key")"
     if [ -n "$current" ]; then
+        record_secret_reused "$key"
         return 0
     fi
 
@@ -730,12 +758,11 @@ function sync_n8n_compose_for_dockge() {
 
 function download_n8n_compose_if_needed() {
     local mode="$1"
-    local existing=""
-    existing="$(resolve_n8n_compose_file)"
+    determine_n8n_compose_source "$mode"
 
     case "$mode" in
-        deploy|update|recreate)
-            msg_info "Downloading ${N8N_SERVICE_NAME} compose"
+        update)
+            msg_info "Downloading updated ${N8N_SERVICE_NAME} compose"
             run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
             if [ -f "$N8N_FLAT_COMPOSE_FILE" ]; then
                 run_cmd "backing up existing n8n compose" cp -a "$N8N_FLAT_COMPOSE_FILE" "${N8N_FLAT_COMPOSE_FILE}.bak.$(date +%Y%m%d%H%M%S)"
@@ -745,26 +772,43 @@ function download_n8n_compose_if_needed() {
             fi
             run_cmd "setting n8n compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$N8N_FLAT_COMPOSE_FILE"
             run_cmd "setting n8n compose permissions" chmod 640 "$N8N_FLAT_COMPOSE_FILE"
+            N8N_COMPOSE_SOURCE="remote-downloaded"
             sync_n8n_compose_for_dockge
             msg_ok "N8N AUTOMATION COMPOSE DOWNLOADED"
             ;;
-        repair)
-            if [ -f "$existing" ]; then
-                N8N_COMPOSE_FILE="$existing"
-                msg_ok "N8N AUTOMATION COMPOSE ALREADY PRESENT"
-            else
-                msg_info "n8n compose missing; downloading"
-                if ! curl --globoff -fsSL "$N8N_STACK_URL" -o "$N8N_FLAT_COMPOSE_FILE"; then
-                    msg_error "Could not download ${N8N_STACK_FILE} from ${N8N_STACK_URL}."
-                fi
-                run_cmd "setting n8n compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$N8N_FLAT_COMPOSE_FILE"
-                run_cmd "setting n8n compose permissions" chmod 640 "$N8N_FLAT_COMPOSE_FILE"
-                sync_n8n_compose_for_dockge
-                msg_ok "N8N AUTOMATION COMPOSE DOWNLOADED"
-            fi
+        deploy|repair|recreate)
+            case "$N8N_COMPOSE_SOURCE" in
+                existing-runtime)
+                    N8N_COMPOSE_FILE="${N8N_COMPOSE_FILE:-$(resolve_n8n_compose_file)}"
+                    msg_ok "N8N AUTOMATION COMPOSE ALREADY PRESENT"
+                    detail_line "Compose source" "$N8N_COMPOSE_SOURCE"
+                    detail_line "Compose" "$N8N_COMPOSE_FILE"
+                    ;;
+                bundled-local)
+                    msg_info "Installing bundled ${N8N_SERVICE_NAME} compose"
+                    run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
+                    run_cmd "copying bundled n8n compose" cp "$N8N_BUNDLED_COMPOSE_FILE" "$N8N_FLAT_COMPOSE_FILE"
+                    run_cmd "setting n8n compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$N8N_FLAT_COMPOSE_FILE"
+                    run_cmd "setting n8n compose permissions" chmod 640 "$N8N_FLAT_COMPOSE_FILE"
+                    sync_n8n_compose_for_dockge
+                    msg_ok "BUNDLED N8N AUTOMATION COMPOSE INSTALLED"
+                    ;;
+                remote-missing-local)
+                    msg_info "n8n compose missing locally; downloading"
+                    run_cmd "creating compose directory" mkdir -p "$COMPOSE_DIR"
+                    if ! curl --globoff -fsSL "$N8N_STACK_URL" -o "$N8N_FLAT_COMPOSE_FILE"; then
+                        msg_error "Could not download ${N8N_STACK_FILE} from ${N8N_STACK_URL}."
+                    fi
+                    run_cmd "setting n8n compose ownership" chown "${DOCKER_USER}:${DOCKER_USER}" "$N8N_FLAT_COMPOSE_FILE"
+                    run_cmd "setting n8n compose permissions" chmod 640 "$N8N_FLAT_COMPOSE_FILE"
+                    N8N_COMPOSE_SOURCE="remote-downloaded"
+                    sync_n8n_compose_for_dockge
+                    msg_ok "N8N AUTOMATION COMPOSE DOWNLOADED"
+                    ;;
+            esac
             ;;
         *)
-            N8N_COMPOSE_FILE="$existing"
+            N8N_COMPOSE_FILE="$(resolve_n8n_compose_file)"
             ;;
     esac
 }
@@ -772,6 +816,149 @@ function download_n8n_compose_if_needed() {
 # =========================================================
 #  N8N MODULE: DETECT / PROMPT / PREPARE / DEPLOY / VERIFY
 # =========================================================
+
+function is_valid_pg_identifier() {
+    local ident="$1"
+    # Conservative PostgreSQL identifier policy for .env-managed database/user names.
+    # Keeps SQL idempotent and prevents unsafe interpolation from edited/restored .env files.
+    [[ "$ident" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]
+}
+
+function require_valid_pg_identifier() {
+    local key="$1"
+    local ident="$2"
+    if ! is_valid_pg_identifier "$ident"; then
+        msg_error "${key} must be a safe PostgreSQL identifier: letters, numbers, underscores, max 63 chars, starting with letter/underscore."
+    fi
+}
+
+function n8n_secret_status_for() {
+    local key="$1"
+    local line=""
+    for line in "${N8N_SECRET_STATUS_LINES[@]:-}"; do
+        case "$line" in
+            "${key}:"*) printf '%s' "${line#*:}"; return 0 ;;
+        esac
+    done
+    if [ -n "$(env_get "$key")" ]; then
+        printf '%s' "existing-reused"
+    else
+        printf '%s' "missing"
+    fi
+}
+
+function n8n_container_health_state() {
+    local name="$1"
+    local health=""
+    health="$(docker_cmd inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$name" 2>/dev/null || true)"
+    printf '%s' "${health:-unknown}"
+}
+
+function n8n_redis_ping_readonly() {
+    local redis_db="${N8N_REDIS_DB:-$(env_get N8N_REDIS_DB)}"
+    redis_db="${redis_db:-2}"
+    [ -n "${REDIS_PASSWORD:-}" ] || return 1
+    docker_cmd exec -e REDISCLI_AUTH="$REDIS_PASSWORD" redis redis-cli -n "$redis_db" ping 2>/dev/null | grep -q PONG
+}
+
+function n8n_db_login_readonly() {
+    local db="${N8N_POSTGRES_DB:-$(env_get N8N_POSTGRES_DB)}"
+    local user="${N8N_POSTGRES_USER:-$(env_get N8N_POSTGRES_USER)}"
+    local password="${N8N_POSTGRES_PASSWORD:-$(env_get N8N_POSTGRES_PASSWORD)}"
+    db="${db:-n8n}"
+    user="${user:-n8n}"
+    [ -n "$password" ] || return 1
+    is_valid_pg_identifier "$db" || return 1
+    is_valid_pg_identifier "$user" || return 1
+    docker_cmd exec -i -e PGPASSWORD="$password" postgres psql -U "$user" -d "$db" -v ON_ERROR_STOP=1 -c 'SELECT 1;' >/dev/null 2>&1
+}
+
+function determine_n8n_compose_source() {
+    local mode="$1"
+    local existing=""
+    local dockge_path=""
+    dockge_path="$(n8n_dockge_compose_file)"
+
+    if [ "$ADMIN_UI" == "dockge" ] && [ -f "$dockge_path" ]; then
+        existing="$dockge_path"
+    elif [ -f "$N8N_FLAT_COMPOSE_FILE" ]; then
+        existing="$N8N_FLAT_COMPOSE_FILE"
+    else
+        existing=""
+    fi
+
+    case "$mode" in
+        update)
+            N8N_COMPOSE_SOURCE="remote-update"
+            N8N_COMPOSE_FILE="${existing:-$(resolve_n8n_compose_file)}"
+            ;;
+        deploy|repair|recreate|detect)
+            if [ -n "$existing" ]; then
+                N8N_COMPOSE_SOURCE="existing-runtime"
+                N8N_COMPOSE_FILE="$existing"
+            elif [ -f "$N8N_BUNDLED_COMPOSE_FILE" ]; then
+                N8N_COMPOSE_SOURCE="bundled-local"
+                N8N_COMPOSE_FILE="$N8N_FLAT_COMPOSE_FILE"
+            else
+                N8N_COMPOSE_SOURCE="remote-missing-local"
+                N8N_COMPOSE_FILE="$N8N_FLAT_COMPOSE_FILE"
+            fi
+            ;;
+        *)
+            N8N_COMPOSE_SOURCE="not-needed"
+            N8N_COMPOSE_FILE="$(resolve_n8n_compose_file)"
+            ;;
+    esac
+}
+
+function show_n8n_ready_to_apply() {
+    section "READY TO APPLY - N8N AUTOMATION"
+
+    local db="${N8N_POSTGRES_DB:-$(env_get N8N_POSTGRES_DB)}"
+    local user="${N8N_POSTGRES_USER:-$(env_get N8N_POSTGRES_USER)}"
+    local redis_db="${N8N_REDIS_DB:-$(env_get N8N_REDIS_DB)}"
+    db="${db:-n8n}"
+    user="${user:-n8n}"
+    redis_db="${redis_db:-2}"
+    require_valid_pg_identifier "N8N_POSTGRES_DB" "$db"
+    require_valid_pg_identifier "N8N_POSTGRES_USER" "$user"
+    N8N_DB_IDENTIFIER_STATUS="valid-planned"
+
+    detail_line "Service" "$N8N_SERVICE_NAME"
+    detail_line "Selected action" "$N8N_ACTION"
+    detail_line ".env path" "$ENV_FILE"
+    detail_line ".env may be edited" "yes, only missing n8n keys/secrets"
+    detail_line ".env backup" "once before first edit in this run"
+    detail_line "n8n appdata" "$N8N_APPDATA_DIR"
+    detail_line "Permission scope" "${N8N_APPDATA_DIR} only"
+    detail_line "PostgreSQL database" "$db"
+    detail_line "PostgreSQL user" "$user"
+    detail_line "Redis DB" "$redis_db"
+    detail_line "Compose source" "$N8N_COMPOSE_SOURCE"
+    detail_line "Compose target" "${N8N_COMPOSE_FILE:-$(resolve_n8n_compose_file)}"
+    if [ "$ADMIN_UI" == "dockge" ]; then
+        detail_line "Dockge compose target" "$(n8n_dockge_compose_file)"
+    fi
+    detail_line "Affected containers" "n8n, n8n-worker"
+    detail_line "Route" "https://n8n.${DOMAIN}/"
+    detail_line "UI protection" "Authentik via chain-authentik@file"
+    detail_line "Public production webhook" "https://n8n.${DOMAIN}/webhook/..."
+    detail_line "webhook-test" "not public by default; remains behind Authentik UI route"
+
+    echo ""
+    echo -e "${YW}No Scripts 1-7 core infrastructure will be changed.${CL}"
+    echo -e "${YW}No n8n data reset, database drop, appdata delete, or encryption-key regeneration will be performed.${CL}"
+    echo ""
+
+    local apply_yn=""
+    apply_yn="$(timed_yes_no "Apply this ${N8N_SERVICE_NAME} plan?" "y")"
+    if [[ "$apply_yn" =~ ^[Nn] ]]; then
+        N8N_ACTION="skip"
+        msg_skip "N8N AUTOMATION PLAN CANCELLED; EXISTING SETUP LEFT UNTOUCHED"
+        return 1
+    fi
+    return 0
+}
 
 function prepare_n8n_env_values() {
     section "N8N AUTOMATION ENVIRONMENT"
@@ -803,15 +990,22 @@ function prepare_n8n_env_values() {
 function prepare_n8n_appdata() {
     section "N8N AUTOMATION DIRECTORIES"
 
+    local owner_uid="${N8N_APPDATA_UID:-1000}"
+    local owner_gid="${N8N_APPDATA_GID:-1000}"
+    N8N_APPDATA_OWNER="${owner_uid}:${owner_gid}"
+
     # Service-scoped permissions only. Never blanket chown/chmod ${DOCKER_DIR}/appdata.
+    # The official n8n image stores data under /home/node/.n8n and is expected to run as node (UID/GID 1000).
+    # Optional N8N_APPDATA_UID/N8N_APPDATA_GID may override this without changing the compose user model.
     run_cmd "creating n8n appdata directory" mkdir -p "$N8N_APPDATA_DIR" "${N8N_APPDATA_DIR}/files" "${N8N_APPDATA_DIR}/backups"
-    run_cmd "setting n8n appdata ownership" chown -R "${DOCKER_USER}:${DOCKER_USER}" "$N8N_APPDATA_DIR"
+    run_cmd "setting n8n appdata ownership" chown -R "$N8N_APPDATA_OWNER" "$N8N_APPDATA_DIR"
     run_cmd "setting n8n appdata permissions" chmod 750 "$N8N_APPDATA_DIR"
     run_cmd "setting n8n child directory permissions" chmod 750 "${N8N_APPDATA_DIR}/files" "${N8N_APPDATA_DIR}/backups"
 
     N8N_APPDATA_READY="yes"
     msg_ok "N8N AUTOMATION DIRECTORIES READY"
     detail_line "n8n appdata" "$N8N_APPDATA_DIR"
+    detail_line "n8n appdata owner" "$N8N_APPDATA_OWNER"
 }
 
 function postgres_exec_sql() {
@@ -830,6 +1024,9 @@ function ensure_n8n_database() {
 
     [ -n "$password" ] || msg_error "N8N_POSTGRES_PASSWORD is empty after environment preparation."
     [ -n "${POSTGRES_PASSWORD:-}" ] || msg_error "POSTGRES_PASSWORD is missing from ${ENV_FILE}."
+    require_valid_pg_identifier "N8N_POSTGRES_DB" "$db"
+    require_valid_pg_identifier "N8N_POSTGRES_USER" "$user"
+    N8N_DB_IDENTIFIER_STATUS="valid"
 
     escaped_password="${password//\'/\'\'}"
 
@@ -837,14 +1034,14 @@ function ensure_n8n_database() {
     sql="DO \$\$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${user}') THEN
-        EXECUTE 'CREATE ROLE ${user} LOGIN PASSWORD ''' || '${escaped_password}' || '''';
+        EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${user}', '${escaped_password}');
     ELSE
-        EXECUTE 'ALTER ROLE ${user} WITH LOGIN PASSWORD ''' || '${escaped_password}' || '''';
+        EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${user}', '${escaped_password}');
     END IF;
 END
 \$\$;
-SELECT 'CREATE DATABASE ${db} OWNER ${user}' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${db}')\\gexec
-GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${user};"
+SELECT format('CREATE DATABASE %I OWNER %I', '${db}', '${user}') WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${db}')\\gexec
+SELECT format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', '${db}', '${user}')\\gexec"
 
     if postgres_exec_sql "$sql" >/dev/null 2>&1; then
         msg_ok "N8N POSTGRESQL DATABASE READY"
@@ -853,7 +1050,7 @@ GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${user};"
     fi
 
     msg_info "Verifying n8n PostgreSQL login"
-    if docker_cmd exec -i -e PGPASSWORD="$password" postgres psql -U "$user" -d "$db" -c 'SELECT 1;' >/dev/null 2>&1; then
+    if docker_cmd exec -i -e PGPASSWORD="$password" postgres psql -U "$user" -d "$db" -v ON_ERROR_STOP=1 -c 'SELECT 1;' >/dev/null 2>&1; then
         N8N_DB_READY="yes"
         msg_ok "N8N POSTGRESQL LOGIN VERIFIED"
     else
@@ -992,14 +1189,12 @@ function verify_n8n_stack() {
 
     verify_redis_for_n8n
     # Database login was already checked during deploy/repair. Re-check read-only here.
-    if [ -n "${N8N_POSTGRES_PASSWORD:-}" ]; then
-        if docker_cmd exec -i -e PGPASSWORD="$N8N_POSTGRES_PASSWORD" postgres psql -U "${N8N_POSTGRES_USER:-n8n}" -d "${N8N_POSTGRES_DB:-n8n}" -c 'SELECT 1;' >/dev/null 2>&1; then
-            N8N_DB_READY="yes"
-            msg_ok "N8N DATABASE LOGIN STILL WORKS"
-        else
-            N8N_DB_READY="no"
-            msg_warn "n8n database login check failed"
-        fi
+    if n8n_db_login_readonly; then
+        N8N_DB_READY="yes"
+        msg_ok "N8N DATABASE LOGIN STILL WORKS"
+    else
+        N8N_DB_READY="no"
+        msg_warn "n8n database login check failed"
     fi
 
     verify_n8n_routes
@@ -1022,8 +1217,11 @@ function detect_n8n_state() {
     local main_exists="no"
     local main_running="no"
     local worker_running="no"
+    local db_readonly="no"
+    local redis_readonly="no"
     local compose_path=""
 
+    determine_n8n_compose_source "detect"
     compose_path="$(resolve_n8n_compose_file)"
     [ -f "$compose_path" ] && compose_exists="yes"
     [ -d "$N8N_APPDATA_DIR" ] && appdata_exists="yes"
@@ -1032,15 +1230,37 @@ function detect_n8n_state() {
     docker_cmd ps --format '{{.Names}}' | grep -qx 'n8n' && main_running="yes"
     docker_cmd ps --format '{{.Names}}' | grep -qx 'n8n-worker' && worker_running="yes"
 
+    if [ "$main_running" == "yes" ]; then
+        N8N_MAIN_HEALTH="$(n8n_container_health_state n8n)"
+    else
+        N8N_MAIN_HEALTH="not-running"
+    fi
+    if [ "$worker_running" == "yes" ]; then
+        N8N_WORKER_HEALTH="$(n8n_container_health_state n8n-worker)"
+    else
+        N8N_WORKER_HEALTH="not-running"
+    fi
+
+    if [ "$env_ok" == "yes" ] && n8n_db_login_readonly; then db_readonly="yes"; fi
+    if [ "$env_ok" == "yes" ] && n8n_redis_ping_readonly; then redis_readonly="yes"; fi
+
     detail_line "Compose file" "${compose_exists} (${compose_path})"
+    detail_line "Compose source" "$N8N_COMPOSE_SOURCE"
     detail_line "Appdata" "$appdata_exists"
     detail_line "Secrets present" "$env_ok"
     detail_line "n8n container exists" "$main_exists"
     detail_line "n8n running" "$main_running"
+    detail_line "n8n health" "$N8N_MAIN_HEALTH"
     detail_line "n8n worker running" "$worker_running"
+    detail_line "n8n worker health" "$N8N_WORKER_HEALTH"
+    detail_line "DB login read-only check" "$db_readonly"
+    detail_line "Redis read-only check" "$redis_readonly"
+    detail_line "Route check" "not used for healthy detection; checked during verification only"
 
-    if [ "$compose_exists" == "yes" ] && [ "$appdata_exists" == "yes" ] && [ "$env_ok" == "yes" ] && [ "$main_running" == "yes" ] && [ "$worker_running" == "yes" ]; then
+    if [ "$compose_exists" == "yes" ]         && [ "$appdata_exists" == "yes" ]         && [ "$env_ok" == "yes" ]         && [ "$main_running" == "yes" ]         && [ "$worker_running" == "yes" ]         && [[ "$N8N_MAIN_HEALTH" != "unhealthy" ]]         && [[ "$N8N_WORKER_HEALTH" != "unhealthy" ]]         && [ "$db_readonly" == "yes" ]         && [ "$redis_readonly" == "yes" ]; then
         N8N_STATE="installed-appears-healthy"
+        N8N_DB_READY="yes"
+        N8N_REDIS_READY="yes"
     elif [ "$main_exists" == "yes" ] || [ "$compose_exists" == "yes" ] || [ "$appdata_exists" == "yes" ]; then
         N8N_STATE="installed-needs-review"
     else
@@ -1116,6 +1336,12 @@ function run_n8n_module() {
         return 0
     fi
 
+    determine_n8n_compose_source "$N8N_ACTION"
+    if ! show_n8n_ready_to_apply; then
+        SUMMARY_LINES+=("${N8N_SERVICE_NAME}|skipped|plan cancelled before changes")
+        return 0
+    fi
+
     prepare_n8n_env_values
     prepare_n8n_appdata
     ensure_n8n_database
@@ -1175,6 +1401,12 @@ n8n Automation:
 State: $N8N_STATE
 Action: $N8N_ACTION
 Touched: $N8N_TOUCHED
+Compose source: $N8N_COMPOSE_SOURCE
+Env backup created this run: $N8N_ENV_BACKUP_CREATED
+Env backup path: ${N8N_ENV_BACKUP_PATH:-none}
+N8N_POSTGRES_PASSWORD status: $(n8n_secret_status_for N8N_POSTGRES_PASSWORD)
+N8N_ENCRYPTION_KEY status: $(n8n_secret_status_for N8N_ENCRYPTION_KEY)
+PostgreSQL identifier status: $N8N_DB_IDENTIFIER_STATUS
 Env ready: $N8N_ENV_READY
 Appdata ready: $N8N_APPDATA_READY
 DB ready: $N8N_DB_READY
@@ -1188,6 +1420,10 @@ Webhook route OK: $N8N_WEBHOOK_ROUTE_OK
 Verified: $N8N_VERIFIED
 Compose file: ${N8N_COMPOSE_FILE:-$(resolve_n8n_compose_file)}
 Appdata: $N8N_APPDATA_DIR
+Appdata owner: ${N8N_APPDATA_OWNER:-not-set}
+Main health: $N8N_MAIN_HEALTH
+Worker health: $N8N_WORKER_HEALTH
+Route warning: $N8N_ROUTE_WARNING
 EOF_REPORT
     else
         cat > "$VERIFY_LOG" <<EOF_REPORT
@@ -1203,6 +1439,12 @@ n8n Automation:
 State: $N8N_STATE
 Action: $N8N_ACTION
 Touched: $N8N_TOUCHED
+Compose source: $N8N_COMPOSE_SOURCE
+Env backup created this run: $N8N_ENV_BACKUP_CREATED
+Env backup path: ${N8N_ENV_BACKUP_PATH:-none}
+N8N_POSTGRES_PASSWORD status: $(n8n_secret_status_for N8N_POSTGRES_PASSWORD)
+N8N_ENCRYPTION_KEY status: $(n8n_secret_status_for N8N_ENCRYPTION_KEY)
+PostgreSQL identifier status: $N8N_DB_IDENTIFIER_STATUS
 Env ready: $N8N_ENV_READY
 Appdata ready: $N8N_APPDATA_READY
 DB ready: $N8N_DB_READY
@@ -1216,6 +1458,10 @@ Webhook route OK: $N8N_WEBHOOK_ROUTE_OK
 Verified: $N8N_VERIFIED
 Compose file: ${N8N_COMPOSE_FILE:-$(resolve_n8n_compose_file)}
 Appdata: $N8N_APPDATA_DIR
+Appdata owner: ${N8N_APPDATA_OWNER:-not-set}
+Main health: $N8N_MAIN_HEALTH
+Worker health: $N8N_WORKER_HEALTH
+Route warning: $N8N_ROUTE_WARNING
 EOF_REPORT
     fi
 
@@ -1284,6 +1530,8 @@ function show_final_summary() {
     detail_line "N8N ACTION" "$N8N_ACTION"
     detail_line "N8N TOUCHED" "$N8N_TOUCHED"
     detail_line "N8N VERIFIED" "$N8N_VERIFIED"
+    detail_line "N8N COMPOSE SOURCE" "$N8N_COMPOSE_SOURCE"
+    detail_line "ENV BACKUP THIS RUN" "$N8N_ENV_BACKUP_CREATED"
     detail_line "N8N UI ROUTE" "$N8N_UI_ROUTE_OK"
     detail_line "N8N WEBHOOK ROUTE" "$N8N_WEBHOOK_ROUTE_OK"
     detail_line "VERIFY LOG" "$VERIFY_LOG"
