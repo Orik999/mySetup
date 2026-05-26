@@ -1,0 +1,107 @@
+# 13-n8n-compose.yml
+# Project: n8n Automation
+# Purpose: Post-core automation engine for Project Crea.
+# Notes:
+# - Runtime-only compose. Database/user initialization is handled by Script 8.
+# - UI/editor route is protected by Authentik forward-auth.
+# - Production webhook route is intentionally public for Stripe/external callbacks.
+# - No direct host ports and no router-level certresolver labels; Traefik wildcard TLS owns ACME.
+
+name: n8n
+
+x-n8n-common: &n8n-common
+  env_file:
+    - ${DOCKER_DIR}/.env
+  image: ${N8N_IMAGE:-docker.n8n.io/n8nio/n8n:latest}
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  networks:
+    - t2_proxy
+    - database
+  volumes:
+    - ${DOCKER_DIR}/appdata/n8n:/home/node/.n8n
+    - /etc/localtime:/etc/localtime:ro
+  environment:
+    TZ: ${TZ}
+    GENERIC_TIMEZONE: ${TZ}
+
+    N8N_HOST: ${N8N_HOST:-n8n.${DOMAIN}}
+    N8N_PORT: 5678
+    N8N_PROTOCOL: https
+    N8N_EDITOR_BASE_URL: ${N8N_URL:-https://n8n.${DOMAIN}}
+    WEBHOOK_URL: ${N8N_WEBHOOK_URL:-https://n8n.${DOMAIN}/}
+    N8N_PROXY_HOPS: 1
+    N8N_SECURE_COOKIE: "true"
+
+    N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+    N8N_DIAGNOSTICS_ENABLED: "false"
+    N8N_PERSONALIZATION_ENABLED: "false"
+    N8N_VERSION_NOTIFICATIONS_ENABLED: "true"
+    N8N_TEMPLATES_ENABLED: "true"
+    N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
+
+    DB_TYPE: postgresdb
+    DB_POSTGRESDB_HOST: postgres
+    DB_POSTGRESDB_PORT: 5432
+    DB_POSTGRESDB_DATABASE: ${N8N_POSTGRES_DB:-n8n}
+    DB_POSTGRESDB_USER: ${N8N_POSTGRES_USER:-n8n}
+    DB_POSTGRESDB_PASSWORD: ${N8N_POSTGRES_PASSWORD}
+
+    EXECUTIONS_MODE: ${N8N_EXECUTIONS_MODE:-queue}
+    QUEUE_BULL_REDIS_HOST: redis
+    QUEUE_BULL_REDIS_PORT: 6379
+    QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+    QUEUE_BULL_REDIS_DB: ${N8N_REDIS_DB:-2}
+
+services:
+  n8n:
+    <<: *n8n-common
+    container_name: n8n
+    command: start
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "require('http').get('http://127.0.0.1:5678/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: t2_proxy
+
+      # Public production webhooks for Stripe/external callbacks.
+      # Security must be enforced inside the workflow using Stripe signature/shared-secret validation.
+      traefik.http.routers.n8n-webhook.rule: Host(`n8n.${DOMAIN}`) && (Path(`/webhook`) || PathPrefix(`/webhook/`))
+      traefik.http.routers.n8n-webhook.entrypoints: https
+      traefik.http.routers.n8n-webhook.tls: "true"
+      traefik.http.routers.n8n-webhook.priority: 200
+      traefik.http.routers.n8n-webhook.service: n8n
+
+      # n8n UI/editor. Protected by Authentik forward-auth.
+      traefik.http.routers.n8n-ui.rule: Host(`n8n.${DOMAIN}`)
+      traefik.http.routers.n8n-ui.entrypoints: https
+      traefik.http.routers.n8n-ui.tls: "true"
+      traefik.http.routers.n8n-ui.priority: 100
+      traefik.http.routers.n8n-ui.middlewares: chain-authentik@file
+      traefik.http.routers.n8n-ui.service: n8n
+
+      traefik.http.services.n8n.loadbalancer.server.port: 5678
+
+  n8n-worker:
+    <<: *n8n-common
+    container_name: n8n-worker
+    command: worker --concurrency=${N8N_WORKER_CONCURRENCY:-5}
+    depends_on:
+      - n8n
+
+networks:
+  t2_proxy:
+    name: t2_proxy
+    external: true
+
+  database:
+    name: database
+    external: true
