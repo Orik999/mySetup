@@ -1,0 +1,21 @@
+services:
+  crea-landing:
+    image: nginx:alpine
+    container_name: crea-landing
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_DIR}/appdata/landing:/usr/share/nginx/html:ro
+    networks:
+      - t2_proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=t2_proxy"
+      - "traefik.http.routers.crea-landing.rule=Host(`www.${DOMAIN}`) || Host(`${DOMAIN}`)"
+      - "traefik.http.routers.crea-landing.entrypoints=https"
+      - "traefik.http.routers.crea-landing.tls=true"
+      - "traefik.http.routers.crea-landing.middlewares=chain-secure@file"
+      - "traefik.http.services.crea-landing.loadbalancer.server.port=80"
+
+networks:
+  t2_proxy:
+    external: true
