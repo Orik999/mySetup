@@ -1093,7 +1093,6 @@ function start_confirmation() {
 
     return 0
 
-    return 0
 }
 
 # --- 46. USER VM CONFIGURATION INPUTS ---
@@ -1436,8 +1435,6 @@ function final_apply_confirmation() {
     if [[ "$apply_yn" =~ ^[Nn] ]]; then
         exit 0
     fi
-
-    return 0
 
     return 0
 }
